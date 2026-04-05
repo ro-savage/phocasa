@@ -62,42 +62,43 @@ final class MetadataService: @unchecked Sendable {
 
     private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
-        let uti = CGImageSourceGetType(source)
+        let uti = CGImageSourceGetType(source) ?? (kUTTypeJPEG as CFString)
 
-        guard let destination = CGImageDestinationCreateWithURL(
-            url as CFURL,
-            uti ?? kUTTypeJPEG as CFString,
-            CGImageSourceGetCount(source),
-            nil
-        ) else { return }
+        // Use CGImageDestinationCopyImageSource for lossless metadata-only write
+        // (patches metadata in-place without re-encoding image data)
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, uti, 0, nil) else { return }
 
-        // Build metadata to write
-        var metadata: [String: Any] = [:]
+        let metadata = CGImageMetadataCreateMutable()
 
-        // Copy existing properties
-        if let existingProps = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] {
-            metadata = existingProps
+        // Keywords as dc:subject (ImageIO syncs to IPTC Keywords automatically)
+        if let tag = CGImageMetadataTagCreate(
+            "http://purl.org/dc/elements/1.1/" as CFString,
+            "dc" as CFString,
+            "subject" as CFString,
+            .arrayUnordered,
+            keywords as CFTypeRef
+        ) {
+            CGImageMetadataSetTagWithPath(metadata, nil, "dc:subject" as CFString, tag)
         }
 
-        // Set IPTC keywords
-        var iptc = metadata[kCGImagePropertyIPTCDictionary as String] as? [String: Any] ?? [:]
-        iptc[kCGImagePropertyIPTCKeywords as String] = keywords
-        metadata[kCGImagePropertyIPTCDictionary as String] = iptc
-
-        // Set rating in TIFF dictionary
-        var tiff = metadata[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
-        tiff["Rating"] = rating
-        metadata[kCGImagePropertyTIFFDictionary as String] = tiff
-
-        for i in 0..<CGImageSourceGetCount(source) {
-            if i == 0 {
-                CGImageDestinationAddImageFromSource(destination, source, i, metadata as CFDictionary)
-            } else {
-                CGImageDestinationAddImageFromSource(destination, source, i, nil)
-            }
+        // Rating as xmp:Rating (syncs to TIFF Rating)
+        if let tag = CGImageMetadataTagCreate(
+            "http://ns.adobe.com/xap/1.0/" as CFString,
+            "xmp" as CFString,
+            "Rating" as CFString,
+            .default,
+            "\(rating)" as CFTypeRef
+        ) {
+            CGImageMetadataSetTagWithPath(metadata, nil, "xmp:Rating" as CFString, tag)
         }
 
-        CGImageDestinationFinalize(destination)
+        let options: [CFString: Any] = [
+            kCGImageDestinationMetadata: metadata,
+            kCGImageDestinationMergeMetadata: true
+        ]
+
+        var error: Unmanaged<CFError>?
+        CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, &error)
     }
 
     func writeSidecar(rating: Int, keywords: [String], for imageURL: URL) {

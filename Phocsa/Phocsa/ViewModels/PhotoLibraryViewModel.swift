@@ -211,14 +211,16 @@ final class PhotoLibraryViewModel {
 
     func setRatingForSelection(_ rating: Int) {
         guard let context = modelContext else { return }
+        var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
         for id in selectedPhotos {
             if let photo = photos.first(where: { $0.id == id }) {
                 photo.rating = rating
-                let keywords = photo.tags.map(\.fullName)
-                metadata.writeMetadata(rating: rating, keywords: keywords, toImageAt: photo.displayPath)
+                writeBackItems.append((rating, photo.tags.map(\.fullName), photo.displayPath))
             }
         }
         try? context.save()
+
+        writeMetadataInBackground(writeBackItems)
     }
 
     // MARK: - Selection
@@ -372,17 +374,19 @@ final class PhotoLibraryViewModel {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
 
+        var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
         for id in selectedPhotos {
             if let photo = photos.first(where: { $0.id == id }) {
                 if !photo.tags.contains(where: { $0.id == tag.id }) {
                     photo.tags.append(tag)
-                    let keywords = photo.tags.map(\.fullName)
-                    metadata.writeMetadata(rating: photo.rating, keywords: keywords, toImageAt: photo.displayPath)
+                    writeBackItems.append((photo.rating, photo.tags.map(\.fullName), photo.displayPath))
                 }
             }
         }
         try? context.save()
-        loadExistingData()
+        refreshTagLists(newTag: tag)
+
+        writeMetadataInBackground(writeBackItems)
     }
 
     func removeTag(_ tag: Tag, from photo: PhotoAsset) {
@@ -401,13 +405,13 @@ final class PhotoLibraryViewModel {
 
             if allHave {
                 guard let context = modelContext else { return }
+                var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
                 for p in selectedPhotoList {
                     p.tags.removeAll { $0.id == tag.id }
-                    let keywords = p.tags.map(\.fullName)
-                    metadata.writeMetadata(rating: p.rating, keywords: keywords, toImageAt: p.displayPath)
+                    writeBackItems.append((p.rating, p.tags.map(\.fullName), p.displayPath))
                 }
                 try? context.save()
-                loadExistingData()
+                writeMetadataInBackground(writeBackItems)
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
             }
@@ -595,6 +599,30 @@ final class PhotoLibraryViewModel {
             setRating(rating, for: photo)
         } else if !selectedPhotos.isEmpty {
             setRatingForSelection(rating)
+        }
+    }
+
+    // MARK: - Lightweight Tag Refresh
+
+    private func refreshTagLists(newTag: Tag) {
+        if !allTags.contains(where: { $0.id == newTag.id }) {
+            allTags.append(newTag)
+            allTags.sort { ($0.category, $0.name) < ($1.category, $1.name) }
+        }
+        if !newTag.category.isEmpty && !tagCategories.contains(newTag.category) {
+            tagCategories.append(newTag.category)
+        }
+    }
+
+    // MARK: - Background Metadata Write-back
+
+    private func writeMetadataInBackground(_ items: [(rating: Int, keywords: [String], path: String)]) {
+        guard !items.isEmpty else { return }
+        let metadata = self.metadata
+        Task.detached {
+            for item in items {
+                metadata.writeMetadata(rating: item.rating, keywords: item.keywords, toImageAt: item.path)
+            }
         }
     }
 
