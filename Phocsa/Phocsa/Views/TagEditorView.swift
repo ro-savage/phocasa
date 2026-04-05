@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct TagEditorView: View {
+    @Environment(\.dismiss) private var dismiss
     @Bindable var viewModel: PhotoLibraryViewModel
     let photo: PhotoAsset?
 
@@ -24,10 +25,21 @@ struct TagEditorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(isMultiSelection ? "Tags (\(viewModel.selectedPhotos.count) photos)" : "Tags")
-                .font(.headline)
-                .padding(.horizontal)
-                .padding(.top, 12)
+            HStack {
+                Text(isMultiSelection ? "Tags (\(viewModel.selectedPhotos.count) photos)" : "Tags")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.title3)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal)
+            .padding(.top, 12)
 
             // Current tags on this photo
             if let photo, !photo.tags.isEmpty {
@@ -35,7 +47,7 @@ struct TagEditorView: View {
                     HStack(spacing: 6) {
                         ForEach(photo.tags, id: \.id) { tag in
                             HStack(spacing: 4) {
-                                Text("\(tag.category):\(tag.name)")
+                                Text(tag.fullName)
                                     .font(.caption)
                                 Button(action: {
                                     viewModel.removeTag(tag, from: photo)
@@ -71,9 +83,11 @@ struct TagEditorView: View {
                             VStack(alignment: .leading) {
                                 Text(tag.name)
                                     .font(.body)
-                                Text(tag.category)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                if !tag.category.isEmpty {
+                                    Text(tag.category)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
 
                             Spacer()
@@ -98,9 +112,9 @@ struct TagEditorView: View {
                     .foregroundStyle(.secondary)
 
                 HStack {
-                    TextField("Category", text: $newTagCategory)
+                    TextField("Category (optional)", text: $newTagCategory)
                         .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 100)
+                        .frame(maxWidth: 120)
 
                     TextField("Name", text: $newTagName)
                         .textFieldStyle(.roundedBorder)
@@ -108,11 +122,14 @@ struct TagEditorView: View {
                     Button("Add") {
                         addNewTag()
                     }
-                    .disabled(newTagName.isEmpty || newTagCategory.isEmpty)
+                    .disabled(newTagName.isEmpty)
                 }
             }
             .padding(.horizontal)
             .padding(.bottom, 12)
+        }
+        .onExitCommand {
+            dismiss()
         }
     }
 
@@ -131,7 +148,7 @@ struct TagEditorView: View {
     private func addNewTag() {
         let name = newTagName.trimmingCharacters(in: .whitespaces)
         let category = newTagCategory.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !name.isEmpty, !category.isEmpty else { return }
+        guard !name.isEmpty else { return }
 
         if isMultiSelection {
             viewModel.addTagToSelection(name: name, category: category)

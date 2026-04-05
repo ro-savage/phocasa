@@ -22,7 +22,7 @@ final class PhotoLibraryViewModel {
     var scanProgress: String = ""
     var selectedDetailPhoto: PhotoAsset?
     var showingDetail: Bool = false
-    var currentFilter: SidebarFilter = .all
+    var currentFilter: SidebarFilter? = .all
     var allTags: [Tag] = []
     var tagCategories: [String] = []
     var showDeleteConfirmation: Bool = false
@@ -32,6 +32,8 @@ final class PhotoLibraryViewModel {
     var showFolderPicker: Bool = false
     var binCount: Int = 0
     var viewingBin: Bool = false
+    var showGridTagEditor: Bool = false
+    var tagEditorTarget: PhotoAsset?
 
     private let scanner = FolderScanner()
     private let metadata = MetadataService.shared
@@ -68,7 +70,14 @@ final class PhotoLibraryViewModel {
 
         let tagDescriptor = FetchDescriptor<Tag>(sortBy: [SortDescriptor(\.category), SortDescriptor(\.name)])
         allTags = (try? context.fetch(tagDescriptor)) ?? []
-        tagCategories = Array(Set(allTags.map(\.category))).sorted()
+
+        let categories = Array(Set(allTags.compactMap { $0.category.isEmpty ? nil : $0.category }))
+        tagCategories = categories.sorted { a, b in
+            let countA = allPhotos.filter { photo in photo.tags.contains { $0.category == a } }.count
+            let countB = allPhotos.filter { photo in photo.tags.contains { $0.category == b } }.count
+            if countA != countB { return countA > countB }
+            return a < b
+        }
 
         let libDescriptor = FetchDescriptor<PhotoLibrary>()
         currentLibrary = (try? context.fetch(libDescriptor))?.first
@@ -167,7 +176,7 @@ final class PhotoLibraryViewModel {
                                 category = String(parts[0])
                                 name = String(parts[1])
                             } else {
-                                category = "general"
+                                category = ""
                                 name = keyword
                             }
                             let tag = findOrCreateTag(name: name, category: category, in: context)
@@ -385,6 +394,81 @@ final class PhotoLibraryViewModel {
         loadExistingData()
     }
 
+    func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
+        if selectedPhotos.contains(photo.id) && selectedPhotos.count > 1 {
+            let selectedPhotoList = photos.filter { selectedPhotos.contains($0.id) }
+            let allHave = selectedPhotoList.allSatisfy { $0.tags.contains { $0.id == tag.id } }
+
+            if allHave {
+                guard let context = modelContext else { return }
+                for p in selectedPhotoList {
+                    p.tags.removeAll { $0.id == tag.id }
+                    let keywords = p.tags.map(\.fullName)
+                    metadata.writeMetadata(rating: p.rating, keywords: keywords, toImageAt: p.displayPath)
+                }
+                try? context.save()
+                loadExistingData()
+            } else {
+                addTagToSelection(name: tag.name, category: tag.category)
+            }
+        } else {
+            if photo.tags.contains(where: { $0.id == tag.id }) {
+                removeTag(tag, from: photo)
+            } else {
+                addTag(name: tag.name, category: tag.category, to: photo)
+            }
+        }
+    }
+
+    func contextMenuTagState(_ tag: Tag, for photo: PhotoAsset) -> Bool {
+        if selectedPhotos.contains(photo.id) && selectedPhotos.count > 1 {
+            let selectedPhotoList = photos.filter { selectedPhotos.contains($0.id) }
+            return selectedPhotoList.allSatisfy { $0.tags.contains { $0.id == tag.id } }
+        } else {
+            return photo.tags.contains { $0.id == tag.id }
+        }
+    }
+
+    func openTagEditorForContextMenu(photo: PhotoAsset) {
+        if !(selectedPhotos.contains(photo.id) && selectedPhotos.count > 1) {
+            selectedPhotos = [photo.id]
+            lastSelectedId = photo.id
+        }
+        tagEditorTarget = photo
+        showGridTagEditor = true
+    }
+
+    var uncategorizedTags: [Tag] {
+        allTags.filter { $0.category.isEmpty }
+    }
+
+    func photosInCategory(_ category: String) -> Int {
+        allPhotos.filter { photo in
+            photo.tags.contains { $0.category == category }
+        }.count
+    }
+
+    var searchSuggestions: [String] {
+        guard searchText.count >= 1 else { return [] }
+        let query = searchText.lowercased()
+        var seen = Set<String>()
+        var results: [String] = []
+
+        for category in tagCategories {
+            if category.lowercased().contains(query) && seen.insert(category).inserted {
+                results.append(category)
+            }
+        }
+
+        for tag in allTags {
+            if tag.name.lowercased().contains(query) && seen.insert(tag.name).inserted {
+                results.append(tag.name)
+            }
+        }
+
+        return Array(results.prefix(10))
+    }
+
     // MARK: - Filtering
 
     func applyFilter(_ filter: SidebarFilter) {
@@ -411,9 +495,15 @@ final class PhotoLibraryViewModel {
         applySearch()
     }
 
+    func applyCurrentFilter() {
+        if let filter = currentFilter {
+            applyFilter(filter)
+        }
+    }
+
     func applySearch() {
         guard !searchText.isEmpty else {
-            if currentFilter == .all {
+            if currentFilter == .some(.all) {
                 photos = allPhotos
             }
             return

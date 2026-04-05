@@ -12,10 +12,10 @@ final class Tag {
     @Relationship(inverse: \PhotoAsset.tags) var photos: [PhotoAsset] = []
 
     var fullName: String {
-        "\(category):\(name)"
+        category.isEmpty ? name : "\(category):\(name)"
     }
 
-    init(name: String, category: String, parent: Tag? = nil) {
+    init(name: String, category: String = "", parent: Tag? = nil) {
         self.id = UUID()
         self.name = name
         self.category = category

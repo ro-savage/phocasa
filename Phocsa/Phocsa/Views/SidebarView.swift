@@ -2,12 +2,10 @@ import SwiftUI
 
 struct SidebarView: View {
     @Bindable var viewModel: PhotoLibraryViewModel
+    @State private var selection: SidebarFilter? = .all
 
     var body: some View {
-        List(selection: Binding<SidebarFilter?>(
-            get: { viewModel.currentFilter },
-            set: { if let filter = $0 { viewModel.applyFilter(filter) } }
-        )) {
+        List(selection: $selection) {
             Section("Library") {
                 Label("All Photos", systemImage: "photo.on.rectangle.angled")
                     .tag(SidebarFilter.all)
@@ -26,28 +24,40 @@ struct SidebarView: View {
                                 .font(.caption)
                                 .foregroundStyle(.yellow)
                         }
+                        Spacer()
                     }
+                    .contentShape(Rectangle())
                     .tag(SidebarFilter.rated(stars))
                     .badge(viewModel.allPhotos.filter { $0.rating == stars }.count)
                 }
             }
 
-            if !viewModel.tagCategories.isEmpty {
-                ForEach(viewModel.tagCategories, id: \.self) { category in
-                    Section(category.capitalized) {
-                        let tagsInCategory = viewModel.allTags.filter { $0.category == category && $0.parent == nil }
-                        ForEach(tagsInCategory, id: \.id) { tag in
+            if !viewModel.tagCategories.isEmpty || !viewModel.uncategorizedTags.isEmpty {
+                Section("Tags") {
+                    ForEach(viewModel.tagCategories, id: \.self) { category in
+                        Label(category.capitalized, systemImage: "folder")
+                            .tag(SidebarFilter.tagCategory(category))
+                            .badge(viewModel.photosInCategory(category))
+
+                        ForEach(viewModel.allTags.filter { $0.category == category && $0.parent == nil }, id: \.id) { tag in
                             Label(tag.name, systemImage: "tag")
+                                .padding(.leading, 16)
                                 .tag(SidebarFilter.tag(tag.id))
                                 .badge(tag.photos.count)
 
                             ForEach(tag.children, id: \.id) { child in
                                 Label(child.name, systemImage: "tag")
-                                    .padding(.leading, 16)
+                                    .padding(.leading, 32)
                                     .tag(SidebarFilter.tag(child.id))
                                     .badge(child.photos.count)
                             }
                         }
+                    }
+
+                    ForEach(viewModel.uncategorizedTags, id: \.id) { tag in
+                        Label(tag.name, systemImage: "tag")
+                            .tag(SidebarFilter.tag(tag.id))
+                            .badge(tag.photos.count)
                     }
                 }
             }
@@ -59,5 +69,10 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: selection) { _, newValue in
+            if let filter = newValue {
+                viewModel.applyFilter(filter)
+            }
+        }
     }
 }

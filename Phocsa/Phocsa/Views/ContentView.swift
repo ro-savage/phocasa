@@ -14,8 +14,16 @@ struct ContentView: View {
             .focusEffectDisabled()
             .toolbar { toolbarContent }
             .searchable(text: $viewModel.searchText, prompt: "Search by tag or filename")
+            .searchSuggestions {
+                if !viewModel.searchText.isEmpty {
+                    ForEach(viewModel.searchSuggestions, id: \.self) { suggestion in
+                        Label(suggestion, systemImage: viewModel.tagCategories.contains(suggestion) ? "folder" : "tag")
+                            .searchCompletion(suggestion)
+                    }
+                }
+            }
             .onChange(of: viewModel.searchText) {
-                viewModel.applyFilter(viewModel.currentFilter)
+                viewModel.applyCurrentFilter()
             }
             .onChange(of: viewModel.showingDetail) {
                 // Grab focus when entering/leaving detail so key events work
@@ -69,6 +77,9 @@ struct ContentView: View {
     }
 
     private func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        // Don't handle hotkeys when a text field is active (e.g. tag editor sheet)
+        if viewModel.showGridTagEditor { return .ignored }
+
         let shift = keyPress.modifiers.contains(.shift)
         let command = keyPress.modifiers.contains(.command)
 

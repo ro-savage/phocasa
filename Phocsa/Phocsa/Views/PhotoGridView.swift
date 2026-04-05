@@ -48,6 +48,10 @@ struct PhotoGridView: View {
                 }
             }
         }
+        .sheet(isPresented: $viewModel.showGridTagEditor) {
+            TagEditorView(viewModel: viewModel, photo: viewModel.tagEditorTarget)
+                .frame(width: 300, height: 400)
+        }
         .overlay {
             if viewModel.photos.isEmpty && !viewModel.isScanning {
                 if viewModel.viewingBin {
@@ -100,6 +104,10 @@ struct PhotoGridView: View {
                 }
             }
 
+            Menu("Tags") {
+                tagMenuContent(for: photo)
+            }
+
             Divider()
 
             Button("Move to Bin", role: .destructive) {
@@ -124,6 +132,42 @@ struct PhotoGridView: View {
                 } else {
                     viewModel.deletePhoto(photo)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tagMenuContent(for photo: PhotoAsset) -> some View {
+        ForEach(viewModel.tagCategories, id: \.self) { category in
+            Menu(category.capitalized) {
+                ForEach(viewModel.allTags.filter { $0.category == category }, id: \.id) { tag in
+                    tagToggleButton(tag, for: photo)
+                }
+            }
+        }
+
+        ForEach(viewModel.uncategorizedTags, id: \.id) { tag in
+            tagToggleButton(tag, for: photo)
+        }
+
+        if !viewModel.allTags.isEmpty {
+            Divider()
+        }
+
+        Button("Manage Tags...") {
+            viewModel.openTagEditorForContextMenu(photo: photo)
+        }
+    }
+
+    @ViewBuilder
+    private func tagToggleButton(_ tag: Tag, for photo: PhotoAsset) -> some View {
+        Button {
+            viewModel.toggleTag(tag, for: photo)
+        } label: {
+            if viewModel.contextMenuTagState(tag, for: photo) {
+                Label(tag.name, systemImage: "checkmark")
+            } else {
+                Text(tag.name)
             }
         }
     }
