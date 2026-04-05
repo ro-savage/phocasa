@@ -469,13 +469,34 @@ final class ImageEditingService: @unchecked Sendable {
         return NSImage(cgImage: cgImage, size: NSSize(width: extent.width, height: extent.height))
     }
 
+    private func captureFileDates(_ url: URL) -> (creation: Date?, modification: Date?)? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        guard let attrs else { return nil }
+        return (attrs[.creationDate] as? Date, attrs[.modificationDate] as? Date)
+    }
+
+    private func restoreFileDates(_ url: URL, dates: (creation: Date?, modification: Date?)?) {
+        guard let dates else { return }
+        var attrs: [FileAttributeKey: Any] = [:]
+        if let creation = dates.creation { attrs[.creationDate] = creation }
+        if let modification = dates.modification { attrs[.modificationDate] = modification }
+        if !attrs.isEmpty {
+            try? FileManager.default.setAttributes(attrs, ofItemAtPath: url.path)
+        }
+    }
+
     private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
+        let originalDates = captureFileDates(url)
+
         let extent = image.extent
         guard let cgImage = ciContext.createCGImage(image, from: extent) else { return false }
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return false }
         CGImageDestinationAddImage(destination, cgImage, [
             kCGImageDestinationLossyCompressionQuality: quality
         ] as CFDictionary)
-        return CGImageDestinationFinalize(destination)
+        let success = CGImageDestinationFinalize(destination)
+
+        if success { restoreFileDates(url, dates: originalDates) }
+        return success
     }
 }

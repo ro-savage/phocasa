@@ -64,6 +64,8 @@ final class MetadataService: @unchecked Sendable {
     }
 
     private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
+        let originalDates = captureFileDates(url)
+
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
         let uti = CGImageSourceGetType(source) ?? (kUTTypeJPEG as CFString)
 
@@ -102,6 +104,8 @@ final class MetadataService: @unchecked Sendable {
 
         var error: Unmanaged<CFError>?
         CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, &error)
+
+        restoreFileDates(url, dates: originalDates)
     }
 
     func writeSidecar(rating: Int, keywords: [String], for imageURL: URL, editParameters: EditParameters? = nil) {
@@ -203,6 +207,22 @@ final class MetadataService: @unchecked Sendable {
         let base64String = String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = Data(base64Encoded: base64String) else { return nil }
         return try? JSONDecoder().decode(EditParameters.self, from: data)
+    }
+
+    private func captureFileDates(_ url: URL) -> (creation: Date?, modification: Date?)? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        guard let attrs else { return nil }
+        return (attrs[.creationDate] as? Date, attrs[.modificationDate] as? Date)
+    }
+
+    private func restoreFileDates(_ url: URL, dates: (creation: Date?, modification: Date?)?) {
+        guard let dates else { return }
+        var attrs: [FileAttributeKey: Any] = [:]
+        if let creation = dates.creation { attrs[.creationDate] = creation }
+        if let modification = dates.modification { attrs[.modificationDate] = modification }
+        if !attrs.isEmpty {
+            try? FileManager.default.setAttributes(attrs, ofItemAtPath: url.path)
+        }
     }
 
     private func escapeXML(_ string: String) -> String {

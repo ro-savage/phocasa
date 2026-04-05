@@ -34,6 +34,7 @@ final class PhotoLibraryViewModel {
     var viewingBin: Bool = false
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
+    var sortNewestFirst: Bool = true
 
     // MARK: - Image Editing State
     var isEditing: Bool = false
@@ -70,15 +71,16 @@ final class PhotoLibraryViewModel {
     func loadExistingData() {
         guard let context = modelContext else { return }
 
+        let sortOrder: SortOrder = sortNewestFirst ? .reverse : .forward
         let photoDescriptor = FetchDescriptor<PhotoAsset>(
             predicate: #Predicate { !$0.isDeleted },
-            sortBy: [SortDescriptor(\.creationDate, order: .reverse)]
+            sortBy: [SortDescriptor(\.creationDate, order: sortOrder)]
         )
         allPhotos = (try? context.fetch(photoDescriptor)) ?? []
 
         let binDescriptor = FetchDescriptor<PhotoAsset>(
             predicate: #Predicate { $0.isDeleted },
-            sortBy: [SortDescriptor(\.creationDate, order: .reverse)]
+            sortBy: [SortDescriptor(\.creationDate, order: sortOrder)]
         )
         let binPhotos = (try? context.fetch(binDescriptor)) ?? []
         binCount = binPhotos.count
@@ -531,6 +533,13 @@ final class PhotoLibraryViewModel {
             photo.fileName.lowercased().contains(query) ||
             photo.tags.contains { $0.name.lowercased().contains(query) || $0.category.lowercased().contains(query) }
         }
+    }
+
+    // MARK: - Sorting
+
+    func toggleSortOrder() {
+        sortNewestFirst.toggle()
+        applyCurrentFilter()
     }
 
     // MARK: - Navigation

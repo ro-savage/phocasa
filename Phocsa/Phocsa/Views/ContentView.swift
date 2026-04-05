@@ -205,6 +205,14 @@ struct ContentView: View {
         }
 
         ToolbarItemGroup(placement: .automatic) {
+            Button(action: { viewModel.toggleSortOrder() }) {
+                Label(
+                    viewModel.sortNewestFirst ? "Newest First" : "Oldest First",
+                    systemImage: viewModel.sortNewestFirst ? "arrow.down" : "arrow.up"
+                )
+            }
+            .help(viewModel.sortNewestFirst ? "Sorted newest first" : "Sorted oldest first")
+
             HStack(spacing: 4) {
                 Image(systemName: "minus.magnifyingglass")
                     .font(.caption)
