@@ -12,12 +12,14 @@ final class MetadataService: @unchecked Sendable {
     struct PhotoMetadata {
         var rating: Int
         var keywords: [String]
+        var editParameters: EditParameters?
     }
 
     func readMetadata(from path: String) -> PhotoMetadata {
         let url = URL(fileURLWithPath: path)
         var rating = 0
         var keywords: [String] = []
+        var editParameters: EditParameters?
 
         // Try reading from image file directly
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -42,9 +44,10 @@ final class MetadataService: @unchecked Sendable {
             let parsed = parseXMPSidecar(sidecarData)
             if parsed.rating > 0 { rating = parsed.rating }
             if !parsed.keywords.isEmpty { keywords = parsed.keywords }
+            editParameters = parseEditParameters(from: sidecarData)
         }
 
-        return PhotoMetadata(rating: rating, keywords: keywords)
+        return PhotoMetadata(rating: rating, keywords: keywords, editParameters: editParameters)
     }
 
     // MARK: - Writing
@@ -101,9 +104,26 @@ final class MetadataService: @unchecked Sendable {
         CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, &error)
     }
 
-    func writeSidecar(rating: Int, keywords: [String], for imageURL: URL) {
+    func writeSidecar(rating: Int, keywords: [String], for imageURL: URL, editParameters: EditParameters? = nil) {
         let sidecarURL = imageURL.deletingPathExtension().appendingPathExtension("xmp")
+        writeSidecarToURL(sidecarURL, rating: rating, keywords: keywords, editParameters: editParameters)
+    }
 
+    func writeEditParameters(_ params: EditParameters, forRAWAt path: String) {
+        let url = URL(fileURLWithPath: path)
+        let existing = readMetadata(from: path)
+        let sidecarURL = url.deletingPathExtension().appendingPathExtension("xmp")
+        writeSidecarToURL(sidecarURL, rating: existing.rating, keywords: existing.keywords, editParameters: params)
+    }
+
+    func readEditParameters(forRAWAt path: String) -> EditParameters? {
+        let url = URL(fileURLWithPath: path)
+        let sidecarURL = url.deletingPathExtension().appendingPathExtension("xmp")
+        guard let content = try? String(contentsOf: sidecarURL, encoding: .utf8) else { return nil }
+        return parseEditParameters(from: content)
+    }
+
+    private func writeSidecarToURL(_ sidecarURL: URL, rating: Int, keywords: [String], editParameters: EditParameters?) {
         var keywordsXML = ""
         if !keywords.isEmpty {
             keywordsXML = """
@@ -115,15 +135,25 @@ final class MetadataService: @unchecked Sendable {
             """
         }
 
+        var editParamsXML = ""
+        if let params = editParameters, !params.isDefault,
+           let jsonData = try? JSONEncoder().encode(params) {
+            let base64 = jsonData.base64EncodedString()
+            editParamsXML = "            <phocsa:EditParameters>\(base64)</phocsa:EditParameters>"
+        }
+
+        let phocsa_ns = editParamsXML.isEmpty ? "" : "\n                xmlns:phocsa=\"http://phocsa.app/ns/1.0/\""
+
         let xmp = """
         <?xml version="1.0" encoding="UTF-8"?>
         <x:xmpmeta xmlns:x="adobe:ns:meta/">
             <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
                 <rdf:Description
                     xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-                    xmlns:dc="http://purl.org/dc/elements/1.1/"
+                    xmlns:dc="http://purl.org/dc/elements/1.1/"\(phocsa_ns)
                     xmp:Rating="\(rating)">
         \(keywordsXML)
+        \(editParamsXML)
                 </rdf:Description>
             </rdf:RDF>
         </x:xmpmeta>
@@ -160,6 +190,19 @@ final class MetadataService: @unchecked Sendable {
         }
 
         return PhotoMetadata(rating: rating, keywords: keywords)
+    }
+
+    private func parseEditParameters(from content: String) -> EditParameters? {
+        let pattern = #"<phocsa:EditParameters>([^<]+)</phocsa:EditParameters>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: content) else {
+            return nil
+        }
+        let base64String = String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = Data(base64Encoded: base64String) else { return nil }
+        return try? JSONDecoder().decode(EditParameters.self, from: data)
     }
 
     private func escapeXML(_ string: String) -> String {

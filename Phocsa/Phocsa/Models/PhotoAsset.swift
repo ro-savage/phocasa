@@ -14,6 +14,10 @@ final class PhotoAsset {
     var folderPath: String
     var isDeleted: Bool
 
+    // Edit parameters stored as JSON
+    @Attribute(.externalStorage) var jpgEditParametersData: Data?
+    var hasRawEdits: Bool = false
+
     @Relationship var tags: [Tag] = []
 
     var displayPath: String {
@@ -22,6 +26,20 @@ final class PhotoAsset {
 
     var hasRawPair: Bool {
         jpgPath != nil && rawPath != nil
+    }
+
+    var hasAnyEdits: Bool {
+        jpgEditParametersData != nil || hasRawEdits
+    }
+
+    var jpgEditParameters: EditParameters? {
+        get {
+            guard let data = jpgEditParametersData else { return nil }
+            return try? JSONDecoder().decode(EditParameters.self, from: data)
+        }
+        set {
+            jpgEditParametersData = newValue.flatMap { try? JSONEncoder().encode($0) }
+        }
     }
 
     init(fileName: String, jpgPath: String? = nil, rawPath: String? = nil,
@@ -36,6 +54,8 @@ final class PhotoAsset {
         self.thumbnailData = nil
         self.folderPath = folderPath
         self.isDeleted = false
+        self.jpgEditParametersData = nil
+        self.hasRawEdits = false
         self.tags = []
     }
 }

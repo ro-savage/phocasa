@@ -29,15 +29,24 @@ struct PhotoGridItemView: View {
                 .clipped()
                 .cornerRadius(6)
 
-                if photo.hasRawPair {
-                    Text("RAW")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(.blue.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
-                        .padding(4)
+                VStack(alignment: .trailing, spacing: 2) {
+                    if photo.hasRawPair {
+                        Text("RAW")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.blue.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
+                    }
+                    if photo.hasAnyEdits {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(3)
+                            .background(.orange.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
+                    }
                 }
+                .padding(4)
             }
 
             Text(photo.fileName)

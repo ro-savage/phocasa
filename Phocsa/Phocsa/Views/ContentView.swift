@@ -26,7 +26,6 @@ struct ContentView: View {
                 viewModel.applyCurrentFilter()
             }
             .onChange(of: viewModel.showingDetail) {
-                // Grab focus when entering/leaving detail so key events work
                 isContentFocused = true
             }
             .alert("Permanently Delete", isPresented: $viewModel.showPermanentDeleteConfirmation) {
@@ -58,13 +57,31 @@ struct ContentView: View {
                 isContentFocused = true
             }
             .onKeyPress(phases: .down, action: handleKeyPress)
+            .onKeyPress(.init("\\"), phases: .down) { _ in
+                if viewModel.isEditing {
+                    viewModel.showOriginal = true
+                    return .handled
+                }
+                return .ignored
+            }
+            .onKeyPress(.init("\\"), phases: .up) { _ in
+                viewModel.showOriginal = false
+                return .handled
+            }
     }
 
     @ViewBuilder
     private var mainContent: some View {
         if viewModel.showingDetail, let photo = viewModel.selectedDetailPhoto {
-            PhotoDetailView(viewModel: viewModel, photo: photo)
-                .frame(minWidth: 800, minHeight: 600)
+            HStack(spacing: 0) {
+                PhotoDetailView(viewModel: viewModel, photo: photo)
+                    .frame(minWidth: 600, minHeight: 600)
+
+                if viewModel.isEditing {
+                    Divider()
+                    EditSidebarView(viewModel: viewModel)
+                }
+            }
         } else {
             NavigationSplitView {
                 SidebarView(viewModel: viewModel)
@@ -77,7 +94,6 @@ struct ContentView: View {
     }
 
     private func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
-        // Don't handle hotkeys when a text field is active (e.g. tag editor sheet)
         if viewModel.showGridTagEditor { return .ignored }
 
         let shift = keyPress.modifiers.contains(.shift)
@@ -85,7 +101,11 @@ struct ContentView: View {
 
         switch keyPress.key {
         case .escape:
-            if viewModel.showingDetail {
+            if viewModel.isCropping {
+                viewModel.cancelCrop()
+            } else if viewModel.isEditing {
+                viewModel.stopEditing(save: true)
+            } else if viewModel.showingDetail {
                 viewModel.closeDetail()
             } else {
                 viewModel.clearSelection()

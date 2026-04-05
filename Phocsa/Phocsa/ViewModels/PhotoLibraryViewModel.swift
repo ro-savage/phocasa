@@ -35,6 +35,26 @@ final class PhotoLibraryViewModel {
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
 
+    // MARK: - Image Editing State
+    var isEditing: Bool = false
+    var editingRAW: Bool = false
+    var editParameters: EditParameters = EditParameters()
+    var editedPreviewImage: NSImage?
+    var showOriginal: Bool = false
+    var showSideBySide: Bool = false
+    var isCropping: Bool = false
+    var cropRect: NormalizedRect = .full
+    var editPresets: [EditPreset] = []
+    var showExportOptions: Bool = false
+    var presetNameInput: String = ""
+    private var renderGeneration: Int = 0
+
+    var canExport: Bool {
+        guard isEditing, let photo = selectedDetailPhoto else { return false }
+        if editingRAW { return photo.rawPath != nil }
+        return photo.jpgPath != nil
+    }
+
     private let scanner = FolderScanner()
     private let metadata = MetadataService.shared
     private var modelContext: ModelContext?
@@ -42,6 +62,7 @@ final class PhotoLibraryViewModel {
     func setModelContext(_ context: ModelContext) {
         self.modelContext = context
         loadExistingData()
+        loadPresets()
     }
 
     // MARK: - Data Loading
@@ -135,7 +156,6 @@ final class PhotoLibraryViewModel {
             let discovered = await scanner.scan(folderURL: url)
             scanProgress = "Processing \(discovered.count) photos..."
 
-            // Get existing photo file names for deduplication
             let existingDescriptor = FetchDescriptor<PhotoAsset>()
             let existing = (try? context.fetch(existingDescriptor)) ?? []
             let existingByKey = Dictionary(
@@ -146,7 +166,6 @@ final class PhotoLibraryViewModel {
             for photo in discovered {
                 let key = "\(photo.folderPath)/\(photo.fileName)"
                 if let existingPhoto = existingByKey[key] {
-                    // Update paths if changed
                     existingPhoto.jpgPath = photo.jpgPath
                     existingPhoto.rawPath = photo.rawPath
                     existingPhoto.fileSize = photo.fileSize
@@ -161,13 +180,11 @@ final class PhotoLibraryViewModel {
                         fileSize: photo.fileSize
                     )
 
-                    // Read existing metadata from file
                     let filePath = photo.jpgPath ?? photo.rawPath ?? ""
                     if !filePath.isEmpty {
                         let meta = metadata.readMetadata(from: filePath)
                         asset.rating = meta.rating
 
-                        // Import tags from keywords
                         for keyword in meta.keywords {
                             let parts = keyword.split(separator: ":", maxSplits: 1)
                             let category: String
@@ -204,7 +221,6 @@ final class PhotoLibraryViewModel {
         photo.rating = rating
         try? modelContext?.save()
 
-        // Write back to file
         let keywords = photo.tags.map(\.fullName)
         metadata.writeMetadata(rating: rating, keywords: keywords, toImageAt: photo.displayPath)
     }
@@ -270,11 +286,9 @@ final class PhotoLibraryViewModel {
         guard !toDelete.isEmpty else { return }
 
         if viewingBin {
-            // In bin: ask for permanent delete confirmation
             photosToDelete = toDelete
             showPermanentDeleteConfirmation = true
         } else {
-            // Normal view: move to bin (soft delete)
             moveToBin(toDelete)
         }
     }
@@ -363,7 +377,6 @@ final class PhotoLibraryViewModel {
             photo.tags.append(tag)
             try? context.save()
 
-            // Write back
             let keywords = photo.tags.map(\.fullName)
             metadata.writeMetadata(rating: photo.rating, keywords: keywords, toImageAt: photo.displayPath)
         }
@@ -482,7 +495,7 @@ final class PhotoLibraryViewModel {
 
         switch filter {
         case .all, .bin:
-            break // loadExistingData already set photos correctly
+            break
         case .unrated:
             photos = allPhotos.filter { $0.rating == 0 }
         case .rated(let stars):
@@ -533,11 +546,18 @@ final class PhotoLibraryViewModel {
 
         let newIndex = index + direction
         if newIndex >= 0 && newIndex < photos.count {
+            // Save edits before navigating
+            if isEditing {
+                saveCurrentEditParameters()
+            }
             selectedDetailPhoto = photos[newIndex]
         }
     }
 
     func closeDetail() {
+        if isEditing {
+            stopEditing(save: true)
+        }
         showingDetail = false
         selectedDetailPhoto = nil
     }
@@ -552,7 +572,6 @@ final class PhotoLibraryViewModel {
            let idx = photos.firstIndex(where: { $0.id == lastId }) {
             currentIndex = idx
         } else {
-            // Nothing selected — start at first photo
             let photo = photos[0]
             selectedPhotos = [photo.id]
             lastSelectedId = photo.id
@@ -576,7 +595,6 @@ final class PhotoLibraryViewModel {
         let targetPhoto = photos[targetIndex]
 
         if extendSelection {
-            // Shift+Arrow: extend selection range
             let rangeStart = min(currentIndex, targetIndex)
             let rangeEnd = max(currentIndex, targetIndex)
             for i in rangeStart...rangeEnd {
@@ -638,5 +656,274 @@ final class PhotoLibraryViewModel {
         if gridColumns < 20 {
             gridColumns += 1
         }
+    }
+
+    // MARK: - Image Editing
+
+    func startEditing(photo: PhotoAsset, isRAW: Bool) {
+        // Save any current edits first
+        if isEditing {
+            saveCurrentEditParameters()
+        }
+
+        editingRAW = isRAW
+        selectedDetailPhoto = photo
+
+        // Load existing edit parameters
+        if isRAW, let rawPath = photo.rawPath {
+            editParameters = metadata.readEditParameters(forRAWAt: rawPath) ?? EditParameters()
+        } else {
+            editParameters = photo.jpgEditParameters ?? EditParameters()
+        }
+
+        isEditing = true
+        showOriginal = false
+        showSideBySide = false
+        isCropping = false
+
+        // Pre-load the image into the editing service cache so first slider move is instant
+        let path = isRAW ? photo.rawPath : photo.jpgPath
+        if let path {
+            let url = URL(fileURLWithPath: path)
+            Task {
+                if isRAW {
+                    await ImageEditingService.shared.prepareRAW(url: url)
+                } else {
+                    await ImageEditingService.shared.prepareStandard(url: url)
+                }
+                updateEditPreview()
+            }
+        }
+    }
+
+    func stopEditing(save: Bool = true) {
+        if save {
+            saveCurrentEditParameters()
+        }
+        isEditing = false
+        editedPreviewImage = nil
+        showOriginal = false
+        showSideBySide = false
+        isCropping = false
+        editParameters = EditParameters()
+        ImageEditingService.shared.clearCache()
+    }
+
+    func saveCurrentEditParameters() {
+        guard let photo = selectedDetailPhoto else { return }
+
+        if editParameters.isDefault {
+            // Clear edits
+            if editingRAW {
+                photo.hasRawEdits = false
+                if let rawPath = photo.rawPath {
+                    // Write sidecar without edit params
+                    let existing = metadata.readMetadata(from: rawPath)
+                    metadata.writeSidecar(rating: existing.rating, keywords: existing.keywords,
+                                         for: URL(fileURLWithPath: rawPath), editParameters: nil)
+                }
+            } else {
+                photo.jpgEditParametersData = nil
+            }
+        } else {
+            if editingRAW, let rawPath = photo.rawPath {
+                metadata.writeEditParameters(editParameters, forRAWAt: rawPath)
+                photo.hasRawEdits = true
+            } else {
+                photo.jpgEditParameters = editParameters
+            }
+        }
+
+        try? modelContext?.save()
+    }
+
+    /// Reset all sliders to zero without saving to disk yet.
+    func resetAllParameters() {
+        editParameters = EditParameters()
+        updateEditPreview()
+    }
+
+    /// Revert edits AND clear saved parameters on disk.
+    func revertEdits() {
+        editParameters = EditParameters()
+        if let photo = selectedDetailPhoto {
+            if editingRAW {
+                photo.hasRawEdits = false
+                if let rawPath = photo.rawPath {
+                    let existing = metadata.readMetadata(from: rawPath)
+                    metadata.writeSidecar(rating: existing.rating, keywords: existing.keywords,
+                                         for: URL(fileURLWithPath: rawPath), editParameters: nil)
+                }
+            } else {
+                photo.jpgEditParametersData = nil
+            }
+            try? modelContext?.save()
+        }
+        updateEditPreview()
+    }
+
+    /// When editing RAW, copy the paired JPG's saved edit parameters.
+    func copyJPGSettingsToRAW() {
+        guard editingRAW, let photo = selectedDetailPhoto else { return }
+        if let jpgParams = photo.jpgEditParameters {
+            editParameters = jpgParams
+        }
+        updateEditPreview()
+    }
+
+    /// Whether "Copy from JPG" is available (editing RAW + paired JPG has saved edits).
+    var canCopyFromJPG: Bool {
+        editingRAW && selectedDetailPhoto?.jpgEditParameters != nil
+    }
+
+    func updateEditPreview() {
+        guard isEditing, let photo = selectedDetailPhoto else { return }
+
+        renderGeneration += 1
+        let generation = renderGeneration
+        let params = editParameters
+        let isRAW = editingRAW
+        let path = isRAW ? photo.rawPath : photo.jpgPath
+        guard let path else { return }
+
+        let url = URL(fileURLWithPath: path)
+        let maxSize = CGSize(width: 1600, height: 1100)
+
+        Task {
+            let result: NSImage?
+            if isRAW {
+                result = await ImageEditingService.shared.processRAW(url: url, parameters: params, maxSize: maxSize)
+            } else {
+                result = await ImageEditingService.shared.processStandard(url: url, parameters: params, maxSize: maxSize)
+            }
+
+            if renderGeneration == generation {
+                editedPreviewImage = result
+            }
+        }
+    }
+
+    // MARK: - Crop
+
+    func enterCropMode() {
+        isCropping = true
+        cropRect = editParameters.cropRect ?? .full
+    }
+
+    func applyCrop() {
+        if cropRect.x == 0 && cropRect.y == 0 && cropRect.width == 1.0 && cropRect.height == 1.0 {
+            editParameters.cropRect = nil
+        } else {
+            editParameters.cropRect = cropRect
+        }
+        isCropping = false
+    }
+
+    func cancelCrop() {
+        cropRect = editParameters.cropRect ?? .full
+        isCropping = false
+    }
+
+    // MARK: - Export
+
+    func exportRAWToJPG(replaceExisting: Bool) {
+        guard let photo = selectedDetailPhoto, let rawPath = photo.rawPath else { return }
+
+        let rawURL = URL(fileURLWithPath: rawPath)
+        let params = editParameters
+
+        let outputURL: URL
+        if replaceExisting, let jpgPath = photo.jpgPath {
+            outputURL = URL(fileURLWithPath: jpgPath)
+        } else {
+            let dir = rawURL.deletingLastPathComponent()
+            let stem = rawURL.deletingPathExtension().lastPathComponent
+            outputURL = dir.appendingPathComponent("\(stem)-raw-edit.jpg")
+        }
+
+        Task {
+            let success = await ImageEditingService.shared.exportRAWToJPEG(
+                rawURL: rawURL, parameters: params, outputURL: outputURL
+            )
+            if success {
+                // Update the photo's jpgPath if a new file was created
+                if !replaceExisting || photo.jpgPath == nil {
+                    photo.jpgPath = outputURL.path
+                }
+                try? modelContext?.save()
+            }
+        }
+    }
+
+    func exportJPGPermanent() {
+        guard let photo = selectedDetailPhoto, let jpgPath = photo.jpgPath else { return }
+
+        let url = URL(fileURLWithPath: jpgPath)
+        let params = editParameters
+
+        Task {
+            let success = await ImageEditingService.shared.exportStandardToJPEG(
+                sourceURL: url, parameters: params, outputURL: url
+            )
+            if success {
+                // Clear saved edit parameters since they're baked in
+                photo.jpgEditParametersData = nil
+                editParameters = EditParameters()
+                try? modelContext?.save()
+                editedPreviewImage = nil
+            }
+        }
+    }
+
+    // MARK: - Presets
+
+    func loadPresets() {
+        guard let context = modelContext else { return }
+        let descriptor = FetchDescriptor<EditPreset>(sortBy: [SortDescriptor(\.name)])
+        editPresets = (try? context.fetch(descriptor)) ?? []
+    }
+
+    func savePreset() {
+        guard let context = modelContext else { return }
+        let name = presetNameInput.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+
+        let preset = EditPreset(name: name, parameters: editParameters)
+        context.insert(preset)
+        try? context.save()
+        presetNameInput = ""
+        loadPresets()
+    }
+
+    func deletePreset(_ preset: EditPreset) {
+        modelContext?.delete(preset)
+        try? modelContext?.save()
+        loadPresets()
+    }
+
+    func applyPreset(_ preset: EditPreset) {
+        editParameters = preset.parameters
+        updateEditPreview()
+    }
+
+    func applyPresetToSelection(_ preset: EditPreset) {
+        let params = preset.parameters
+
+        for id in selectedPhotos {
+            guard let photo = photos.first(where: { $0.id == id }) else { continue }
+
+            // Apply to JPG if exists
+            if photo.jpgPath != nil {
+                photo.jpgEditParameters = params
+            }
+
+            // Apply to RAW if exists
+            if let rawPath = photo.rawPath {
+                metadata.writeEditParameters(params, forRAWAt: rawPath)
+                photo.hasRawEdits = true
+            }
+        }
+
+        try? modelContext?.save()
     }
 }

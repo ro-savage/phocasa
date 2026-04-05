@@ -86,7 +86,7 @@ struct PhotoGridView: View {
 
             Menu("Rate") {
                 ForEach(1...5, id: \.self) { stars in
-                    Button(String(repeating: "★", count: stars)) {
+                    Button(String(repeating: "\u{2605}", count: stars)) {
                         if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
                             viewModel.setRatingForSelection(stars)
                         } else {
@@ -108,7 +108,45 @@ struct PhotoGridView: View {
                 tagMenuContent(for: photo)
             }
 
+            // Presets submenu
+            if !viewModel.editPresets.isEmpty {
+                Menu("Apply Preset") {
+                    ForEach(viewModel.editPresets, id: \.id) { preset in
+                        Button(preset.name) {
+                            if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
+                                viewModel.applyPresetToSelection(preset)
+                            } else {
+                                // Apply to single photo
+                                let wasSelected = viewModel.selectedPhotos
+                                viewModel.selectedPhotos = [photo.id]
+                                viewModel.applyPresetToSelection(preset)
+                                viewModel.selectedPhotos = wasSelected
+                            }
+                        }
+                    }
+                }
+            }
+
             Divider()
+
+            // Revert edits if photo has edits
+            if photo.hasAnyEdits {
+                Button("Revert All Edits") {
+                    photo.jpgEditParametersData = nil
+                    photo.hasRawEdits = false
+                    if let rawPath = photo.rawPath {
+                        let existing = MetadataService.shared.readMetadata(from: rawPath)
+                        MetadataService.shared.writeSidecar(
+                            rating: existing.rating,
+                            keywords: existing.keywords,
+                            for: URL(fileURLWithPath: rawPath),
+                            editParameters: nil
+                        )
+                    }
+                }
+
+                Divider()
+            }
 
             Button("Move to Bin", role: .destructive) {
                 if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {

@@ -7,7 +7,7 @@ struct PhocaApp: App {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(for: [PhotoAsset.self, Tag.self, PhotoLibrary.self])
+        .modelContainer(for: [PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self])
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder...") {

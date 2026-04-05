@@ -22,6 +22,11 @@
 		A10000013 /* FolderScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000013; };
 		A10000014 /* ImageLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000014; };
 		A10000015 /* MetadataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000015; };
+		A10000016 /* EditParameters.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000017; };
+		A10000017 /* EditPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000018; };
+		A10000018 /* ImageEditingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000019; };
+		A10000019 /* EditSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000020; };
+		A10000020 /* CropOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000021; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +47,11 @@
 		B10000014 /* ImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageLoader.swift; sourceTree = "<group>"; };
 		B10000015 /* MetadataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataService.swift; sourceTree = "<group>"; };
 		B10000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000017 /* EditParameters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditParameters.swift; sourceTree = "<group>"; };
+		B10000018 /* EditPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditPreset.swift; sourceTree = "<group>"; };
+		B10000019 /* ImageEditingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageEditingService.swift; sourceTree = "<group>"; };
+		B10000020 /* EditSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditSidebarView.swift; sourceTree = "<group>"; };
+		B10000021 /* CropOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CropOverlayView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -82,6 +92,8 @@
 				B10000003 /* PhotoAsset.swift */,
 				B10000004 /* Tag.swift */,
 				B10000005 /* PhotoLibrary.swift */,
+				B10000017 /* EditParameters.swift */,
+				B10000018 /* EditPreset.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -104,6 +116,8 @@
 				B10000010 /* RatingView.swift */,
 				B10000011 /* TagEditorView.swift */,
 				B10000012 /* SidebarView.swift */,
+				B10000020 /* EditSidebarView.swift */,
+				B10000021 /* CropOverlayView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -114,6 +128,7 @@
 				B10000013 /* FolderScanner.swift */,
 				B10000014 /* ImageLoader.swift */,
 				B10000015 /* MetadataService.swift */,
+				B10000019 /* ImageEditingService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -204,6 +219,11 @@
 				A10000013 /* FolderScanner.swift in Sources */,
 				A10000014 /* ImageLoader.swift in Sources */,
 				A10000015 /* MetadataService.swift in Sources */,
+				A10000016 /* EditParameters.swift in Sources */,
+				A10000017 /* EditPreset.swift in Sources */,
+				A10000018 /* ImageEditingService.swift in Sources */,
+				A10000019 /* EditSidebarView.swift in Sources */,
+				A10000020 /* CropOverlayView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
