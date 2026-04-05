@@ -1,0 +1,144 @@
+import SwiftUI
+
+struct TagEditorView: View {
+    @Bindable var viewModel: PhotoLibraryViewModel
+    let photo: PhotoAsset?
+
+    @State private var newTagName = ""
+    @State private var newTagCategory = ""
+    @State private var searchText = ""
+
+    private var isMultiSelection: Bool {
+        viewModel.selectedPhotos.count > 1
+    }
+
+    private var filteredExistingTags: [Tag] {
+        if searchText.isEmpty {
+            return viewModel.allTags
+        }
+        let query = searchText.lowercased()
+        return viewModel.allTags.filter {
+            $0.name.lowercased().contains(query) || $0.category.lowercased().contains(query)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(isMultiSelection ? "Tags (\(viewModel.selectedPhotos.count) photos)" : "Tags")
+                .font(.headline)
+                .padding(.horizontal)
+                .padding(.top, 12)
+
+            // Current tags on this photo
+            if let photo, !photo.tags.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(photo.tags, id: \.id) { tag in
+                            HStack(spacing: 4) {
+                                Text("\(tag.category):\(tag.name)")
+                                    .font(.caption)
+                                Button(action: {
+                                    viewModel.removeTag(tag, from: photo)
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.caption2)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.blue.opacity(0.15), in: Capsule())
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+            }
+
+            Divider()
+
+            // Search existing tags
+            TextField("Search tags...", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal)
+
+            // Existing tags list
+            List {
+                ForEach(filteredExistingTags, id: \.id) { tag in
+                    Button(action: {
+                        applyTag(tag)
+                    }) {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(tag.name)
+                                    .font(.body)
+                                Text(tag.category)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            if let photo, photo.tags.contains(where: { $0.id == tag.id }) {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .listStyle(.plain)
+
+            Divider()
+
+            // Create new tag
+            VStack(alignment: .leading, spacing: 6) {
+                Text("New Tag")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    TextField("Category", text: $newTagCategory)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 100)
+
+                    TextField("Name", text: $newTagName)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Add") {
+                        addNewTag()
+                    }
+                    .disabled(newTagName.isEmpty || newTagCategory.isEmpty)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 12)
+        }
+    }
+
+    private func applyTag(_ tag: Tag) {
+        if isMultiSelection {
+            viewModel.addTagToSelection(name: tag.name, category: tag.category)
+        } else if let photo {
+            if photo.tags.contains(where: { $0.id == tag.id }) {
+                viewModel.removeTag(tag, from: photo)
+            } else {
+                viewModel.addTag(name: tag.name, category: tag.category, to: photo)
+            }
+        }
+    }
+
+    private func addNewTag() {
+        let name = newTagName.trimmingCharacters(in: .whitespaces)
+        let category = newTagCategory.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !name.isEmpty, !category.isEmpty else { return }
+
+        if isMultiSelection {
+            viewModel.addTagToSelection(name: name, category: category)
+        } else if let photo {
+            viewModel.addTag(name: name, category: category, to: photo)
+        }
+
+        newTagName = ""
+    }
+}

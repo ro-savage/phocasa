@@ -1,0 +1,344 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000001 /* PhocaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000001; };
+		A10000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000002; };
+		A10000003 /* PhotoAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000003; };
+		A10000004 /* Tag.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000004; };
+		A10000005 /* PhotoLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000005; };
+		A10000006 /* PhotoLibraryViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000006; };
+		A10000007 /* PhotoGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000007; };
+		A10000008 /* PhotoGridItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000008; };
+		A10000009 /* PhotoDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000009; };
+		A10000010 /* RatingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000010; };
+		A10000011 /* TagEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000011; };
+		A10000012 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000012; };
+		A10000013 /* FolderScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000013; };
+		A10000014 /* ImageLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000014; };
+		A10000015 /* MetadataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000015; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		C10000001 /* Phocsa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Phocsa.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000001 /* PhocaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhocaApp.swift; sourceTree = "<group>"; };
+		B10000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B10000003 /* PhotoAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAsset.swift; sourceTree = "<group>"; };
+		B10000004 /* Tag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tag.swift; sourceTree = "<group>"; };
+		B10000005 /* PhotoLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibrary.swift; sourceTree = "<group>"; };
+		B10000006 /* PhotoLibraryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryViewModel.swift; sourceTree = "<group>"; };
+		B10000007 /* PhotoGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoGridView.swift; sourceTree = "<group>"; };
+		B10000008 /* PhotoGridItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoGridItemView.swift; sourceTree = "<group>"; };
+		B10000009 /* PhotoDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoDetailView.swift; sourceTree = "<group>"; };
+		B10000010 /* RatingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RatingView.swift; sourceTree = "<group>"; };
+		B10000011 /* TagEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagEditorView.swift; sourceTree = "<group>"; };
+		B10000012 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		B10000013 /* FolderScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderScanner.swift; sourceTree = "<group>"; };
+		B10000014 /* ImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageLoader.swift; sourceTree = "<group>"; };
+		B10000015 /* MetadataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataService.swift; sourceTree = "<group>"; };
+		B10000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D10000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		E10000001 = {
+			isa = PBXGroup;
+			children = (
+				E10000002 /* Phocsa */,
+				E10000008 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E10000002 /* Phocsa */ = {
+			isa = PBXGroup;
+			children = (
+				B10000001 /* PhocaApp.swift */,
+				B10000016 /* Info.plist */,
+				E10000003 /* Models */,
+				E10000004 /* ViewModels */,
+				E10000005 /* Views */,
+				E10000006 /* Services */,
+			);
+			path = Phocsa;
+			sourceTree = "<group>";
+		};
+		E10000003 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B10000003 /* PhotoAsset.swift */,
+				B10000004 /* Tag.swift */,
+				B10000005 /* PhotoLibrary.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		E10000004 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				B10000006 /* PhotoLibraryViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		E10000005 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B10000002 /* ContentView.swift */,
+				B10000007 /* PhotoGridView.swift */,
+				B10000008 /* PhotoGridItemView.swift */,
+				B10000009 /* PhotoDetailView.swift */,
+				B10000010 /* RatingView.swift */,
+				B10000011 /* TagEditorView.swift */,
+				B10000012 /* SidebarView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		E10000006 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				B10000013 /* FolderScanner.swift */,
+				B10000014 /* ImageLoader.swift */,
+				B10000015 /* MetadataService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		E10000008 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C10000001 /* Phocsa.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F10000001 /* Phocsa */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = G10000003 /* Build configuration list for PBXNativeTarget "Phocsa" */;
+			buildPhases = (
+				F10000002 /* Sources */,
+				D10000001 /* Frameworks */,
+				F10000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Phocsa;
+			productName = Phocsa;
+			productReference = C10000001 /* Phocsa.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F10000004 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = G10000001 /* Build configuration list for PBXProject "Phocsa" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E10000001;
+			productRefGroup = E10000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F10000001 /* Phocsa */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F10000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		F10000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000001 /* PhocaApp.swift in Sources */,
+				A10000002 /* ContentView.swift in Sources */,
+				A10000003 /* PhotoAsset.swift in Sources */,
+				A10000004 /* Tag.swift in Sources */,
+				A10000005 /* PhotoLibrary.swift in Sources */,
+				A10000006 /* PhotoLibraryViewModel.swift in Sources */,
+				A10000007 /* PhotoGridView.swift in Sources */,
+				A10000008 /* PhotoGridItemView.swift in Sources */,
+				A10000009 /* PhotoDetailView.swift in Sources */,
+				A10000010 /* RatingView.swift in Sources */,
+				A10000011 /* TagEditorView.swift in Sources */,
+				A10000012 /* SidebarView.swift in Sources */,
+				A10000013 /* FolderScanner.swift in Sources */,
+				A10000014 /* ImageLoader.swift in Sources */,
+				A10000015 /* MetadataService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		G10000002 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		G10000005 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		G10000004 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Phocsa/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Phocsa. All rights reserved.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phocsa.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+			};
+			name = Debug;
+		};
+		G10000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Phocsa/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Phocsa. All rights reserved.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phocsa.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		G10000001 /* Build configuration list for PBXProject "Phocsa" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10000002 /* Debug */,
+				G10000005 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		G10000003 /* Build configuration list for PBXNativeTarget "Phocsa" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10000004 /* Debug */,
+				G10000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = F10000004 /* Project object */;
+}
