@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 @main
-struct PhocaApp: App {
+struct PhocasaApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

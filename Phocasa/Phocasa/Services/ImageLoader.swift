@@ -5,7 +5,7 @@ final class ImageLoader: @unchecked Sendable {
     static let shared = ImageLoader()
 
     private let thumbnailCache = NSCache<NSString, NSImage>()
-    private let queue = DispatchQueue(label: "com.phocsa.imageloader", qos: .userInitiated, attributes: .concurrent)
+    private let queue = DispatchQueue(label: "com.phocasa.imageloader", qos: .userInitiated, attributes: .concurrent)
 
     private init() {
         thumbnailCache.countLimit = 500

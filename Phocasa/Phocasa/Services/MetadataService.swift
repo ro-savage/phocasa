@@ -143,10 +143,10 @@ final class MetadataService: @unchecked Sendable {
         if let params = editParameters, !params.isDefault,
            let jsonData = try? JSONEncoder().encode(params) {
             let base64 = jsonData.base64EncodedString()
-            editParamsXML = "            <phocsa:EditParameters>\(base64)</phocsa:EditParameters>"
+            editParamsXML = "            <phocasa:EditParameters>\(base64)</phocasa:EditParameters>"
         }
 
-        let phocsa_ns = editParamsXML.isEmpty ? "" : "\n                xmlns:phocsa=\"http://phocsa.app/ns/1.0/\""
+        let phocasa_ns = editParamsXML.isEmpty ? "" : "\n                xmlns:phocasa=\"http://phocasa.app/ns/1.0/\""
 
         let xmp = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -154,7 +154,7 @@ final class MetadataService: @unchecked Sendable {
             <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
                 <rdf:Description
                     xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-                    xmlns:dc="http://purl.org/dc/elements/1.1/"\(phocsa_ns)
+                    xmlns:dc="http://purl.org/dc/elements/1.1/"\(phocasa_ns)
                     xmp:Rating="\(rating)">
         \(keywordsXML)
         \(editParamsXML)
@@ -197,7 +197,7 @@ final class MetadataService: @unchecked Sendable {
     }
 
     private func parseEditParameters(from content: String) -> EditParameters? {
-        let pattern = #"<phocsa:EditParameters>([^<]+)</phocsa:EditParameters>"#
+        let pattern = #"<phocasa:EditParameters>([^<]+)</phocasa:EditParameters>"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
               match.numberOfRanges > 1,

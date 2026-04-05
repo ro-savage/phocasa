@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "F10000001"
-               BuildableName = "Phocsa.app"
-               BlueprintName = "Phocsa"
-               ReferencedContainer = "container:Phocsa.xcodeproj">
+               BuildableName = "Phocasa.app"
+               BlueprintName = "Phocasa"
+               ReferencedContainer = "container:Phocasa.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -38,9 +38,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F10000001"
-            BuildableName = "Phocsa.app"
-            BlueprintName = "Phocsa"
-            ReferencedContainer = "container:Phocsa.xcodeproj">
+            BuildableName = "Phocasa.app"
+            BlueprintName = "Phocasa"
+            ReferencedContainer = "container:Phocasa.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>

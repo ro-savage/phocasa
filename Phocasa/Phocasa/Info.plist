@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Phocsa</string>
+	<string>Phocasa</string>
 	<key>CFBundleDisplayName</key>
-	<string>Phocsa</string>
+	<string>Phocasa</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.phocsa.app</string>
+	<string>com.phocasa.app</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleShortVersionString</key>
@@ -15,7 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>
-	<string>Phocsa</string>
+	<string>Phocasa</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>

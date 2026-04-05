@@ -1,4 +1,4 @@
-# Phocsa — macOS Photo Explorer
+# Phocasa — macOS Photo Explorer
 
 ## Project Overview
 
@@ -8,14 +8,14 @@ Native macOS photo explorer app for browsing, rating, tagging, and organizing th
 
 ```bash
 # Build from CLI (requires Xcode installed)
-cd /Users/rowan/www/phocsa/Phocsa
-/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project Phocsa.xcodeproj -scheme Phocsa -configuration Debug build
+cd /Users/rowan/www/phocasa/Phocasa
+/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project Phocasa.xcodeproj -scheme Phocasa -configuration Debug build
 
 # Run the built app
-open ~/Library/Developer/Xcode/DerivedData/Phocsa-*/Build/Products/Debug/Phocsa.app
+open ~/Library/Developer/Xcode/DerivedData/Phocasa-*/Build/Products/Debug/Phocasa.app
 
 # Or open in Xcode
-open Phocsa/Phocsa.xcodeproj
+open Phocasa/Phocasa.xcodeproj
 ```
 
 ## Architecture
@@ -28,10 +28,10 @@ open Phocsa/Phocsa.xcodeproj
 ### Project Structure
 
 ```
-Phocsa/
-├── Phocsa.xcodeproj/
-└── Phocsa/
-    ├── PhocaApp.swift              — @main entry, SwiftData container, menu commands
+Phocasa/
+├── Phocasa.xcodeproj/
+└── Phocasa/
+    ├── PhocasaApp.swift            — @main entry, SwiftData container, menu commands
     ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary)
     ├── ViewModels/                 — PhotoLibraryViewModel (selection, filtering, scanning, batch ops)
     ├── Views/                      — All SwiftUI views (ContentView, Grid, Detail, Sidebar, etc.)

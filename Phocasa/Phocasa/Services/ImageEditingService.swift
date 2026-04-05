@@ -7,7 +7,7 @@ final class ImageEditingService: @unchecked Sendable {
 
     private let ciContext: CIContext
     // Serial queue — prevents concurrent RAW decodes competing for resources
-    private let renderQueue = DispatchQueue(label: "com.phocsa.editing", qos: .userInteractive)
+    private let renderQueue = DispatchQueue(label: "com.phocasa.editing", qos: .userInteractive)
 
     // Cached sources — the expensive part is loading from disk, so we do it once
     private var cachedRAWFilter: CIRAWFilter?

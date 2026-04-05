@@ -1,4 +1,4 @@
-# Phocsa — macOS Photo Explorer
+# Phocasa — macOS Photo Explorer
 
 ## Overview
 
@@ -189,8 +189,8 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 ### Project Structure
 
 ```
-Phocsa/
-├── PhocaApp.swift              — App entry point
+Phocasa/
+├── PhocasaApp.swift              — App entry point
 ├── Models/
 │   ├── PhotoAsset.swift         — SwiftData model
 │   ├── Tag.swift                — SwiftData model

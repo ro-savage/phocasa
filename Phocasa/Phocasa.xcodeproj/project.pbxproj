@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000001 /* PhocaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000001; };
+		A10000001 /* PhocasaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000001; };
 		A10000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000002; };
 		A10000003 /* PhotoAsset.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000003; };
 		A10000004 /* Tag.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000004; };
@@ -30,8 +30,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		C10000001 /* Phocsa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Phocsa.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B10000001 /* PhocaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhocaApp.swift; sourceTree = "<group>"; };
+		C10000001 /* Phocasa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Phocasa.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000001 /* PhocasaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhocasaApp.swift; sourceTree = "<group>"; };
 		B10000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		B10000003 /* PhotoAsset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoAsset.swift; sourceTree = "<group>"; };
 		B10000004 /* Tag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tag.swift; sourceTree = "<group>"; };
@@ -68,22 +68,22 @@
 		E10000001 = {
 			isa = PBXGroup;
 			children = (
-				E10000002 /* Phocsa */,
+				E10000002 /* Phocasa */,
 				E10000008 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		E10000002 /* Phocsa */ = {
+		E10000002 /* Phocasa */ = {
 			isa = PBXGroup;
 			children = (
-				B10000001 /* PhocaApp.swift */,
+				B10000001 /* PhocasaApp.swift */,
 				B10000016 /* Info.plist */,
 				E10000003 /* Models */,
 				E10000004 /* ViewModels */,
 				E10000005 /* Views */,
 				E10000006 /* Services */,
 			);
-			path = Phocsa;
+			path = Phocasa;
 			sourceTree = "<group>";
 		};
 		E10000003 /* Models */ = {
@@ -136,7 +136,7 @@
 		E10000008 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				C10000001 /* Phocsa.app */,
+				C10000001 /* Phocasa.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -144,9 +144,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		F10000001 /* Phocsa */ = {
+		F10000001 /* Phocasa */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = G10000003 /* Build configuration list for PBXNativeTarget "Phocsa" */;
+			buildConfigurationList = G10000003 /* Build configuration list for PBXNativeTarget "Phocasa" */;
 			buildPhases = (
 				F10000002 /* Sources */,
 				D10000001 /* Frameworks */,
@@ -156,9 +156,9 @@
 			);
 			dependencies = (
 			);
-			name = Phocsa;
-			productName = Phocsa;
-			productReference = C10000001 /* Phocsa.app */;
+			name = Phocasa;
+			productName = Phocasa;
+			productReference = C10000001 /* Phocasa.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -171,7 +171,7 @@
 				LastSwiftUpdateCheck = 1600;
 				LastUpgradeCheck = 1600;
 			};
-			buildConfigurationList = G10000001 /* Build configuration list for PBXProject "Phocsa" */;
+			buildConfigurationList = G10000001 /* Build configuration list for PBXProject "Phocasa" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -184,7 +184,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				F10000001 /* Phocsa */,
+				F10000001 /* Phocasa */,
 			);
 		};
 /* End PBXProject section */
@@ -204,7 +204,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000001 /* PhocaApp.swift in Sources */,
+				A10000001 /* PhocasaApp.swift in Sources */,
 				A10000002 /* ContentView.swift in Sources */,
 				A10000003 /* PhotoAsset.swift in Sources */,
 				A10000004 /* Tag.swift in Sources */,
@@ -293,15 +293,15 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Phocsa/Info.plist;
+				INFOPLIST_FILE = Phocasa/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Phocsa. All rights reserved.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Phocasa. All rights reserved.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.phocsa.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phocasa.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
@@ -320,15 +320,15 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Phocsa/Info.plist;
+				INFOPLIST_FILE = Phocasa/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Phocsa. All rights reserved.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Phocasa. All rights reserved.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.phocsa.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phocasa.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
@@ -339,7 +339,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		G10000001 /* Build configuration list for PBXProject "Phocsa" */ = {
+		G10000001 /* Build configuration list for PBXProject "Phocasa" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				G10000002 /* Debug */,
@@ -348,7 +348,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		G10000003 /* Build configuration list for PBXNativeTarget "Phocsa" */ = {
+		G10000003 /* Build configuration list for PBXNativeTarget "Phocasa" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				G10000004 /* Debug */,

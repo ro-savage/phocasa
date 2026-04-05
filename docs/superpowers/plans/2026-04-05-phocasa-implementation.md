@@ -1,4 +1,4 @@
-# Phocsa Implementation Plan
+# Phocasa Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -13,11 +13,11 @@
 ## File Structure
 
 ```
-Phocsa/
-├── Phocsa.xcodeproj/
+Phocasa/
+├── Phocasa.xcodeproj/
 │   └── project.pbxproj
-├── Phocsa/
-│   ├── PhocaApp.swift                    — @main App entry, SwiftData container, window
+├── Phocasa/
+│   ├── PhocasaApp.swift                    — @main App entry, SwiftData container, window
 │   ├── Models/
 │   │   ├── PhotoAsset.swift              — SwiftData model for a photo (JPG+RAW pair)
 │   │   ├── Tag.swift                     — SwiftData model for hierarchical tags
@@ -44,9 +44,9 @@ Phocsa/
 ### Task 1: Xcode Project Setup
 
 **Files:**
-- Create: `Phocsa/Phocsa.xcodeproj/project.pbxproj`
-- Create: `Phocsa/Phocsa/Info.plist`
-- Create: `Phocsa/Phocsa/Phocsa.entitlements`
+- Create: `Phocasa/Phocasa.xcodeproj/project.pbxproj`
+- Create: `Phocasa/Phocasa/Info.plist`
+- Create: `Phocasa/Phocasa/Phocasa.entitlements`
 
 - [ ] **Step 1: Create Xcode project via `swift package init` then convert**
 
@@ -65,11 +65,11 @@ Use the Xcode CLI to generate a proper project, or manually create the pbxproj. 
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Phocsa</string>
+    <string>Phocasa</string>
     <key>CFBundleDisplayName</key>
-    <string>Phocsa</string>
+    <string>Phocasa</string>
     <key>CFBundleIdentifier</key>
-    <string>com.phocsa.app</string>
+    <string>com.phocasa.app</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
@@ -77,7 +77,7 @@ Use the Xcode CLI to generate a proper project, or manually create the pbxproj. 
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>Phocsa</string>
+    <string>Phocasa</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -101,16 +101,16 @@ Use the Xcode CLI to generate a proper project, or manually create the pbxproj. 
 </plist>
 ```
 
-- [ ] **Step 4: Create minimal PhocaApp.swift to verify build**
+- [ ] **Step 4: Create minimal PhocasaApp.swift to verify build**
 
 ```swift
 import SwiftUI
 
 @main
-struct PhocaApp: App {
+struct PhocasaApp: App {
     var body: some Scene {
         WindowGroup {
-            Text("Phocsa")
+            Text("Phocasa")
         }
     }
 }
@@ -118,7 +118,7 @@ struct PhocaApp: App {
 
 - [ ] **Step 5: Build and verify**
 
-Run: `xcodebuild -project Phocsa.xcodeproj -scheme Phocsa -configuration Debug build`
+Run: `xcodebuild -project Phocasa.xcodeproj -scheme Phocasa -configuration Debug build`
 Expected: BUILD SUCCEEDED
 
 ---
@@ -126,10 +126,10 @@ Expected: BUILD SUCCEEDED
 ### Task 2: SwiftData Models
 
 **Files:**
-- Create: `Phocsa/Phocsa/Models/PhotoAsset.swift`
-- Create: `Phocsa/Phocsa/Models/Tag.swift`
-- Create: `Phocsa/Phocsa/Models/PhotoLibrary.swift`
-- Modify: `Phocsa/Phocsa/PhocaApp.swift` — add modelContainer
+- Create: `Phocasa/Phocasa/Models/PhotoAsset.swift`
+- Create: `Phocasa/Phocasa/Models/Tag.swift`
+- Create: `Phocasa/Phocasa/Models/PhotoLibrary.swift`
+- Modify: `Phocasa/Phocasa/PhocasaApp.swift` — add modelContainer
 
 - [ ] **Step 1: Create PhotoAsset model**
 
@@ -235,14 +235,14 @@ final class PhotoLibrary {
 }
 ```
 
-- [ ] **Step 4: Update PhocaApp.swift with modelContainer**
+- [ ] **Step 4: Update PhocasaApp.swift with modelContainer**
 
 ```swift
 import SwiftUI
 import SwiftData
 
 @main
-struct PhocaApp: App {
+struct PhocasaApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -259,7 +259,7 @@ struct PhocaApp: App {
 ### Task 3: FolderScanner Service
 
 **Files:**
-- Create: `Phocsa/Phocsa/Services/FolderScanner.swift`
+- Create: `Phocasa/Phocasa/Services/FolderScanner.swift`
 
 - [ ] **Step 1: Implement FolderScanner**
 
@@ -280,7 +280,7 @@ Returns: `[(fileName: String, jpgPath: String?, rawPath: String?, folderPath: St
 ### Task 4: ImageLoader Service
 
 **Files:**
-- Create: `Phocsa/Phocsa/Services/ImageLoader.swift`
+- Create: `Phocasa/Phocasa/Services/ImageLoader.swift`
 
 - [ ] **Step 1: Implement ImageLoader**
 
@@ -298,7 +298,7 @@ Returns: `[(fileName: String, jpgPath: String?, rawPath: String?, folderPath: St
 ### Task 5: MetadataService
 
 **Files:**
-- Create: `Phocsa/Phocsa/Services/MetadataService.swift`
+- Create: `Phocasa/Phocasa/Services/MetadataService.swift`
 
 - [ ] **Step 1: Implement metadata reading**
 
@@ -319,7 +319,7 @@ Debounce writes (0.5s) to batch rapid changes.
 ### Task 6: PhotoLibraryViewModel
 
 **Files:**
-- Create: `Phocsa/Phocsa/ViewModels/PhotoLibraryViewModel.swift`
+- Create: `Phocasa/Phocasa/ViewModels/PhotoLibraryViewModel.swift`
 
 - [ ] **Step 1: Implement core ViewModel**
 
@@ -347,8 +347,8 @@ Methods:
 ### Task 7: RatingView and SidebarView
 
 **Files:**
-- Create: `Phocsa/Phocsa/Views/RatingView.swift`
-- Create: `Phocsa/Phocsa/Views/SidebarView.swift`
+- Create: `Phocasa/Phocasa/Views/RatingView.swift`
+- Create: `Phocasa/Phocasa/Views/SidebarView.swift`
 
 - [ ] **Step 1: Implement RatingView**
 
@@ -365,8 +365,8 @@ Smart filters (All, Unrated, 1-5 stars), tag categories as expandable groups wit
 ### Task 8: PhotoGridView and PhotoGridItemView
 
 **Files:**
-- Create: `Phocsa/Phocsa/Views/PhotoGridView.swift`
-- Create: `Phocsa/Phocsa/Views/PhotoGridItemView.swift`
+- Create: `Phocasa/Phocasa/Views/PhotoGridView.swift`
+- Create: `Phocasa/Phocasa/Views/PhotoGridItemView.swift`
 
 - [ ] **Step 1: Implement PhotoGridItemView**
 
@@ -383,8 +383,8 @@ LazyVGrid with adaptive columns from zoom slider. Multi-select (Cmd+Click, Shift
 ### Task 9: PhotoDetailView and TagEditorView
 
 **Files:**
-- Create: `Phocsa/Phocsa/Views/PhotoDetailView.swift`
-- Create: `Phocsa/Phocsa/Views/TagEditorView.swift`
+- Create: `Phocasa/Phocasa/Views/PhotoDetailView.swift`
+- Create: `Phocasa/Phocasa/Views/TagEditorView.swift`
 
 - [ ] **Step 1: Implement PhotoDetailView**
 
@@ -401,7 +401,7 @@ Popover with: current tags list, autocomplete search for existing tags, create n
 ### Task 10: ContentView — Main Layout
 
 **Files:**
-- Create: `Phocsa/Phocsa/Views/ContentView.swift`
+- Create: `Phocasa/Phocasa/Views/ContentView.swift`
 
 - [ ] **Step 1: Implement ContentView**
 
@@ -414,7 +414,7 @@ NavigationSplitView with sidebar + detail. Toolbar: Open Folder button, search f
 ### Task 11: Final Integration and Keyboard Shortcuts
 
 **Files:**
-- Modify: `Phocsa/Phocsa/PhocaApp.swift` — add commands
+- Modify: `Phocasa/Phocasa/PhocasaApp.swift` — add commands
 - Modify: Various view files for keyboard handling
 
 - [ ] **Step 1: Add keyboard shortcuts**
@@ -427,7 +427,7 @@ File > Open Folder, Edit > Select All, View > Zoom In/Out
 
 - [ ] **Step 3: Final build and verification**
 
-Run: `xcodebuild -project Phocsa.xcodeproj -scheme Phocsa -configuration Debug build`
+Run: `xcodebuild -project Phocasa.xcodeproj -scheme Phocasa -configuration Debug build`
 Expected: BUILD SUCCEEDED
 
 ---
