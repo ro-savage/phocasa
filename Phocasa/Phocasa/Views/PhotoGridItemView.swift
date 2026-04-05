@@ -26,8 +26,7 @@ struct PhotoGridItemView: View {
                 }
                 .frame(minWidth: 60, minHeight: 60)
                 .aspectRatio(1, contentMode: .fill)
-                .clipped()
-                .cornerRadius(6)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 VStack(alignment: .trailing, spacing: 2) {
                     if photo.hasRawPair {

@@ -35,6 +35,8 @@ final class PhotoLibraryViewModel {
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
     var sortNewestFirst: Bool = true
+    var ratingCounts: [Int: Int] = [:]
+    var categoryCounts: [String: Int] = [:]
 
     // MARK: - Image Editing State
     var isEditing: Bool = false
@@ -91,13 +93,28 @@ final class PhotoLibraryViewModel {
             photos = allPhotos
         }
 
+        // Precompute counts for sidebar (single pass instead of per-filter O(n) scans)
+        var counts: [Int: Int] = [:]
+        var catCounts: [String: Int] = [:]
+        for photo in allPhotos {
+            counts[photo.rating, default: 0] += 1
+            var seenCategories = Set<String>()
+            for tag in photo.tags where !tag.category.isEmpty {
+                if seenCategories.insert(tag.category).inserted {
+                    catCounts[tag.category, default: 0] += 1
+                }
+            }
+        }
+        ratingCounts = counts
+        categoryCounts = catCounts
+
         let tagDescriptor = FetchDescriptor<Tag>(sortBy: [SortDescriptor(\.category), SortDescriptor(\.name)])
         allTags = (try? context.fetch(tagDescriptor)) ?? []
 
         let categories = Array(Set(allTags.compactMap { $0.category.isEmpty ? nil : $0.category }))
         tagCategories = categories.sorted { a, b in
-            let countA = allPhotos.filter { photo in photo.tags.contains { $0.category == a } }.count
-            let countB = allPhotos.filter { photo in photo.tags.contains { $0.category == b } }.count
+            let countA = catCounts[a, default: 0]
+            let countB = catCounts[b, default: 0]
             if countA != countB { return countA > countB }
             return a < b
         }
@@ -229,12 +246,11 @@ final class PhotoLibraryViewModel {
 
     func setRatingForSelection(_ rating: Int) {
         guard let context = modelContext else { return }
+        let selected = photos.filter { selectedPhotos.contains($0.id) }
         var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
-        for id in selectedPhotos {
-            if let photo = photos.first(where: { $0.id == id }) {
-                photo.rating = rating
-                writeBackItems.append((rating, photo.tags.map(\.fullName), photo.displayPath))
-            }
+        for photo in selected {
+            photo.rating = rating
+            writeBackItems.append((rating, photo.tags.map(\.fullName), photo.displayPath))
         }
         try? context.save()
 
@@ -388,14 +404,13 @@ final class PhotoLibraryViewModel {
     func addTagToSelection(name: String, category: String) {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
+        let selected = photos.filter { selectedPhotos.contains($0.id) }
 
         var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
-        for id in selectedPhotos {
-            if let photo = photos.first(where: { $0.id == id }) {
-                if !photo.tags.contains(where: { $0.id == tag.id }) {
-                    photo.tags.append(tag)
-                    writeBackItems.append((photo.rating, photo.tags.map(\.fullName), photo.displayPath))
-                }
+        for photo in selected {
+            if !photo.tags.contains(where: { $0.id == tag.id }) {
+                photo.tags.append(tag)
+                writeBackItems.append((photo.rating, photo.tags.map(\.fullName), photo.displayPath))
             }
         }
         try? context.save()
@@ -461,10 +476,19 @@ final class PhotoLibraryViewModel {
         allTags.filter { $0.category.isEmpty }
     }
 
-    func photosInCategory(_ category: String) -> Int {
-        allPhotos.filter { photo in
-            photo.tags.contains { $0.category == category }
-        }.count
+    func revertEditsForPhoto(_ photo: PhotoAsset) {
+        photo.jpgEditParametersData = nil
+        photo.hasRawEdits = false
+        if let rawPath = photo.rawPath {
+            let existing = metadata.readMetadata(from: rawPath)
+            metadata.writeSidecar(
+                rating: existing.rating,
+                keywords: existing.keywords,
+                for: URL(fileURLWithPath: rawPath),
+                editParameters: nil
+            )
+        }
+        try? modelContext?.save()
     }
 
     var searchSuggestions: [String] {
@@ -820,11 +844,7 @@ final class PhotoLibraryViewModel {
     }
 
     func applyCrop() {
-        if cropRect.x == 0 && cropRect.y == 0 && cropRect.width == 1.0 && cropRect.height == 1.0 {
-            editParameters.cropRect = nil
-        } else {
-            editParameters.cropRect = cropRect
-        }
+        editParameters.cropRect = cropRect.isApproximatelyFull ? nil : cropRect
         isCropping = false
     }
 
@@ -917,16 +937,12 @@ final class PhotoLibraryViewModel {
 
     func applyPresetToSelection(_ preset: EditPreset) {
         let params = preset.parameters
+        let selected = photos.filter { selectedPhotos.contains($0.id) }
 
-        for id in selectedPhotos {
-            guard let photo = photos.first(where: { $0.id == id }) else { continue }
-
-            // Apply to JPG if exists
+        for photo in selected {
             if photo.jpgPath != nil {
                 photo.jpgEditParameters = params
             }
-
-            // Apply to RAW if exists
             if let rawPath = photo.rawPath {
                 metadata.writeEditParameters(params, forRAWAt: rawPath)
                 photo.hasRawEdits = true

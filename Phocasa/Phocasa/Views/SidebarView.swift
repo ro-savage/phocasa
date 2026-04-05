@@ -10,14 +10,14 @@ struct SidebarView: View {
                     Label("All Photos", systemImage: "photo.on.rectangle.angled")
                 }
 
-                sidebarRow(filter: .unrated, badge: viewModel.allPhotos.filter { $0.rating == 0 }.count) {
+                sidebarRow(filter: .unrated, badge: viewModel.ratingCounts[0, default: 0]) {
                     Label("Unrated", systemImage: "star.slash")
                 }
             }
 
             Section("Ratings") {
                 ForEach(1...5, id: \.self) { stars in
-                    sidebarRow(filter: .rated(stars), badge: viewModel.allPhotos.filter { $0.rating == stars }.count) {
+                    sidebarRow(filter: .rated(stars), badge: viewModel.ratingCounts[stars, default: 0]) {
                         HStack(spacing: 2) {
                             ForEach(0..<stars, id: \.self) { _ in
                                 Image(systemName: "star.fill")
@@ -33,7 +33,7 @@ struct SidebarView: View {
             if !viewModel.tagCategories.isEmpty || !viewModel.uncategorizedTags.isEmpty {
                 Section("Tags") {
                     ForEach(viewModel.tagCategories, id: \.self) { category in
-                        sidebarRow(filter: .tagCategory(category), badge: viewModel.photosInCategory(category)) {
+                        sidebarRow(filter: .tagCategory(category), badge: viewModel.categoryCounts[category, default: 0]) {
                             Label(category.capitalized, systemImage: "folder")
                         }
 

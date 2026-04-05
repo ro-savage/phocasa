@@ -73,4 +73,8 @@ struct NormalizedRect: Codable, Equatable, Sendable {
     }
 
     static let full = NormalizedRect(x: 0, y: 0, width: 1, height: 1)
+
+    var isApproximatelyFull: Bool {
+        abs(x) < 0.001 && abs(y) < 0.001 && abs(width - 1.0) < 0.001 && abs(height - 1.0) < 0.001
+    }
 }

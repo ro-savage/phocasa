@@ -129,20 +129,9 @@ struct PhotoGridView: View {
 
             Divider()
 
-            // Revert edits if photo has edits
             if photo.hasAnyEdits {
                 Button("Revert All Edits") {
-                    photo.jpgEditParametersData = nil
-                    photo.hasRawEdits = false
-                    if let rawPath = photo.rawPath {
-                        let existing = MetadataService.shared.readMetadata(from: rawPath)
-                        MetadataService.shared.writeSidecar(
-                            rating: existing.rating,
-                            keywords: existing.keywords,
-                            for: URL(fileURLWithPath: rawPath),
-                            editParameters: nil
-                        )
-                    }
+                    viewModel.revertEditsForPhoto(photo)
                 }
 
                 Divider()

@@ -1,7 +1,7 @@
 import Foundation
 import UniformTypeIdentifiers
 
-struct DiscoveredPhoto {
+struct DiscoveredPhoto: Sendable {
     let fileName: String
     let jpgPath: String?
     let rawPath: String?

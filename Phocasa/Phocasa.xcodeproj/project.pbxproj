@@ -27,7 +27,22 @@
 		A10000018 /* ImageEditingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000019; };
 		A10000019 /* EditSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000020; };
 		A10000020 /* CropOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000021; };
+		A20000001 /* EditParametersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000001; };
+		A20000002 /* NormalizedRectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000002; };
+		A20000003 /* FolderScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000003; };
+		A20000004 /* MetadataParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000004; };
+		A20000005 /* ViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000005; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		T10000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F10000004 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F10000001;
+			remoteInfo = Phocasa;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		C10000001 /* Phocasa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Phocasa.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -52,10 +67,23 @@
 		B10000019 /* ImageEditingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageEditingService.swift; sourceTree = "<group>"; };
 		B10000020 /* EditSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditSidebarView.swift; sourceTree = "<group>"; };
 		B10000021 /* CropOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CropOverlayView.swift; sourceTree = "<group>"; };
+		B20000001 /* EditParametersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditParametersTests.swift; sourceTree = "<group>"; };
+		B20000002 /* NormalizedRectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NormalizedRectTests.swift; sourceTree = "<group>"; };
+		B20000003 /* FolderScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderScannerTests.swift; sourceTree = "<group>"; };
+		B20000004 /* MetadataParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataParsingTests.swift; sourceTree = "<group>"; };
+		B20000005 /* ViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewModelTests.swift; sourceTree = "<group>"; };
+		C20000001 /* PhocasaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhocasaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		D10000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		T10000005 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -69,6 +97,7 @@
 			isa = PBXGroup;
 			children = (
 				E10000002 /* Phocasa */,
+				E20000001 /* PhocasaTests */,
 				E10000008 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -137,8 +166,21 @@
 			isa = PBXGroup;
 			children = (
 				C10000001 /* Phocasa.app */,
+				C20000001 /* PhocasaTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		E20000001 /* PhocasaTests */ = {
+			isa = PBXGroup;
+			children = (
+				B20000001 /* EditParametersTests.swift */,
+				B20000002 /* NormalizedRectTests.swift */,
+				B20000003 /* FolderScannerTests.swift */,
+				B20000004 /* MetadataParsingTests.swift */,
+				B20000005 /* ViewModelTests.swift */,
+			);
+			path = PhocasaTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -160,6 +202,24 @@
 			productName = Phocasa;
 			productReference = C10000001 /* Phocasa.app */;
 			productType = "com.apple.product-type.application";
+		};
+		T10000003 /* PhocasaTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = T10000009 /* Build configuration list for PBXNativeTarget "PhocasaTests" */;
+			buildPhases = (
+				T10000004 /* Sources */,
+				T10000005 /* Frameworks */,
+				T10000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				T10000002 /* PBXTargetDependency */,
+			);
+			name = PhocasaTests;
+			productName = PhocasaTests;
+			productReference = C20000001 /* PhocasaTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -185,12 +245,20 @@
 			projectRoot = "";
 			targets = (
 				F10000001 /* Phocasa */,
+				T10000003 /* PhocasaTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		F10000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		T10000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -227,7 +295,27 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		T10000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A20000001 /* EditParametersTests.swift in Sources */,
+				A20000002 /* NormalizedRectTests.swift in Sources */,
+				A20000003 /* FolderScannerTests.swift in Sources */,
+				A20000004 /* MetadataParsingTests.swift in Sources */,
+				A20000005 /* ViewModelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		T10000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F10000001 /* Phocasa */;
+			targetProxy = T10000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		G10000002 /* Debug */ = {
@@ -336,6 +424,42 @@
 			};
 			name = Release;
 		};
+		T10000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phocasa.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Phocasa.app/Contents/MacOS/Phocasa";
+			};
+			name = Debug;
+		};
+		T10000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phocasa.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Phocasa.app/Contents/MacOS/Phocasa";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -353,6 +477,15 @@
 			buildConfigurations = (
 				G10000004 /* Debug */,
 				G10000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		T10000009 /* Build configuration list for PBXNativeTarget "PhocasaTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				T10000007 /* Debug */,
+				T10000008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

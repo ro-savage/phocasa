@@ -168,7 +168,7 @@ final class MetadataService: @unchecked Sendable {
 
     // MARK: - XMP Parsing
 
-    private func parseXMPSidecar(_ content: String) -> PhotoMetadata {
+    func parseXMPSidecar(_ content: String) -> PhotoMetadata {
         var rating = 0
         var keywords: [String] = []
 
@@ -196,7 +196,7 @@ final class MetadataService: @unchecked Sendable {
         return PhotoMetadata(rating: rating, keywords: keywords)
     }
 
-    private func parseEditParameters(from content: String) -> EditParameters? {
+    func parseEditParameters(from content: String) -> EditParameters? {
         let pattern = #"<phocasa:EditParameters>([^<]+)</phocasa:EditParameters>"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
@@ -225,7 +225,7 @@ final class MetadataService: @unchecked Sendable {
         }
     }
 
-    private func escapeXML(_ string: String) -> String {
+    func escapeXML(_ string: String) -> String {
         string
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
