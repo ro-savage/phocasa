@@ -90,11 +90,36 @@ final class PhotoLibraryViewModel {
     private let scanner = FolderScanner()
     private let metadata = MetadataService.shared
     private var modelContext: ModelContext?
+    private var availablePhotoIDs: Set<UUID> = []
+    private var needsAvailabilityCheck = true
 
     func setModelContext(_ context: ModelContext) {
         self.modelContext = context
         loadExistingData()
         loadPresets()
+        rescanCurrentLibrary()
+    }
+
+    // MARK: - File Availability
+
+    private func checkFileAvailability(for photos: [PhotoAsset]) {
+        var available = Set<UUID>()
+        let fm = FileManager.default
+        for photo in photos {
+            let jpgExists = photo.jpgPath.map { fm.fileExists(atPath: $0) } ?? false
+            let rawExists = photo.rawPath.map { fm.fileExists(atPath: $0) } ?? false
+            if jpgExists || rawExists {
+                available.insert(photo.id)
+            }
+        }
+        availablePhotoIDs = available
+        needsAvailabilityCheck = false
+    }
+
+    func refreshAvailability() {
+        needsAvailabilityCheck = true
+        loadExistingData()
+        applyActiveFilters()
     }
 
     // MARK: - Data Loading
@@ -107,7 +132,13 @@ final class PhotoLibraryViewModel {
             predicate: #Predicate { !$0.isDeleted },
             sortBy: [SortDescriptor(\.creationDate, order: sortOrder)]
         )
-        allPhotos = (try? context.fetch(photoDescriptor)) ?? []
+        let fetchedPhotos = (try? context.fetch(photoDescriptor)) ?? []
+
+        if needsAvailabilityCheck {
+            checkFileAvailability(for: fetchedPhotos)
+        }
+
+        allPhotos = fetchedPhotos.filter { availablePhotoIDs.contains($0.id) }
 
         let binDescriptor = FetchDescriptor<PhotoAsset>(
             predicate: #Predicate { $0.isDeleted },
@@ -122,7 +153,24 @@ final class PhotoLibraryViewModel {
             photos = allPhotos
         }
 
-        // Precompute counts for sidebar (single pass instead of per-filter O(n) scans)
+        recomputeSidebarCounts()
+
+        let tagDescriptor = FetchDescriptor<Tag>(sortBy: [SortDescriptor(\.category), SortDescriptor(\.name)])
+        allTags = (try? context.fetch(tagDescriptor)) ?? []
+
+        let categories = Array(Set(allTags.compactMap { $0.category.isEmpty ? nil : $0.category }))
+        tagCategories = categories.sorted { a, b in
+            let countA = categoryCounts[a, default: 0]
+            let countB = categoryCounts[b, default: 0]
+            if countA != countB { return countA > countB }
+            return a < b
+        }
+
+        let libDescriptor = FetchDescriptor<PhotoLibrary>()
+        currentLibrary = (try? context.fetch(libDescriptor))?.first
+    }
+
+    private func recomputeSidebarCounts() {
         var counts: [Int: Int] = [:]
         var catCounts: [String: Int] = [:]
         var tCounts: [UUID: Int] = [:]
@@ -145,20 +193,14 @@ final class PhotoLibraryViewModel {
         tagCounts = tCounts
         jpgCount = jpgC
         rawCount = rawC
+    }
 
-        let tagDescriptor = FetchDescriptor<Tag>(sortBy: [SortDescriptor(\.category), SortDescriptor(\.name)])
-        allTags = (try? context.fetch(tagDescriptor)) ?? []
-
-        let categories = Array(Set(allTags.compactMap { $0.category.isEmpty ? nil : $0.category }))
-        tagCategories = categories.sorted { a, b in
-            let countA = catCounts[a, default: 0]
-            let countB = catCounts[b, default: 0]
-            if countA != countB { return countA > countB }
-            return a < b
+    private func updateSidebarAfterChange() {
+        if !activeFilters.isEmpty && !viewingBin {
+            applyActiveFilters()
+        } else {
+            recomputeSidebarCounts()
         }
-
-        let libDescriptor = FetchDescriptor<PhotoLibrary>()
-        currentLibrary = (try? context.fetch(libDescriptor))?.first
     }
 
     // MARK: - Folder Opening
@@ -267,6 +309,7 @@ final class PhotoLibraryViewModel {
             try? context.save()
 
             scanProgress = "Found \(discovered.count) photos (\(newCount) new)"
+            needsAvailabilityCheck = true
             loadExistingData()
             isScanning = false
         }
@@ -278,21 +321,20 @@ final class PhotoLibraryViewModel {
         photo.rating = rating
         try? modelContext?.save()
 
-        let keywords = photo.tags.map(\.fullName)
-        metadata.writeMetadata(rating: rating, keywords: keywords, toImageAt: photo.displayPath)
+        writeMetadataInBackground([metadataWriteItem(for: photo)])
+        updateSidebarAfterChange()
     }
 
     func setRatingForSelection(_ rating: Int) {
         guard let context = modelContext else { return }
         let selected = photos.filter { selectedPhotos.contains($0.id) }
-        var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
         for photo in selected {
             photo.rating = rating
-            writeBackItems.append((rating, photo.tags.map(\.fullName), photo.displayPath))
         }
         try? context.save()
 
-        writeMetadataInBackground(writeBackItems)
+        writeMetadataInBackground(selected.map { metadataWriteItem(for: $0) })
+        updateSidebarAfterChange()
     }
 
     // MARK: - Selection
@@ -490,10 +532,10 @@ final class PhotoLibraryViewModel {
             photo.tags.append(tag)
             try? context.save()
 
-            let keywords = photo.tags.map(\.fullName)
-            metadata.writeMetadata(rating: photo.rating, keywords: keywords, toImageAt: photo.displayPath)
+            writeMetadataInBackground([metadataWriteItem(for: photo)])
         }
-        loadExistingData()
+        refreshTagLists(newTag: tag)
+        updateSidebarAfterChange()
     }
 
     func addTagToSelection(name: String, category: String) {
@@ -501,26 +543,26 @@ final class PhotoLibraryViewModel {
         let tag = findOrCreateTag(name: name, category: category, in: context)
         let selected = photos.filter { selectedPhotos.contains($0.id) }
 
-        var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
+        var changed: [PhotoAsset] = []
         for photo in selected {
             if !photo.tags.contains(where: { $0.id == tag.id }) {
                 photo.tags.append(tag)
-                writeBackItems.append((photo.rating, photo.tags.map(\.fullName), photo.displayPath))
+                changed.append(photo)
             }
         }
         try? context.save()
         refreshTagLists(newTag: tag)
+        updateSidebarAfterChange()
 
-        writeMetadataInBackground(writeBackItems)
+        writeMetadataInBackground(changed.map { metadataWriteItem(for: $0) })
     }
 
     func removeTag(_ tag: Tag, from photo: PhotoAsset) {
         photo.tags.removeAll { $0.id == tag.id }
         try? modelContext?.save()
 
-        let keywords = photo.tags.map(\.fullName)
-        metadata.writeMetadata(rating: photo.rating, keywords: keywords, toImageAt: photo.displayPath)
-        loadExistingData()
+        writeMetadataInBackground([metadataWriteItem(for: photo)])
+        updateSidebarAfterChange()
     }
 
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
@@ -530,13 +572,12 @@ final class PhotoLibraryViewModel {
 
             if allHave {
                 guard let context = modelContext else { return }
-                var writeBackItems: [(rating: Int, keywords: [String], path: String)] = []
                 for p in selectedPhotoList {
                     p.tags.removeAll { $0.id == tag.id }
-                    writeBackItems.append((p.rating, p.tags.map(\.fullName), p.displayPath))
                 }
                 try? context.save()
-                writeMetadataInBackground(writeBackItems)
+                writeMetadataInBackground(selectedPhotoList.map { metadataWriteItem(for: $0) })
+                updateSidebarAfterChange()
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
             }
@@ -774,6 +815,10 @@ final class PhotoLibraryViewModel {
         if isEditing {
             stopEditing(save: true)
         }
+        if let photo = selectedDetailPhoto {
+            selectedPhotos = [photo.id]
+            lastSelectedId = photo.id
+        }
         showingDetail = false
         selectedDetailPhoto = nil
     }
@@ -849,6 +894,10 @@ final class PhotoLibraryViewModel {
     }
 
     // MARK: - Background Metadata Write-back
+
+    private func metadataWriteItem(for photo: PhotoAsset) -> (rating: Int, keywords: [String], path: String) {
+        (photo.rating, photo.tags.map(\.fullName), photo.displayPath)
+    }
 
     private func writeMetadataInBackground(_ items: [(rating: Int, keywords: [String], path: String)]) {
         guard !items.isEmpty else { return }
