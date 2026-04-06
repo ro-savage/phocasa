@@ -62,13 +62,13 @@ struct SidebarView: View {
                         }
 
                         ForEach(viewModel.allTags.filter { $0.category == category && $0.parent == nil }, id: \.id) { tag in
-                            sidebarRow(filter: .tag(tag.id), badge: tag.photos.count) {
+                            sidebarRow(filter: .tag(tag.id), badge: viewModel.tagCounts[tag.id, default: 0]) {
                                 Label(tag.name, systemImage: "tag")
                                     .padding(.leading, 16)
                             }
 
                             ForEach(tag.children, id: \.id) { child in
-                                sidebarRow(filter: .tag(child.id), badge: child.photos.count) {
+                                sidebarRow(filter: .tag(child.id), badge: viewModel.tagCounts[child.id, default: 0]) {
                                     Label(child.name, systemImage: "tag")
                                         .padding(.leading, 32)
                                 }
@@ -77,7 +77,7 @@ struct SidebarView: View {
                     }
 
                     ForEach(viewModel.uncategorizedTags, id: \.id) { tag in
-                        sidebarRow(filter: .tag(tag.id), badge: tag.photos.count) {
+                        sidebarRow(filter: .tag(tag.id), badge: viewModel.tagCounts[tag.id, default: 0]) {
                             Label(tag.name, systemImage: "tag")
                         }
                     }

@@ -63,6 +63,7 @@ final class PhotoLibraryViewModel {
     var categoryCounts: [String: Int] = [:]
     var jpgCount: Int = 0
     var rawCount: Int = 0
+    var tagCounts: [UUID: Int] = [:]
 
     // MARK: - Image Editing State
     var isEditing: Bool = false
@@ -124,6 +125,7 @@ final class PhotoLibraryViewModel {
         // Precompute counts for sidebar (single pass instead of per-filter O(n) scans)
         var counts: [Int: Int] = [:]
         var catCounts: [String: Int] = [:]
+        var tCounts: [UUID: Int] = [:]
         var jpgC = 0
         var rawC = 0
         for photo in allPhotos {
@@ -131,14 +133,16 @@ final class PhotoLibraryViewModel {
             if photo.jpgPath != nil { jpgC += 1 }
             if photo.rawPath != nil { rawC += 1 }
             var seenCategories = Set<String>()
-            for tag in photo.tags where !tag.category.isEmpty {
-                if seenCategories.insert(tag.category).inserted {
+            for tag in photo.tags {
+                tCounts[tag.id, default: 0] += 1
+                if !tag.category.isEmpty && seenCategories.insert(tag.category).inserted {
                     catCounts[tag.category, default: 0] += 1
                 }
             }
         }
         ratingCounts = counts
         categoryCounts = catCounts
+        tagCounts = tCounts
         jpgCount = jpgC
         rawCount = rawC
 
@@ -660,7 +664,67 @@ final class PhotoLibraryViewModel {
         }
 
         photos = filtered
+        recomputeCrossFilterCounts()
         applySearch()
+    }
+
+    /// Recompute badge counts for each filter category based on photos matching the OTHER categories.
+    /// This gives faceted-search behavior: selecting "3 stars" updates tag badges to show
+    /// how many 3-star photos have each tag, and vice versa.
+    private func recomputeCrossFilterCounts() {
+        let filters = Array(activeFilters)
+
+        // Rating counts: base = photos filtered by everything EXCEPT ratings
+        let nonRating = filters.filter { $0.filterCategory != "rating" }
+        let ratingBase = applyFilterGroup(nonRating)
+        var newRatingCounts: [Int: Int] = [:]
+        for photo in ratingBase {
+            newRatingCounts[photo.rating, default: 0] += 1
+        }
+        ratingCounts = newRatingCounts
+
+        // Tag + category counts: base = photos filtered by everything EXCEPT tags
+        let nonTag = filters.filter { $0.filterCategory != "tag" }
+        let tagBase = applyFilterGroup(nonTag)
+        var newCatCounts: [String: Int] = [:]
+        var newTagCounts: [UUID: Int] = [:]
+        for photo in tagBase {
+            var seenCategories = Set<String>()
+            for tag in photo.tags {
+                newTagCounts[tag.id, default: 0] += 1
+                if !tag.category.isEmpty && seenCategories.insert(tag.category).inserted {
+                    newCatCounts[tag.category, default: 0] += 1
+                }
+            }
+        }
+        categoryCounts = newCatCounts
+        tagCounts = newTagCounts
+
+        // File type counts: base = photos filtered by everything EXCEPT file type
+        let nonFileType = filters.filter { $0.filterCategory != "fileType" }
+        let fileTypeBase = applyFilterGroup(nonFileType)
+        var jpgC = 0
+        var rawC = 0
+        for photo in fileTypeBase {
+            if photo.jpgPath != nil { jpgC += 1 }
+            if photo.rawPath != nil { rawC += 1 }
+        }
+        jpgCount = jpgC
+        rawCount = rawC
+    }
+
+    private func applyFilterGroup(_ filters: [SidebarFilter]) -> [PhotoAsset] {
+        guard !filters.isEmpty else { return allPhotos }
+
+        var filtered = allPhotos
+        let byCategory = Dictionary(grouping: filters) { $0.filterCategory }
+
+        for (_, categoryFilters) in byCategory {
+            filtered = filtered.filter { photo in
+                categoryFilters.contains { $0.matches(photo) }
+            }
+        }
+        return filtered
     }
 
     func applyCurrentFilter() {
