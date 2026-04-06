@@ -49,9 +49,7 @@ struct ContentView: View {
                 }
             }
             .overlay(alignment: .bottom) { statusBar }
-            .onReceive(NotificationCenter.default.publisher(for: .openFolder)) { _ in
-                viewModel.openFolder()
-            }
+            .focusedSceneValue(\.openFolderAction) { viewModel.openFolder() }
             .onAppear {
                 viewModel.setModelContext(modelContext)
                 isContentFocused = true

@@ -77,6 +77,8 @@ struct PhotoGridView: View {
 
     @ViewBuilder
     private func contextMenu(for photo: PhotoAsset) -> some View {
+        let isMulti = viewModel.isPartOfMultiSelection(photo)
+
         if !viewModel.viewingBin {
             Button("View") {
                 viewModel.openDetail(for: photo)
@@ -87,7 +89,7 @@ struct PhotoGridView: View {
             Menu("Rate") {
                 ForEach(1...5, id: \.self) { stars in
                     Button(String(repeating: "\u{2605}", count: stars)) {
-                        if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
+                        if isMulti {
                             viewModel.setRatingForSelection(stars)
                         } else {
                             viewModel.setRating(stars, for: photo)
@@ -96,7 +98,7 @@ struct PhotoGridView: View {
                 }
                 Divider()
                 Button("Clear Rating") {
-                    if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
+                    if isMulti {
                         viewModel.setRatingForSelection(0)
                     } else {
                         viewModel.setRating(0, for: photo)
@@ -108,15 +110,13 @@ struct PhotoGridView: View {
                 tagMenuContent(for: photo)
             }
 
-            // Presets submenu
             if !viewModel.editPresets.isEmpty {
                 Menu("Apply Preset") {
                     ForEach(viewModel.editPresets, id: \.id) { preset in
                         Button(preset.name) {
-                            if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
+                            if isMulti {
                                 viewModel.applyPresetToSelection(preset)
                             } else {
-                                // Apply to single photo
                                 let wasSelected = viewModel.selectedPhotos
                                 viewModel.selectedPhotos = [photo.id]
                                 viewModel.applyPresetToSelection(preset)
@@ -138,27 +138,18 @@ struct PhotoGridView: View {
             }
 
             Button("Move to Bin", role: .destructive) {
-                if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
-                    viewModel.deleteSelected()
-                } else {
-                    viewModel.deletePhoto(photo)
-                }
+                if isMulti { viewModel.deleteSelected() }
+                else { viewModel.deletePhoto(photo) }
             }
         } else {
             Button("Restore") {
-                if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
-                    viewModel.restoreSelected()
-                } else {
-                    viewModel.restoreFromBin([photo])
-                }
+                if isMulti { viewModel.restoreSelected() }
+                else { viewModel.restoreFromBin([photo]) }
             }
 
             Button("Delete Forever", role: .destructive) {
-                if viewModel.selectedPhotos.contains(photo.id) && viewModel.selectedPhotos.count > 1 {
-                    viewModel.deleteSelected()
-                } else {
-                    viewModel.deletePhoto(photo)
-                }
+                if isMulti { viewModel.deleteSelected() }
+                else { viewModel.deletePhoto(photo) }
             }
         }
     }

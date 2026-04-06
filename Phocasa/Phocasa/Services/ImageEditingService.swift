@@ -49,10 +49,8 @@ final class ImageEditingService: @unchecked Sendable {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             renderQueue.async { [self] in
                 if cachedStandardURL != url {
-                    if var img = CIImage(contentsOf: url) {
-                        let o = img.properties[kCGImagePropertyOrientation as String] as? UInt32 ?? 1
-                        img = img.oriented(CGImagePropertyOrientation(rawValue: o) ?? .up)
-                        cachedStandardImage = img
+                    if let img = CIImage(contentsOf: url) {
+                        cachedStandardImage = orientedImage(img)
                     }
                     cachedStandardURL = url
                 }
@@ -122,15 +120,14 @@ final class ImageEditingService: @unchecked Sendable {
                 if let cached = cachedStandardImage, cachedStandardURL == url {
                     sourceImage = cached
                 } else {
-                    guard var img = CIImage(contentsOf: url) else {
+                    guard let img = CIImage(contentsOf: url) else {
                         continuation.resume(returning: nil)
                         return
                     }
-                    let o = img.properties[kCGImagePropertyOrientation as String] as? UInt32 ?? 1
-                    img = img.oriented(CGImagePropertyOrientation(rawValue: o) ?? .up)
-                    cachedStandardImage = img
+                    let oriented = orientedImage(img)
+                    cachedStandardImage = oriented
                     cachedStandardURL = url
-                    sourceImage = img
+                    sourceImage = oriented
                 }
 
                 var ciImage = sourceImage
@@ -181,13 +178,12 @@ final class ImageEditingService: @unchecked Sendable {
     func exportStandardToJPEG(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double = 0.95) async -> Bool {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             renderQueue.async { [self] in
-                guard var ciImage = CIImage(contentsOf: sourceURL) else {
+                guard let rawImage = CIImage(contentsOf: sourceURL) else {
                     continuation.resume(returning: false)
                     return
                 }
 
-                let orientVal = ciImage.properties[kCGImagePropertyOrientation as String] as? UInt32 ?? 1
-                ciImage = ciImage.oriented(CGImagePropertyOrientation(rawValue: orientVal) ?? .up)
+                var ciImage = orientedImage(rawImage)
                 ciImage = applyStandardFilters(to: ciImage, parameters: parameters)
                 ciImage = applyTransform(to: ciImage, parameters: parameters)
 
@@ -421,6 +417,11 @@ final class ImageEditingService: @unchecked Sendable {
 
     // MARK: - Helpers
 
+    private func orientedImage(_ image: CIImage) -> CIImage {
+        let o = image.properties[kCGImagePropertyOrientation as String] as? UInt32 ?? 1
+        return image.oriented(CGImagePropertyOrientation(rawValue: o) ?? .up)
+    }
+
     /// Tone curve for highlight recovery and shadow lifting.
     /// h: -100 to +100 (positive = recover/darken highlights, negative = brighten)
     /// s: -100 to +100 (positive = lift/brighten shadows, negative = crush)
@@ -469,24 +470,8 @@ final class ImageEditingService: @unchecked Sendable {
         return NSImage(cgImage: cgImage, size: NSSize(width: extent.width, height: extent.height))
     }
 
-    private func captureFileDates(_ url: URL) -> (creation: Date?, modification: Date?)? {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        guard let attrs else { return nil }
-        return (attrs[.creationDate] as? Date, attrs[.modificationDate] as? Date)
-    }
-
-    private func restoreFileDates(_ url: URL, dates: (creation: Date?, modification: Date?)?) {
-        guard let dates else { return }
-        var attrs: [FileAttributeKey: Any] = [:]
-        if let creation = dates.creation { attrs[.creationDate] = creation }
-        if let modification = dates.modification { attrs[.modificationDate] = modification }
-        if !attrs.isEmpty {
-            try? FileManager.default.setAttributes(attrs, ofItemAtPath: url.path)
-        }
-    }
-
     private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
-        let originalDates = captureFileDates(url)
+        let originalDates = Phocasa.captureFileDates(url)
 
         let extent = image.extent
         guard let cgImage = ciContext.createCGImage(image, from: extent) else { return false }
@@ -496,7 +481,7 @@ final class ImageEditingService: @unchecked Sendable {
         ] as CFDictionary)
         let success = CGImageDestinationFinalize(destination)
 
-        if success { restoreFileDates(url, dates: originalDates) }
+        if success { Phocasa.restoreFileDates(url, dates: originalDates) }
         return success
     }
 }

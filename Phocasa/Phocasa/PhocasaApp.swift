@@ -1,8 +1,21 @@
 import SwiftUI
 import SwiftData
 
+private struct OpenFolderActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var openFolderAction: (() -> Void)? {
+        get { self[OpenFolderActionKey.self] }
+        set { self[OpenFolderActionKey.self] = newValue }
+    }
+}
+
 @main
 struct PhocasaApp: App {
+    @FocusedValue(\.openFolderAction) var openFolder
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -11,14 +24,10 @@ struct PhocasaApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder...") {
-                    NotificationCenter.default.post(name: .openFolder, object: nil)
+                    openFolder?()
                 }
                 .keyboardShortcut("o", modifiers: .command)
             }
         }
     }
-}
-
-extension Notification.Name {
-    static let openFolder = Notification.Name("openFolder")
 }

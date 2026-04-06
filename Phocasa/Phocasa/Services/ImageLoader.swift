@@ -86,9 +86,37 @@ final class ImageLoader: @unchecked Sendable {
     }
 
     func thumbnailJPEGData(for path: String, maxSize: CGFloat = 300) async -> Data? {
-        guard let image = await loadThumbnail(for: path, maxSize: maxSize) else { return nil }
-        guard let tiffData = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData) else { return nil }
-        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7])
+        let cacheKey = path as NSString
+        if let cached = thumbnailCache.object(forKey: cacheKey) {
+            guard let cgImage = cached.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7])
+        }
+
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let url = URL(fileURLWithPath: path)
+                guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: maxSize,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true
+                ]
+
+                guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let bitmap = NSBitmapImageRep(cgImage: cgImage)
+                let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7])
+                continuation.resume(returning: data)
+            }
+        }
     }
 }

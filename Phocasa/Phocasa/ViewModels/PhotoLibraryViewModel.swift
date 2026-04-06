@@ -87,11 +87,20 @@ final class PhotoLibraryViewModel {
         return photo.jpgPath != nil
     }
 
+    var selectedPhotosList: [PhotoAsset] {
+        photos.filter { selectedPhotos.contains($0.id) }
+    }
+
+    func isPartOfMultiSelection(_ photo: PhotoAsset) -> Bool {
+        selectedPhotos.count > 1 && selectedPhotos.contains(photo.id)
+    }
+
     private let scanner = FolderScanner()
     private let metadata = MetadataService.shared
     private var modelContext: ModelContext?
     private var availablePhotoIDs: Set<UUID> = []
     private var needsAvailabilityCheck = true
+    private var previewTask: Task<Void, Never>?
 
     func setModelContext(_ context: ModelContext) {
         self.modelContext = context
@@ -327,13 +336,12 @@ final class PhotoLibraryViewModel {
 
     func setRatingForSelection(_ rating: Int) {
         guard let context = modelContext else { return }
-        let selected = photos.filter { selectedPhotos.contains($0.id) }
-        for photo in selected {
+        for photo in selectedPhotosList {
             photo.rating = rating
         }
         try? context.save()
 
-        writeMetadataInBackground(selected.map { metadataWriteItem(for: $0) })
+        writeMetadataInBackground(selectedPhotosList.map { metadataWriteItem(for: $0) })
         updateSidebarAfterChange()
     }
 
@@ -384,7 +392,7 @@ final class PhotoLibraryViewModel {
     }
 
     func deleteSelected() {
-        let toDelete = photos.filter { selectedPhotos.contains($0.id) }
+        let toDelete = selectedPhotosList
         guard !toDelete.isEmpty else { return }
 
         if viewingBin {
@@ -435,7 +443,7 @@ final class PhotoLibraryViewModel {
         if let rawPath = photo.rawPath {
             try? FileManager.default.trashItem(at: URL(fileURLWithPath: rawPath), resultingItemURL: nil)
             // Clean up XMP sidecar
-            let sidecarURL = URL(fileURLWithPath: rawPath).deletingPathExtension().appendingPathExtension("xmp")
+            let sidecarURL = URL(fileURLWithPath: rawPath).xmpSidecarURL
             if FileManager.default.fileExists(atPath: sidecarURL.path) {
                 try? FileManager.default.trashItem(at: sidecarURL, resultingItemURL: nil)
             }
@@ -471,8 +479,7 @@ final class PhotoLibraryViewModel {
     }
 
     func restoreSelected() {
-        let toRestore = photos.filter { selectedPhotos.contains($0.id) }
-        restoreFromBin(toRestore)
+        restoreFromBin(selectedPhotosList)
     }
 
     func confirmPermanentDelete() {
@@ -485,7 +492,7 @@ final class PhotoLibraryViewModel {
             if let rawPath = photo.rawPath {
                 try? FileManager.default.trashItem(at: URL(fileURLWithPath: rawPath), resultingItemURL: nil)
                 // Clean up XMP sidecar
-                let sidecarURL = URL(fileURLWithPath: rawPath).deletingPathExtension().appendingPathExtension("xmp")
+                let sidecarURL = URL(fileURLWithPath: rawPath).xmpSidecarURL
                 if FileManager.default.fileExists(atPath: sidecarURL.path) {
                     try? FileManager.default.trashItem(at: sidecarURL, resultingItemURL: nil)
                 }
@@ -541,10 +548,9 @@ final class PhotoLibraryViewModel {
     func addTagToSelection(name: String, category: String) {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
-        let selected = photos.filter { selectedPhotos.contains($0.id) }
 
         var changed: [PhotoAsset] = []
-        for photo in selected {
+        for photo in selectedPhotosList {
             if !photo.tags.contains(where: { $0.id == tag.id }) {
                 photo.tags.append(tag)
                 changed.append(photo)
@@ -566,17 +572,17 @@ final class PhotoLibraryViewModel {
     }
 
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
-        if selectedPhotos.contains(photo.id) && selectedPhotos.count > 1 {
-            let selectedPhotoList = photos.filter { selectedPhotos.contains($0.id) }
-            let allHave = selectedPhotoList.allSatisfy { $0.tags.contains { $0.id == tag.id } }
+        if isPartOfMultiSelection(photo) {
+            let selected = selectedPhotosList
+            let allHave = selected.allSatisfy { $0.tags.contains { $0.id == tag.id } }
 
             if allHave {
                 guard let context = modelContext else { return }
-                for p in selectedPhotoList {
+                for p in selected {
                     p.tags.removeAll { $0.id == tag.id }
                 }
                 try? context.save()
-                writeMetadataInBackground(selectedPhotoList.map { metadataWriteItem(for: $0) })
+                writeMetadataInBackground(selected.map { metadataWriteItem(for: $0) })
                 updateSidebarAfterChange()
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
@@ -591,16 +597,15 @@ final class PhotoLibraryViewModel {
     }
 
     func contextMenuTagState(_ tag: Tag, for photo: PhotoAsset) -> Bool {
-        if selectedPhotos.contains(photo.id) && selectedPhotos.count > 1 {
-            let selectedPhotoList = photos.filter { selectedPhotos.contains($0.id) }
-            return selectedPhotoList.allSatisfy { $0.tags.contains { $0.id == tag.id } }
+        if isPartOfMultiSelection(photo) {
+            return selectedPhotosList.allSatisfy { $0.tags.contains { $0.id == tag.id } }
         } else {
             return photo.tags.contains { $0.id == tag.id }
         }
     }
 
     func openTagEditorForContextMenu(photo: PhotoAsset) {
-        if !(selectedPhotos.contains(photo.id) && selectedPhotos.count > 1) {
+        if !isPartOfMultiSelection(photo) {
             selectedPhotos = [photo.id]
             lastSelectedId = photo.id
         }
@@ -612,8 +617,7 @@ final class PhotoLibraryViewModel {
         allTags.filter { $0.category.isEmpty }
     }
 
-    func revertEditsForPhoto(_ photo: PhotoAsset) {
-        photo.jpgEditParametersData = nil
+    private func clearRAWSidecarEdits(for photo: PhotoAsset) {
         photo.hasRawEdits = false
         if let rawPath = photo.rawPath {
             let existing = metadata.readMetadata(from: rawPath)
@@ -624,6 +628,11 @@ final class PhotoLibraryViewModel {
                 editParameters: nil
             )
         }
+    }
+
+    func revertEditsForPhoto(_ photo: PhotoAsset) {
+        photo.jpgEditParametersData = nil
+        clearRAWSidecarEdits(for: photo)
         try? modelContext?.save()
     }
 
@@ -982,15 +991,8 @@ final class PhotoLibraryViewModel {
         guard let photo = selectedDetailPhoto else { return }
 
         if editParameters.isDefault {
-            // Clear edits
             if editingRAW {
-                photo.hasRawEdits = false
-                if let rawPath = photo.rawPath {
-                    // Write sidecar without edit params
-                    let existing = metadata.readMetadata(from: rawPath)
-                    metadata.writeSidecar(rating: existing.rating, keywords: existing.keywords,
-                                         for: URL(fileURLWithPath: rawPath), editParameters: nil)
-                }
+                clearRAWSidecarEdits(for: photo)
             } else {
                 photo.jpgEditParametersData = nil
             }
@@ -1012,17 +1014,11 @@ final class PhotoLibraryViewModel {
         updateEditPreview()
     }
 
-    /// Revert edits AND clear saved parameters on disk.
     func revertEdits() {
         editParameters = EditParameters()
         if let photo = selectedDetailPhoto {
             if editingRAW {
-                photo.hasRawEdits = false
-                if let rawPath = photo.rawPath {
-                    let existing = metadata.readMetadata(from: rawPath)
-                    metadata.writeSidecar(rating: existing.rating, keywords: existing.keywords,
-                                         for: URL(fileURLWithPath: rawPath), editParameters: nil)
-                }
+                clearRAWSidecarEdits(for: photo)
             } else {
                 photo.jpgEditParametersData = nil
             }
@@ -1048,6 +1044,7 @@ final class PhotoLibraryViewModel {
     func updateEditPreview() {
         guard isEditing, let photo = selectedDetailPhoto else { return }
 
+        previewTask?.cancel()
         renderGeneration += 1
         let generation = renderGeneration
         let params = editParameters
@@ -1058,7 +1055,10 @@ final class PhotoLibraryViewModel {
         let url = URL(fileURLWithPath: path)
         let maxSize = CGSize(width: 1600, height: 1100)
 
-        Task {
+        previewTask = Task {
+            try? await Task.sleep(for: .milliseconds(30))
+            guard !Task.isCancelled, renderGeneration == generation else { return }
+
             let result: NSImage?
             if isRAW {
                 result = await ImageEditingService.shared.processRAW(url: url, parameters: params, maxSize: maxSize)
@@ -1198,9 +1198,8 @@ final class PhotoLibraryViewModel {
 
     func applyPresetToSelection(_ preset: EditPreset) {
         let params = preset.parameters
-        let selected = photos.filter { selectedPhotos.contains($0.id) }
 
-        for photo in selected {
+        for photo in selectedPhotosList {
             if photo.jpgPath != nil {
                 photo.jpgEditParameters = params
             }

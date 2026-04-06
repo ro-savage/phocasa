@@ -32,7 +32,7 @@ final class FolderScanner: Sendable {
     }
 
     private func scanSync(folderURL: URL) -> [DiscoveredPhoto] {
-        var filesByFolder: [String: [String: [(url: URL, isRaw: Bool)]]] = [:]
+        var filesByFolder: [String: [String: [(url: URL, isRaw: Bool, fileSize: Int64, creationDate: Date?)]]] = [:]
 
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(
@@ -45,20 +45,17 @@ final class FolderScanner: Sendable {
             let ext = fileURL.pathExtension.lowercased()
             guard Self.allExtensions.contains(ext) else { continue }
 
-            guard let resourceValues = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+            guard let resourceValues = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey]),
                   resourceValues.isRegularFile == true else { continue }
 
             let stem = fileURL.deletingPathExtension().lastPathComponent
             let folder = fileURL.deletingLastPathComponent().path
             let isRaw = Self.rawExtensions.contains(ext)
+            let fileSize = Int64(resourceValues.fileSize ?? 0)
 
-            if filesByFolder[folder] == nil {
-                filesByFolder[folder] = [:]
-            }
-            if filesByFolder[folder]![stem] == nil {
-                filesByFolder[folder]![stem] = []
-            }
-            filesByFolder[folder]![stem]!.append((url: fileURL, isRaw: isRaw))
+            filesByFolder[folder, default: [:]][stem, default: []].append(
+                (url: fileURL, isRaw: isRaw, fileSize: fileSize, creationDate: resourceValues.creationDate)
+            )
         }
 
         var results: [DiscoveredPhoto] = []
@@ -71,12 +68,10 @@ final class FolderScanner: Sendable {
                 var creationDate: Date?
 
                 for file in files {
-                    let resourceValues = try? file.url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey])
-                    let size = Int64(resourceValues?.fileSize ?? 0)
-                    totalSize += size
+                    totalSize += file.fileSize
 
                     if creationDate == nil {
-                        creationDate = resourceValues?.creationDate
+                        creationDate = file.creationDate
                     }
 
                     if file.isRaw {

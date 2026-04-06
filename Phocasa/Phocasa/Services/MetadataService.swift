@@ -2,8 +2,37 @@ import Foundation
 import ImageIO
 import AppKit
 
-final class MetadataService: @unchecked Sendable {
+// MARK: - File Date Preservation
+
+func captureFileDates(_ url: URL) -> (creation: Date?, modification: Date?)? {
+    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+    guard let attrs else { return nil }
+    return (attrs[.creationDate] as? Date, attrs[.modificationDate] as? Date)
+}
+
+func restoreFileDates(_ url: URL, dates: (creation: Date?, modification: Date?)?) {
+    guard let dates else { return }
+    var attrs: [FileAttributeKey: Any] = [:]
+    if let creation = dates.creation { attrs[.creationDate] = creation }
+    if let modification = dates.modification { attrs[.modificationDate] = modification }
+    if !attrs.isEmpty {
+        try? FileManager.default.setAttributes(attrs, ofItemAtPath: url.path)
+    }
+}
+
+// MARK: - URL Extensions
+
+extension URL {
+    var xmpSidecarURL: URL {
+        deletingPathExtension().appendingPathExtension("xmp")
+    }
+}
+
+final class MetadataService: Sendable {
     static let shared = MetadataService()
+
+    private static let liRegex = try! NSRegularExpression(pattern: #"<rdf:li>([^<]+)</rdf:li>"#)
+    private static let editParamsRegex = try! NSRegularExpression(pattern: #"<phocasa:EditParameters>([^<]+)</phocasa:EditParameters>"#)
 
     private init() {}
 
@@ -39,7 +68,7 @@ final class MetadataService: @unchecked Sendable {
         }
 
         // Try XMP sidecar for RAW files
-        let sidecarURL = url.deletingPathExtension().appendingPathExtension("xmp")
+        let sidecarURL = url.xmpSidecarURL
         if let sidecarData = try? String(contentsOf: sidecarURL, encoding: .utf8) {
             let parsed = parseXMPSidecar(sidecarData)
             if parsed.rating > 0 { rating = parsed.rating }
@@ -64,7 +93,7 @@ final class MetadataService: @unchecked Sendable {
     }
 
     private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
-        let originalDates = captureFileDates(url)
+        let originalDates = Phocasa.captureFileDates(url)
 
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
         let uti = CGImageSourceGetType(source) ?? (kUTTypeJPEG as CFString)
@@ -105,24 +134,21 @@ final class MetadataService: @unchecked Sendable {
         var error: Unmanaged<CFError>?
         CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, &error)
 
-        restoreFileDates(url, dates: originalDates)
+        Phocasa.restoreFileDates(url, dates: originalDates)
     }
 
     func writeSidecar(rating: Int, keywords: [String], for imageURL: URL, editParameters: EditParameters? = nil) {
-        let sidecarURL = imageURL.deletingPathExtension().appendingPathExtension("xmp")
-        writeSidecarToURL(sidecarURL, rating: rating, keywords: keywords, editParameters: editParameters)
+        writeSidecarToURL(imageURL.xmpSidecarURL, rating: rating, keywords: keywords, editParameters: editParameters)
     }
 
     func writeEditParameters(_ params: EditParameters, forRAWAt path: String) {
         let url = URL(fileURLWithPath: path)
         let existing = readMetadata(from: path)
-        let sidecarURL = url.deletingPathExtension().appendingPathExtension("xmp")
-        writeSidecarToURL(sidecarURL, rating: existing.rating, keywords: existing.keywords, editParameters: params)
+        writeSidecarToURL(url.xmpSidecarURL, rating: existing.rating, keywords: existing.keywords, editParameters: params)
     }
 
     func readEditParameters(forRAWAt path: String) -> EditParameters? {
-        let url = URL(fileURLWithPath: path)
-        let sidecarURL = url.deletingPathExtension().appendingPathExtension("xmp")
+        let sidecarURL = URL(fileURLWithPath: path).xmpSidecarURL
         guard let content = try? String(contentsOf: sidecarURL, encoding: .utf8) else { return nil }
         return parseEditParameters(from: content)
     }
@@ -181,25 +207,17 @@ final class MetadataService: @unchecked Sendable {
         }
 
         // Parse keywords from rdf:li elements within dc:subject
-        let liPattern = #"<rdf:li>([^<]+)</rdf:li>"#
-        if let regex = try? NSRegularExpression(pattern: liPattern) {
-            let nsContent = content as NSString
-            let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-            keywords = matches.compactMap { match in
-                if match.numberOfRanges > 1 {
-                    return nsContent.substring(with: match.range(at: 1))
-                }
-                return nil
-            }
+        let nsContent = content as NSString
+        let matches = Self.liRegex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        keywords = matches.compactMap { match in
+            match.numberOfRanges > 1 ? nsContent.substring(with: match.range(at: 1)) : nil
         }
 
         return PhotoMetadata(rating: rating, keywords: keywords)
     }
 
     func parseEditParameters(from content: String) -> EditParameters? {
-        let pattern = #"<phocasa:EditParameters>([^<]+)</phocasa:EditParameters>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+        guard let match = Self.editParamsRegex.firstMatch(in: content, range: NSRange(location: 0, length: (content as NSString).length)),
               match.numberOfRanges > 1,
               let range = Range(match.range(at: 1), in: content) else {
             return nil
@@ -207,22 +225,6 @@ final class MetadataService: @unchecked Sendable {
         let base64String = String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = Data(base64Encoded: base64String) else { return nil }
         return try? JSONDecoder().decode(EditParameters.self, from: data)
-    }
-
-    private func captureFileDates(_ url: URL) -> (creation: Date?, modification: Date?)? {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        guard let attrs else { return nil }
-        return (attrs[.creationDate] as? Date, attrs[.modificationDate] as? Date)
-    }
-
-    private func restoreFileDates(_ url: URL, dates: (creation: Date?, modification: Date?)?) {
-        guard let dates else { return }
-        var attrs: [FileAttributeKey: Any] = [:]
-        if let creation = dates.creation { attrs[.creationDate] = creation }
-        if let modification = dates.modification { attrs[.modificationDate] = modification }
-        if !attrs.isEmpty {
-            try? FileManager.default.setAttributes(attrs, ofItemAtPath: url.path)
-        }
     }
 
     func escapeXML(_ string: String) -> String {

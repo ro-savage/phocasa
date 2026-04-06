@@ -26,7 +26,7 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   Views      │────▶│   ViewModels      │────▶│   Services       │
-│ (SwiftUI)    │◀────│ (ObservableObject)│◀────│ (ImageIO, FS)    │
+│ (SwiftUI)    │◀────│  (@Observable)    │◀────│ (ImageIO, FS)    │
 └─────────────┘     └──────────────────┘     └─────────────────┘
                             │                         │
                             ▼                         ▼
@@ -59,11 +59,25 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 - `children: [Tag]`
 - `photos: [PhotoAsset]`
 
-**Library**
+**PhotoLibrary**
 - `id: UUID`
 - `rootFolderPath: String`
-- `bookmarkData: Data` — security-scoped bookmark for persistent access
-- `lastScanDate: Date`
+- `bookmarkData: Data?` — security-scoped bookmark for persistent access
+- `lastScanDate: Date?`
+
+**EditPreset**
+- `id: UUID`
+- `name: String`
+- `parametersData: Data` — JSON-encoded EditParameters
+- `createdDate: Date`
+
+**EditParameters** (Codable struct, not a SwiftData model)
+- Light: exposure, highlights, shadows, brightness, contrast
+- Color: temperature, tint, saturation, vibrance
+- Detail: sharpness, noiseReduction, colorNoiseReduction
+- Effects: clarity, vignetteAmount
+- RAW-specific: localToneMap, moireReduction, enableLensCorrection, enableGamutMapping
+- Transform: cropRect (NormalizedRect?), rotation, flipHorizontal, flipVertical
 
 ### Services
 
@@ -72,7 +86,7 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 - Groups files by stem name to detect JPG+RAW pairs
 - Supported extensions:
   - Standard: `.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.heic`, `.heif`
-  - RAW: `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.raf`, `.orf`, `.rw2`, `.pef`, `.srw`, `.3fr`, `.iiq`
+  - RAW: `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`, `.raf`, `.orf`, `.rw2`, `.pef`, `.srw`, `.3fr`, `.iiq`, `.rwl`, `.raw`, `.mrw`, `.dcr`
 - Priority for display: JPG > HEIC > PNG > TIFF > RAW (when paired)
 - Returns list of discovered photo groups with paths
 
@@ -91,8 +105,19 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
   - IPTC keywords — tags as flat strings (e.g., "country:Japan", "trip:Iceland 2025")
 - **Write to RAW:** Creates/updates XMP sidecar file (`.xmp`) alongside the RAW file
   - Standard XMP format readable by Lightroom, Capture One, Bridge, etc.
-- **Sync timing:** Write-back on each rating/tag change, debounced (0.5s) to batch rapid changes
+- **Sync timing:** Write-back on each rating/tag change via `Task.detached` (fire-and-forget background I/O)
 - **Tag encoding in IPTC:** Tags stored as `category:name` strings (e.g., "country:Japan") so hierarchy is preserved in flat keyword lists
+
+**ImageEditingService**
+- Non-destructive image editing using CoreImage filter chains
+- RAW processing via `CIRAWFilter` with exposure, white balance, noise reduction, lens correction
+- Standard (JPG/PNG) processing via `CIColorControls`, `CIExposureAdjust`, `CITemperatureAndTint`, `CIUnsharpMask`, etc.
+- Metal-backed `CIContext` for GPU-accelerated rendering
+- Source caching: RAW filter and standard CIImage cached per-file to avoid re-reading from disk on slider changes
+- Draft mode for preview renders (lower quality, faster); full quality for export
+- Export: RAW → JPEG and JPG overwrite with `CGImageDestination`
+- Transform: rotation, flip, crop via `CIImage.transformed(by:)` and `.cropped(to:)`
+- Preview debounce: 30ms delay before rendering to batch rapid slider changes
 
 ### Views
 
@@ -125,11 +150,24 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 - Drag to select multiple
 
 **PhotoDetailView**
-- Full-resolution image with zoom (pinch/scroll)
+- Full-resolution image with zoom (scroll wheel, pinch, double-click)
+- ZoomPanState: separate @Observable for magnification, offset, clamping, minimap
 - Left/right arrow navigation
-- Star rating overlay
-- Tag display and editor
-- Info panel (EXIF data, file size, dimensions)
+- Star rating overlay, tag display, edit mode buttons (JPG/RAW)
+- Side-by-side comparison (original vs edited, JPG vs RAW edit)
+- Minimap overlay when zoomed in (shows visible rect, click-to-navigate)
+
+**EditSidebarView**
+- Collapsible sections: Light, Color, Detail, Effects, RAW, Transform, Presets
+- Reusable `EditSlider` component with label, value display, double-click to reset
+- Crop/rotate button, side-by-side toggle, JPG comparison toggle, export button
+- Preset save/load/delete
+
+**CropOverlayView**
+- Dim overlay with crop window cut-out (Canvas with even-odd fill)
+- Rule-of-thirds grid, draggable handles (corners, edges, center)
+- Aspect ratio constraints (Free, 1:1, 4:3, 3:2, 16:9)
+- Rotation slider, apply/cancel buttons
 
 **RatingView**
 - Reusable star rating component
@@ -154,19 +192,18 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 |-----|--------|
 | 1-5 | Set star rating |
 | 0 | Clear rating |
-| ← → | Navigate in detail view |
+| ← → ↑ ↓ | Navigate grid (with Shift to extend selection) or detail view |
 | ⌘A | Select all in grid |
-| ⌫ | Delete selected (with confirmation) |
-| Space | Quick Look / toggle detail view |
-| ⌘+/⌘- | Zoom grid in/out |
-| ⌘F | Focus search |
+| ⌫ | Delete selected / move to bin |
+| Space | Toggle detail view |
 | Enter | Open selected in detail view |
-| Escape | Back to grid / clear selection |
-| T | Open tag editor for selection |
+| Escape | Cancel crop → stop editing → close detail → clear selection (layered) |
+| \\ (hold) | Show original image while editing |
+| ⌘O | Open folder (menu command) |
 
 ### File Access
 
-- `NSOpenPanel` to select root folder
+- SwiftUI `.fileImporter` to select root folder
 - Store `security-scoped bookmark` for persistent access across launches
 - Bookmark stored in SwiftData `Library` model
 - Resolve bookmark on app launch to regain access
@@ -182,7 +219,7 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 
 - Thumbnail generation is async on background threads
 - Grid uses `LazyVGrid` — only renders visible cells
-- SwiftData queries with predicates for filtering (not in-memory filtering)
+- SwiftData predicates for initial fetch (deleted vs non-deleted); in-memory filtering for sidebar filters, tags, and search
 - Image detail view loads full resolution only when displayed
 - Folder scan runs on background actor, UI shows progress
 
@@ -190,25 +227,30 @@ A native macOS app built with Swift and SwiftUI for exploring, rating, tagging, 
 
 ```
 Phocasa/
-├── PhocasaApp.swift              — App entry point
+├── PhocasaApp.swift              — App entry point, FocusedValues, menu commands
 ├── Models/
-│   ├── PhotoAsset.swift         — SwiftData model
-│   ├── Tag.swift                — SwiftData model
-│   └── Library.swift            — SwiftData model
+│   ├── PhotoAsset.swift         — SwiftData model (JPG+RAW pair, edit params)
+│   ├── Tag.swift                — SwiftData model (hierarchical tags)
+│   ├── PhotoLibrary.swift       — SwiftData model (folder bookmark)
+│   ├── EditPreset.swift         — SwiftData model (saved edit presets)
+│   └── EditParameters.swift     — Codable struct (exposure, color, crop, etc.) + NormalizedRect
 ├── ViewModels/
 │   └── PhotoLibraryViewModel.swift
 ├── Views/
 │   ├── ContentView.swift        — Main layout
 │   ├── PhotoGridView.swift      — Grid display
 │   ├── PhotoGridItemView.swift  — Single grid cell
-│   ├── PhotoDetailView.swift    — Full image view
+│   ├── PhotoDetailView.swift    — Full image view + ZoomPanState
+│   ├── EditSidebarView.swift    — Edit sliders (light, color, detail, effects, RAW, transform, presets)
+│   ├── CropOverlayView.swift    — Crop/rotate overlay with aspect ratio constraints
 │   ├── RatingView.swift         — Star rating widget
 │   ├── TagEditorView.swift      — Tag management
-│   └── SidebarView.swift        — Sidebar navigation
+│   └── SidebarView.swift        — Sidebar navigation with faceted filter counts
 ├── Services/
-│   ├── FolderScanner.swift      — File discovery
-│   ├── ImageLoader.swift        — Thumbnail generation
-│   └── MetadataService.swift    — IPTC/XMP read/write
+│   ├── FolderScanner.swift      — File discovery + JPG+RAW pairing
+│   ├── ImageLoader.swift        — Thumbnail generation + caching (NSCache)
+│   ├── MetadataService.swift    — IPTC/XMP read/write + sidecar management
+│   └── ImageEditingService.swift — CIRAWFilter + CIFilter chain, Metal CIContext, export
 └── Info.plist
 ```
 
@@ -222,6 +264,8 @@ Phocasa/
 
 - **SwiftUI** — UI
 - **SwiftData** — persistence
-- **ImageIO** — image loading, thumbnail generation, RAW support
+- **ImageIO** — image loading, thumbnail generation, metadata read/write
+- **CoreImage** — non-destructive image editing filter chains, CIRAWFilter for RAW processing
+- **Metal** — GPU-accelerated CIContext for image rendering
 - **UniformTypeIdentifiers** — file type detection
-- **CoreImage** — image processing (detail view zoom)
+- **AppKit** — NSImage, NSCache, NSEvent (scroll wheel zoom, modifier keys in tap gestures)
