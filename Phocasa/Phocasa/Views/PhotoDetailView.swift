@@ -119,7 +119,9 @@ struct PhotoDetailView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if viewModel.showSideBySide && viewModel.isEditing {
+            if viewModel.showJPGComparison && viewModel.isEditing && viewModel.editingRAW {
+                jpgComparisonView
+            } else if viewModel.showSideBySide && viewModel.isEditing {
                 sideBySideView
             } else if let image = currentImage {
                 singleImageView(image: image)
@@ -284,6 +286,37 @@ struct PhotoDetailView: View {
                 if let edited = viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage {
                     VStack(spacing: 4) {
                         Text("EDITED")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Image(nsImage: edited)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                    }
+                    .frame(width: geometry.size.width / 2)
+                }
+            }
+        }
+    }
+
+    // MARK: - JPG Comparison
+
+    private var jpgComparisonView: some View {
+        GeometryReader { geometry in
+            HStack(spacing: 2) {
+                if let jpgImage = viewModel.jpgComparisonImage {
+                    VStack(spacing: 4) {
+                        Text("JPG")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Image(nsImage: jpgImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                    }
+                    .frame(width: geometry.size.width / 2)
+                }
+                if let edited = viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage {
+                    VStack(spacing: 4) {
+                        Text("RAW EDIT")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.white.opacity(0.6))
                         Image(nsImage: edited)

@@ -8,6 +8,30 @@ enum SidebarFilter: Hashable {
     case tag(UUID)
     case tagCategory(String)
     case bin
+    case jpgOnly
+    case rawOnly
+
+    var filterCategory: String {
+        switch self {
+        case .all, .bin: return "special"
+        case .unrated, .rated: return "rating"
+        case .jpgOnly, .rawOnly: return "fileType"
+        case .tag, .tagCategory: return "tag"
+        }
+    }
+
+    func matches(_ photo: PhotoAsset) -> Bool {
+        switch self {
+        case .all: return true
+        case .bin: return photo.isDeleted
+        case .unrated: return photo.rating == 0
+        case .rated(let stars): return photo.rating == stars
+        case .jpgOnly: return photo.jpgPath != nil
+        case .rawOnly: return photo.rawPath != nil
+        case .tag(let tagId): return photo.tags.contains { $0.id == tagId }
+        case .tagCategory(let category): return photo.tags.contains { $0.category == category }
+        }
+    }
 }
 
 @Observable @MainActor
@@ -22,7 +46,7 @@ final class PhotoLibraryViewModel {
     var scanProgress: String = ""
     var selectedDetailPhoto: PhotoAsset?
     var showingDetail: Bool = false
-    var currentFilter: SidebarFilter? = .all
+    var activeFilters: Set<SidebarFilter> = []
     var allTags: [Tag] = []
     var tagCategories: [String] = []
     var showDeleteConfirmation: Bool = false
@@ -37,6 +61,8 @@ final class PhotoLibraryViewModel {
     var sortNewestFirst: Bool = true
     var ratingCounts: [Int: Int] = [:]
     var categoryCounts: [String: Int] = [:]
+    var jpgCount: Int = 0
+    var rawCount: Int = 0
 
     // MARK: - Image Editing State
     var isEditing: Bool = false
@@ -45,6 +71,8 @@ final class PhotoLibraryViewModel {
     var editedPreviewImage: NSImage?
     var showOriginal: Bool = false
     var showSideBySide: Bool = false
+    var showJPGComparison: Bool = false
+    var jpgComparisonImage: NSImage?
     var isCropping: Bool = false
     var cropRect: NormalizedRect = .full
     var editPresets: [EditPreset] = []
@@ -96,8 +124,12 @@ final class PhotoLibraryViewModel {
         // Precompute counts for sidebar (single pass instead of per-filter O(n) scans)
         var counts: [Int: Int] = [:]
         var catCounts: [String: Int] = [:]
+        var jpgC = 0
+        var rawC = 0
         for photo in allPhotos {
             counts[photo.rating, default: 0] += 1
+            if photo.jpgPath != nil { jpgC += 1 }
+            if photo.rawPath != nil { rawC += 1 }
             var seenCategories = Set<String>()
             for tag in photo.tags where !tag.category.isEmpty {
                 if seenCategories.insert(tag.category).inserted {
@@ -107,6 +139,8 @@ final class PhotoLibraryViewModel {
         }
         ratingCounts = counts
         categoryCounts = catCounts
+        jpgCount = jpgC
+        rawCount = rawC
 
         let tagDescriptor = FetchDescriptor<Tag>(sortBy: [SortDescriptor(\.category), SortDescriptor(\.name)])
         allTags = (try? context.fetch(tagDescriptor)) ?? []
@@ -299,6 +333,10 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Deletion / Bin
 
+    var hasFileTypeFilter: Bool {
+        activeFilters.contains(.rawOnly) || activeFilters.contains(.jpgOnly)
+    }
+
     func deleteSelected() {
         let toDelete = photos.filter { selectedPhotos.contains($0.id) }
         guard !toDelete.isEmpty else { return }
@@ -306,6 +344,8 @@ final class PhotoLibraryViewModel {
         if viewingBin {
             photosToDelete = toDelete
             showPermanentDeleteConfirmation = true
+        } else if hasFileTypeFilter {
+            deleteFileTypeOnly(toDelete)
         } else {
             moveToBin(toDelete)
         }
@@ -315,9 +355,55 @@ final class PhotoLibraryViewModel {
         if viewingBin {
             photosToDelete = [photo]
             showPermanentDeleteConfirmation = true
+        } else if hasFileTypeFilter && photo.hasRawPair {
+            deleteFileTypeOnly([photo])
         } else {
             moveToBin([photo])
         }
+    }
+
+    private func deleteFileTypeOnly(_ photosToRemove: [PhotoAsset]) {
+        let deleteRAW = activeFilters.contains(.rawOnly)
+        let deleteJPG = activeFilters.contains(.jpgOnly)
+
+        for photo in photosToRemove {
+            if deleteRAW && deleteJPG {
+                // Both file type filters active — normal soft delete
+                photo.isDeleted = true
+            } else if deleteRAW && photo.hasRawPair {
+                trashRAWFile(for: photo)
+            } else if deleteJPG && photo.hasRawPair {
+                trashJPGFile(for: photo)
+            } else {
+                // Non-paired photo: normal soft delete
+                photo.isDeleted = true
+            }
+            selectedPhotos.remove(photo.id)
+        }
+        try? modelContext?.save()
+        loadExistingData()
+        applyActiveFilters()
+    }
+
+    private func trashRAWFile(for photo: PhotoAsset) {
+        if let rawPath = photo.rawPath {
+            try? FileManager.default.trashItem(at: URL(fileURLWithPath: rawPath), resultingItemURL: nil)
+            // Clean up XMP sidecar
+            let sidecarURL = URL(fileURLWithPath: rawPath).deletingPathExtension().appendingPathExtension("xmp")
+            if FileManager.default.fileExists(atPath: sidecarURL.path) {
+                try? FileManager.default.trashItem(at: sidecarURL, resultingItemURL: nil)
+            }
+        }
+        photo.rawPath = nil
+        photo.hasRawEdits = false
+    }
+
+    private func trashJPGFile(for photo: PhotoAsset) {
+        if let jpgPath = photo.jpgPath {
+            try? FileManager.default.trashItem(at: URL(fileURLWithPath: jpgPath), resultingItemURL: nil)
+        }
+        photo.jpgPath = nil
+        photo.jpgEditParametersData = nil
     }
 
     private func moveToBin(_ photosToMove: [PhotoAsset]) {
@@ -352,6 +438,11 @@ final class PhotoLibraryViewModel {
             }
             if let rawPath = photo.rawPath {
                 try? FileManager.default.trashItem(at: URL(fileURLWithPath: rawPath), resultingItemURL: nil)
+                // Clean up XMP sidecar
+                let sidecarURL = URL(fileURLWithPath: rawPath).deletingPathExtension().appendingPathExtension("xmp")
+                if FileManager.default.fileExists(atPath: sidecarURL.path) {
+                    try? FileManager.default.trashItem(at: sidecarURL, resultingItemURL: nil)
+                }
             }
             selectedPhotos.remove(photo.id)
             context.delete(photo)
@@ -514,43 +605,71 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Filtering
 
-    func applyFilter(_ filter: SidebarFilter) {
-        currentFilter = filter
-        viewingBin = (filter == .bin)
-        loadExistingData()
+    func applyFilter(_ filter: SidebarFilter, isShiftHeld: Bool = false) {
+        if filter == .all {
+            activeFilters.removeAll()
+            viewingBin = false
+            loadExistingData()
+            applySearch()
+            return
+        }
 
-        switch filter {
-        case .all, .bin:
-            break
-        case .unrated:
-            photos = allPhotos.filter { $0.rating == 0 }
-        case .rated(let stars):
-            photos = allPhotos.filter { $0.rating == stars }
-        case .tag(let tagId):
-            photos = allPhotos.filter { photo in
-                photo.tags.contains { $0.id == tagId }
+        if filter == .bin {
+            activeFilters = [.bin]
+            viewingBin = true
+            loadExistingData()
+            return
+        }
+
+        // Leaving bin mode
+        if viewingBin {
+            activeFilters.removeAll()
+            viewingBin = false
+        }
+
+        if isShiftHeld {
+            if activeFilters.contains(filter) {
+                activeFilters.remove(filter)
+            } else {
+                activeFilters.insert(filter)
             }
-        case .tagCategory(let category):
-            photos = allPhotos.filter { photo in
-                photo.tags.contains { $0.category == category }
+        } else {
+            // Auto-combine: replace within same category, keep different categories
+            let newCategory = filter.filterCategory
+            activeFilters = activeFilters.filter { $0.filterCategory != newCategory }
+            activeFilters.insert(filter)
+        }
+
+        loadExistingData()
+        applyActiveFilters()
+    }
+
+    private func applyActiveFilters() {
+        guard !viewingBin, !activeFilters.isEmpty else {
+            applySearch()
+            return
+        }
+
+        var filtered = allPhotos
+        let byCategory = Dictionary(grouping: activeFilters) { $0.filterCategory }
+
+        for (_, filters) in byCategory {
+            filtered = filtered.filter { photo in
+                filters.contains { $0.matches(photo) }
             }
         }
+
+        photos = filtered
         applySearch()
     }
 
     func applyCurrentFilter() {
-        if let filter = currentFilter {
-            applyFilter(filter)
-        }
+        loadExistingData()
+        applyActiveFilters()
     }
 
     func applySearch() {
-        guard !searchText.isEmpty else {
-            if currentFilter == .some(.all) {
-                photos = allPhotos
-            }
-            return
-        }
+        guard !searchText.isEmpty else { return }
 
         let query = searchText.lowercased()
         photos = photos.filter { photo in
@@ -712,6 +831,8 @@ final class PhotoLibraryViewModel {
         isEditing = true
         showOriginal = false
         showSideBySide = false
+        showJPGComparison = false
+        jpgComparisonImage = nil
         isCropping = false
 
         // Pre-load the image into the editing service cache so first slider move is instant
@@ -737,6 +858,8 @@ final class PhotoLibraryViewModel {
         editedPreviewImage = nil
         showOriginal = false
         showSideBySide = false
+        showJPGComparison = false
+        jpgComparisonImage = nil
         isCropping = false
         editParameters = EditParameters()
         ImageEditingService.shared.clearCache()
@@ -832,6 +955,31 @@ final class PhotoLibraryViewModel {
 
             if renderGeneration == generation {
                 editedPreviewImage = result
+            }
+        }
+    }
+
+    // MARK: - JPG Comparison
+
+    func toggleJPGComparison() {
+        showJPGComparison.toggle()
+        if showJPGComparison {
+            showSideBySide = false
+            loadJPGComparisonImage()
+        } else {
+            jpgComparisonImage = nil
+        }
+    }
+
+    func loadJPGComparisonImage() {
+        guard let photo = selectedDetailPhoto, let jpgPath = photo.jpgPath else { return }
+
+        Task {
+            if let params = photo.jpgEditParameters, !params.isDefault {
+                let url = URL(fileURLWithPath: jpgPath)
+                jpgComparisonImage = await ImageEditingService.shared.processStandard(url: url, parameters: params)
+            } else {
+                jpgComparisonImage = await ImageLoader.shared.loadFullResolution(for: jpgPath)
             }
         }
     }

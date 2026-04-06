@@ -5,6 +5,20 @@ struct SidebarView: View {
 
     var body: some View {
         List {
+            // Clear filters button
+            if !viewModel.activeFilters.isEmpty && !viewModel.viewingBin {
+                Button(action: { viewModel.applyFilter(.all) }) {
+                    HStack {
+                        Text("Clear Filters")
+                        Spacer()
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
             Section("Library") {
                 sidebarRow(filter: .all, badge: viewModel.allPhotos.count) {
                     Label("All Photos", systemImage: "photo.on.rectangle.angled")
@@ -27,6 +41,16 @@ struct SidebarView: View {
                             Spacer()
                         }
                     }
+                }
+            }
+
+            Section("File Type") {
+                sidebarRow(filter: .jpgOnly, badge: viewModel.jpgCount) {
+                    Label("JPG", systemImage: "photo")
+                }
+
+                sidebarRow(filter: .rawOnly, badge: viewModel.rawCount) {
+                    Label("RAW", systemImage: "camera.filters")
                 }
             }
 
@@ -69,6 +93,17 @@ struct SidebarView: View {
         .listStyle(.sidebar)
     }
 
+    private func isFilterActive(_ filter: SidebarFilter) -> Bool {
+        switch filter {
+        case .all:
+            return viewModel.activeFilters.isEmpty && !viewModel.viewingBin
+        case .bin:
+            return viewModel.viewingBin
+        default:
+            return viewModel.activeFilters.contains(filter)
+        }
+    }
+
     @ViewBuilder
     private func sidebarRow<Content: View>(
         filter: SidebarFilter,
@@ -76,9 +111,12 @@ struct SidebarView: View {
         @ViewBuilder content: () -> Content
     ) -> some View {
         SidebarRowButton(
-            isSelected: viewModel.currentFilter == filter,
+            isSelected: isFilterActive(filter),
             badge: badge,
-            action: { viewModel.applyFilter(filter) },
+            action: {
+                let isShiftHeld = NSEvent.modifierFlags.contains(.shift)
+                viewModel.applyFilter(filter, isShiftHeld: isShiftHeld)
+            },
             content: content
         )
     }

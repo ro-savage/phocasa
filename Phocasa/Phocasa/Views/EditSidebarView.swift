@@ -55,12 +55,28 @@ struct EditSidebarView: View {
                 .buttonStyle(.plain)
                 .help("Crop & Rotate")
 
-                Button(action: { viewModel.showSideBySide.toggle() }) {
+                Button(action: {
+                    viewModel.showSideBySide.toggle()
+                    if viewModel.showSideBySide {
+                        viewModel.showJPGComparison = false
+                        viewModel.jpgComparisonImage = nil
+                    }
+                }) {
                     Image(systemName: viewModel.showSideBySide ? "square.split.2x1.fill" : "square.split.2x1")
                         .font(.body)
                 }
                 .buttonStyle(.plain)
                 .help("Side-by-side comparison")
+
+                if viewModel.editingRAW && viewModel.selectedDetailPhoto?.hasRawPair == true {
+                    Button(action: { viewModel.toggleJPGComparison() }) {
+                        Image(systemName: viewModel.showJPGComparison ? "photo.on.rectangle.fill" : "photo.on.rectangle")
+                            .font(.body)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(viewModel.showJPGComparison ? .blue : .primary)
+                    .help("Compare with JPG")
+                }
 
                 if viewModel.canExport {
                     Button(action: { viewModel.showExportOptions = true }) {

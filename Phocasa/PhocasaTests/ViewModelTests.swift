@@ -650,4 +650,224 @@ final class ViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.editParameters.exposure, 1.0)
     }
+
+    // MARK: - File Type Filter
+
+    func testFilterJPGOnly() {
+        insertPhoto(name: "jpg_only")
+        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
+                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
+        context.insert(rawOnly)
+        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
+                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
+        context.insert(paired)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.jpgOnly)
+
+        XCTAssertEqual(viewModel.photos.count, 2, "Should show jpg_only and paired (both have jpgPath)")
+        XCTAssertTrue(viewModel.photos.allSatisfy { $0.jpgPath != nil })
+    }
+
+    func testFilterRAWOnly() {
+        insertPhoto(name: "jpg_only")
+        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
+                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
+        context.insert(rawOnly)
+        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
+                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
+        context.insert(paired)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rawOnly)
+
+        XCTAssertEqual(viewModel.photos.count, 2, "Should show raw_only and paired (both have rawPath)")
+        XCTAssertTrue(viewModel.photos.allSatisfy { $0.rawPath != nil })
+    }
+
+    func testFileTypeCountsComputed() {
+        insertPhoto(name: "jpg_only")
+        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
+                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
+        context.insert(rawOnly)
+        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
+                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
+        context.insert(paired)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        XCTAssertEqual(viewModel.jpgCount, 2, "jpg_only + paired")
+        XCTAssertEqual(viewModel.rawCount, 2, "raw_only + paired")
+    }
+
+    // MARK: - Multi-Filter
+
+    func testMultiFilterAutoCombinesDifferentCategories() {
+        let a = insertPhoto(name: "a", rating: 3)
+        a.rawPath = "/fake/a.cr3"
+        let b = insertPhoto(name: "b", rating: 3)
+        // b has no rawPath
+        let c = insertPhoto(name: "c", rating: 5)
+        c.rawPath = "/fake/c.cr3"
+        try? context.save()
+        viewModel.loadExistingData()
+
+        // Click rating 3
+        viewModel.applyFilter(.rated(3))
+        XCTAssertEqual(viewModel.photos.count, 2, "a and b are rated 3")
+
+        // Click RAW only — should auto-combine (different category)
+        viewModel.applyFilter(.rawOnly)
+        XCTAssertEqual(viewModel.photos.count, 1, "Only a is rated 3 AND has RAW")
+        XCTAssertEqual(viewModel.photos.first?.fileName, "a")
+        XCTAssertEqual(viewModel.activeFilters.count, 2)
+    }
+
+    func testMultiFilterReplacesWithinCategory() {
+        insertPhoto(name: "a", rating: 3)
+        insertPhoto(name: "b", rating: 4)
+        insertPhoto(name: "c", rating: 5)
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rated(3))
+        XCTAssertEqual(viewModel.photos.count, 1)
+
+        // Click 4-star — should replace 3-star (same category)
+        viewModel.applyFilter(.rated(4))
+        XCTAssertEqual(viewModel.photos.count, 1)
+        XCTAssertEqual(viewModel.photos.first?.rating, 4)
+        XCTAssertEqual(viewModel.activeFilters.count, 1)
+    }
+
+    func testMultiFilterShiftToggle() {
+        insertPhoto(name: "a", rating: 3)
+        insertPhoto(name: "b", rating: 4)
+        insertPhoto(name: "c", rating: 5)
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rated(3))
+        XCTAssertEqual(viewModel.photos.count, 1)
+
+        // Shift-click 4-star — should add (now showing 3 AND 4)
+        viewModel.applyFilter(.rated(4), isShiftHeld: true)
+        XCTAssertEqual(viewModel.photos.count, 2)
+        XCTAssertTrue(viewModel.activeFilters.contains(.rated(3)))
+        XCTAssertTrue(viewModel.activeFilters.contains(.rated(4)))
+
+        // Shift-click 3-star again — should remove it
+        viewModel.applyFilter(.rated(3), isShiftHeld: true)
+        XCTAssertEqual(viewModel.photos.count, 1)
+        XCTAssertEqual(viewModel.photos.first?.rating, 4)
+    }
+
+    func testClearFiltersWithAll() {
+        insertPhoto(name: "a", rating: 3)
+        insertPhoto(name: "b", rating: 5)
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rated(3))
+        XCTAssertEqual(viewModel.photos.count, 1)
+
+        viewModel.applyFilter(.all)
+        XCTAssertTrue(viewModel.activeFilters.isEmpty)
+        XCTAssertEqual(viewModel.photos.count, 2)
+    }
+
+    func testBinFilterIsExclusive() {
+        insertPhoto(name: "a", rating: 3)
+        insertPhoto(name: "b", isDeleted: true)
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rated(3))
+        viewModel.applyFilter(.bin)
+
+        XCTAssertTrue(viewModel.viewingBin)
+        XCTAssertEqual(viewModel.activeFilters, [.bin])
+        XCTAssertEqual(viewModel.photos.count, 1)
+        XCTAssertEqual(viewModel.photos.first?.fileName, "b")
+    }
+
+    // MARK: - Smart Delete (File Type)
+
+    func testDeleteInRAWOnlyModeRemovesOnlyRAW() {
+        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
+                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
+        context.insert(paired)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rawOnly)
+        viewModel.selectedPhotos = [paired.id]
+
+        viewModel.deleteSelected()
+
+        // RAW path should be cleared, JPG should remain
+        XCTAssertNil(paired.rawPath)
+        XCTAssertEqual(paired.jpgPath, "/fake/paired.jpg")
+        XCTAssertFalse(paired.isDeleted, "Photo should NOT be in bin")
+        XCTAssertFalse(paired.hasRawEdits, "RAW edits should be cleared")
+    }
+
+    func testDeleteInJPGOnlyModeRemovesOnlyJPG() {
+        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
+                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
+        context.insert(paired)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.jpgOnly)
+        viewModel.selectedPhotos = [paired.id]
+
+        viewModel.deleteSelected()
+
+        // JPG path should be cleared, RAW should remain
+        XCTAssertNil(paired.jpgPath)
+        XCTAssertEqual(paired.rawPath, "/fake/paired.cr3")
+        XCTAssertFalse(paired.isDeleted, "Photo should NOT be in bin")
+    }
+
+    func testDeleteNonPairedInRAWOnlyModeSoftDeletes() {
+        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
+                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
+        context.insert(rawOnly)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rawOnly)
+        viewModel.selectedPhotos = [rawOnly.id]
+
+        viewModel.deleteSelected()
+
+        // Non-paired RAW should go to bin — check via binCount since the photo
+        // gets refetched by loadExistingData after delete
+        XCTAssertEqual(viewModel.binCount, 1, "Non-paired photo should be soft-deleted to bin")
+        XCTAssertEqual(viewModel.allPhotos.count, 0, "No active photos should remain")
+    }
+
+    func testDeleteClearsSelectionAfterFileTypeDelete() {
+        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
+                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
+        context.insert(paired)
+        try? context.save()
+        viewModel.loadExistingData()
+
+        viewModel.applyFilter(.rawOnly)
+        viewModel.selectedPhotos = [paired.id]
+
+        viewModel.deleteSelected()
+
+        XCTAssertTrue(viewModel.selectedPhotos.isEmpty)
+    }
+
+    func testHasFileTypeFilter() {
+        XCTAssertFalse(viewModel.hasFileTypeFilter)
+
+        viewModel.applyFilter(.rawOnly)
+        XCTAssertTrue(viewModel.hasFileTypeFilter)
+
+        viewModel.applyFilter(.all)
+        XCTAssertFalse(viewModel.hasFileTypeFilter)
+    }
 }
