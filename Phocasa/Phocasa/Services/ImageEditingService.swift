@@ -1,13 +1,16 @@
-import CoreImage
 import AppKit
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import ImageIO
+import UniformTypeIdentifiers
 import os
 
 /// Renders photo edits with Core Image.
 ///
-/// Work runs on two lanes. Each lane is an actor on its own serial dispatch queue, so a preview never queues behind a
-/// full-resolution render or an export. A render that is cancelled before its lane reaches it returns `nil` without
-/// doing any work, so stale slider ticks are skipped. The service holds no mutable state of its own.
+/// Work runs on two lanes. Each lane is an actor on its own serial dispatch queue with its own `CIContext`, so a
+/// preview never queues behind a full-resolution render or an export, on the CPU or on the GPU. A render that is
+/// cancelled before its lane reaches it returns `nil` without doing any work, so stale slider ticks are skipped.
+/// Rendered pixels are produced on the lane, never on first draw. The service holds no mutable state of its own.
 actor ImageEditingService {
     static let shared = ImageEditingService()
 
@@ -234,76 +237,103 @@ private actor RenderLane {
         return true
     }
 
-    // MARK: Renders
+    // MARK: Renders and exports
 
     func renderRAW(url: URL, parameters: EditParameters, maxSize: CGSize?) -> RenderedImage? {
-        guard beginRender(), let rawFilter = rawFilter(for: url) else { return nil }
-
-        // Previews demosaic straight to the target size, in draft mode: ~2x faster than decoding at full size and
-        // scaling afterwards. Full renders decode at native size. Both are set on every render: the filter is cached.
-        if let maxSize {
-            rawFilter.isDraftModeEnabled = true
-            rawFilter.scaleFactor = ImageEditingService.rawScaleFactor(nativeSize: Self.orientedNativeSize(of: rawFilter),
-                                                                       maxSize: maxSize)
-        } else {
-            rawFilter.isDraftModeEnabled = false
-            rawFilter.scaleFactor = 1
-        }
-
-        EditPipeline.applyRAWParameters(rawFilter, parameters: parameters)
-
-        guard var output = rawFilter.outputImage else { return nil }
-
-        // scaleFactor lands within a pixel or so of the target; scale BEFORE post-filters only if it's still too big.
-        if let maxSize, output.extent.width > maxSize.width + 1 || output.extent.height > maxSize.height + 1 {
-            output = EditPipeline.scaleToFit(output, maxSize: maxSize)
-        }
-
-        output = EditPipeline.applyPostRAWFilters(to: output, parameters: parameters)
-        output = EditPipeline.applyTransform(to: output, parameters: parameters)
-
-        return render(output)
+        guard beginRender(), let filter = rawFilter(for: url),
+              let edited = EditPipeline.editedRAW(filter, parameters: parameters, maxSize: maxSize) else { return nil }
+        return render(edited)
     }
 
     func renderStandard(url: URL, parameters: EditParameters, maxSize: CGSize?) -> RenderedImage? {
-        guard beginRender(), let sourceImage = standardSource(for: url) else { return nil }
-
-        var ciImage = sourceImage
-
-        // Scale BEFORE filters — smaller image = faster filter chain
-        if let maxSize {
-            ciImage = EditPipeline.scaleToFit(ciImage, maxSize: maxSize)
-        }
-
-        ciImage = EditPipeline.applyStandardFilters(to: ciImage, parameters: parameters)
-        ciImage = EditPipeline.applyTransform(to: ciImage, parameters: parameters)
-
-        return render(ciImage)
+        guard beginRender(), let source = standardSource(for: url) else { return nil }
+        return render(EditPipeline.editedStandard(source, parameters: parameters, maxSize: maxSize))
     }
 
     func exportRAW(rawURL: URL, parameters: EditParameters, outputURL: URL, quality: Double) -> Bool {
-        // For export, create a fresh filter with draft OFF for max quality
-        guard let rawFilter = CIRAWFilter(imageURL: rawURL) else { return false }
-        rawFilter.isDraftModeEnabled = false
-
-        EditPipeline.applyRAWParameters(rawFilter, parameters: parameters)
-
-        guard var output = rawFilter.outputImage else { return false }
-
-        output = EditPipeline.applyPostRAWFilters(to: output, parameters: parameters)
-        output = EditPipeline.applyTransform(to: output, parameters: parameters)
-
-        return writeJPEG(output, to: outputURL, quality: quality)
+        // A fresh filter, not the cached one: full quality, and no preview state.
+        guard let filter = CIRAWFilter(imageURL: rawURL),
+              let edited = EditPipeline.editedRAW(filter, parameters: parameters, maxSize: nil) else { return false }
+        return writeJPEG(edited, to: outputURL, quality: quality)
     }
 
     func exportStandard(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double) -> Bool {
-        guard let rawImage = CIImage(contentsOf: sourceURL) else { return false }
+        // Read fresh from disk: the export may overwrite the source file.
+        guard let image = CIImage(contentsOf: sourceURL) else { return false }
+        let edited = EditPipeline.editedStandard(EditPipeline.orientedImage(image), parameters: parameters, maxSize: nil)
+        return writeJPEG(edited, to: outputURL, quality: quality)
+    }
 
-        var ciImage = EditPipeline.orientedImage(rawImage)
-        ciImage = EditPipeline.applyStandardFilters(to: ciImage, parameters: parameters)
-        ciImage = EditPipeline.applyTransform(to: ciImage, parameters: parameters)
+    // MARK: Output
 
-        return writeJPEG(ciImage, to: outputURL, quality: quality)
+    /// Renders the pixels now, on this lane. The default `createCGImage(_:from:)` returns a deferred image for large
+    /// outputs, whose pixels are then produced on first draw, on the main thread. Same format and colour-space tag
+    /// as that default: 8-bit RGBA, tagged Device RGB (not sRGB, whatever its header says).
+    private func render(_ image: CIImage) -> RenderedImage? {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0,
+              let cgImage = ciContext.createCGImage(image, from: extent, format: .RGBA8,
+                                                    colorSpace: CGColorSpaceCreateDeviceRGB(), deferred: false)
+        else { return nil }
+        return RenderedImage(cgImage: cgImage, size: extent.size)
+    }
+
+    private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
+        let originalDates = Phocasa.captureFileDates(url)
+
+        // Deferred on purpose: the encoder pulls the pixels here, on the lane, so nothing lands on the main thread,
+        // and the file stays byte-identical to what earlier versions wrote.
+        guard let cgImage = ciContext.createCGImage(image, from: image.extent),
+              let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return false }
+        CGImageDestinationAddImage(destination, cgImage, [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ] as CFDictionary)
+        let success = CGImageDestinationFinalize(destination)
+
+        if success { Phocasa.restoreFileDates(url, dates: originalDates) }
+        return success
+    }
+}
+
+// MARK: - Edit pipeline (pure)
+
+/// The filter chains. Every step returns its input unchanged when its parameter is neutral.
+private enum EditPipeline {
+    // MARK: Load → filter
+
+    /// RAW: decode (a preview demosaics straight to the target size, in draft mode), then the post-RAW chain and
+    /// the transform.
+    static func editedRAW(_ filter: CIRAWFilter, parameters: EditParameters, maxSize: CGSize?) -> CIImage? {
+        // Previews: ~2x faster than decoding at full size and scaling afterwards. Full renders and exports decode
+        // at native size. Both properties are set on every render because the filter is cached.
+        if let maxSize {
+            filter.isDraftModeEnabled = true
+            filter.scaleFactor = ImageEditingService.rawScaleFactor(nativeSize: orientedNativeSize(of: filter),
+                                                                    maxSize: maxSize)
+        } else {
+            filter.isDraftModeEnabled = false
+            filter.scaleFactor = 1
+        }
+        applyRAWParameters(filter, parameters: parameters)
+
+        guard var image = filter.outputImage else { return nil }
+        // scaleFactor lands within a pixel of the target; scale BEFORE post-filters only if it's still too big.
+        if let maxSize, image.extent.width > maxSize.width + 1 || image.extent.height > maxSize.height + 1 {
+            image = scaleToFit(image, maxSize: maxSize)
+        }
+        image = applyPostRAWFilters(to: image, parameters: parameters)
+        return applyTransform(to: image, parameters: parameters)
+    }
+
+    /// Standard: scale (previews; BEFORE filters, so the chain runs on fewer pixels), the chain, the transform.
+    static func editedStandard(_ source: CIImage, parameters: EditParameters, maxSize: CGSize?) -> CIImage {
+        var image = source
+        if let maxSize {
+            image = scaleToFit(image, maxSize: maxSize)
+        }
+        image = applyStandardFilters(to: image, parameters: parameters)
+        return applyTransform(to: image, parameters: parameters)
     }
 
     /// `nativeSize` ignores orientation; the output image doesn't.
@@ -315,44 +345,6 @@ private actor RenderLane {
         }
     }
 
-    // MARK: Output
-
-    /// Renders the pixels now, on this lane. The default `createCGImage(_:from:)` returns a deferred image for large
-    /// outputs, whose pixels are then produced on first draw, on the main thread. Same format and colour-space tag
-    /// as that default: 8-bit RGBA, tagged Device RGB (not sRGB, whatever its header says).
-    private func makeCGImage(_ ciImage: CIImage) -> CGImage? {
-        ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8,
-                                colorSpace: CGColorSpaceCreateDeviceRGB(), deferred: false)
-    }
-
-    private func render(_ ciImage: CIImage) -> RenderedImage? {
-        let extent = ciImage.extent
-        guard extent.width > 0, extent.height > 0 else { return nil }
-        guard let cgImage = makeCGImage(ciImage) else { return nil }
-        return RenderedImage(cgImage: cgImage, size: extent.size)
-    }
-
-    private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
-        let originalDates = Phocasa.captureFileDates(url)
-
-        // Deferred on purpose: the encoder pulls the pixels here, on the lane, so nothing lands on the main thread,
-        // and the file stays byte-identical to what earlier versions wrote.
-        let extent = image.extent
-        guard let cgImage = ciContext.createCGImage(image, from: extent) else { return false }
-        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return false }
-        CGImageDestinationAddImage(destination, cgImage, [
-            kCGImageDestinationLossyCompressionQuality: quality
-        ] as CFDictionary)
-        let success = CGImageDestinationFinalize(destination)
-
-        if success { Phocasa.restoreFileDates(url, dates: originalDates) }
-        return success
-    }
-}
-
-// MARK: - Filter chains (pure)
-
-private enum EditPipeline {
     // MARK: RAW Filter Configuration
 
     static func applyRAWParameters(_ filter: CIRAWFilter, parameters: EditParameters) {
@@ -380,161 +372,139 @@ private enum EditPipeline {
         filter.neutralTint = Float(parameters.tint * 1.5)
     }
 
-    // MARK: Post-RAW Filters (supplements for things CIRAWFilter can't do)
+    // MARK: Chains
 
-    static func applyPostRAWFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
+    /// Post-RAW (things CIRAWFilter can't do): negative brightness → vibrance → saturation → tone curve →
+    /// sharpness → clarity → vignette.
+    static func applyPostRAWFilters(to image: CIImage, parameters p: EditParameters) -> CIImage {
         var result = image
-
         // Negative brightness — boostAmount can't go below 0
-        if parameters.brightness < 0 {
-            result = applyFilter("CIColorControls", to: result, params: [
-                "inputBrightness": parameters.brightness / 100.0 * 0.3,
-                "inputContrast": 1.0,
-                "inputSaturation": 1.0
-            ])
+        if p.brightness < 0 {
+            result = colorControls(result, brightness: p.brightness / 100.0 * 0.3, contrast: 1.0, saturation: 1.0)
         }
-
-        // Vibrance
-        if parameters.vibrance != 0 {
-            result = applyFilter("CIVibrance", to: result, params: [
-                "inputAmount": parameters.vibrance / 100.0
-            ])
+        result = vibrance(result, p)
+        if p.saturation != 0 {
+            result = colorControls(result, brightness: 0.0, contrast: 1.0, saturation: 1.0 + p.saturation / 100.0 * 0.5)
         }
-
-        // Saturation
-        if parameters.saturation != 0 {
-            result = applyFilter("CIColorControls", to: result, params: [
-                "inputBrightness": 0.0,
-                "inputContrast": 1.0,
-                "inputSaturation": 1.0 + parameters.saturation / 100.0 * 0.5
-            ])
-        }
-
-        // Highlights & Shadows — tone curve for precise recovery
-        if parameters.highlights != 0 || parameters.shadows != 0 {
-            result = applyToneCurve(to: result, highlights: parameters.highlights, shadows: parameters.shadows)
-        }
-
-        // Sharpness — visible edge sharpening via unsharp mask (small radius)
-        if parameters.sharpness > 0 {
-            result = applyFilter("CIUnsharpMask", to: result, params: [
-                "inputRadius": 1.5,
-                "inputIntensity": parameters.sharpness / 100.0 * 2.0
-            ])
-        }
-
-        // Clarity — local contrast (large-radius unsharp mask) or softening (blur)
-        if parameters.clarity > 0 {
-            result = applyFilter("CIUnsharpMask", to: result, params: [
-                "inputRadius": 20.0,
-                "inputIntensity": parameters.clarity / 100.0
-            ])
-        } else if parameters.clarity < 0 {
-            let extent = result.extent
-            result = applyFilter("CIGaussianBlur", to: result, params: [
-                "inputRadius": -parameters.clarity / 100.0 * 5.0
-            ])
-            result = result.cropped(to: extent)
-        }
-
-        // Vignette
-        if parameters.vignetteAmount != 0 {
-            result = applyFilter("CIVignette", to: result, params: [
-                "inputIntensity": parameters.vignetteAmount / 100.0 * 2.0,
-                "inputRadius": 1.0
-            ])
-        }
-
-        return result
+        result = toneCurve(result, p)
+        result = sharpness(result, p)
+        result = clarity(result, p)
+        return vignette(result, p)
     }
 
-    // MARK: Standard Filter Chain (JPG/PNG)
-
-    static func applyStandardFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
+    /// Standard (JPG/PNG): exposure → tone curve → colour controls → temperature/tint → vibrance → sharpness →
+    /// noise reduction → clarity → vignette.
+    static func applyStandardFilters(to image: CIImage, parameters p: EditParameters) -> CIImage {
         var result = image
-
-        // Exposure — direct EV mapping, works well
-        if parameters.exposure != 0 {
-            result = applyFilter("CIExposureAdjust", to: result, params: [
-                "inputEV": parameters.exposure
-            ])
+        // Exposure — direct EV mapping
+        if p.exposure != 0 {
+            let filter = CIFilter.exposureAdjust()
+            filter.inputImage = result
+            filter.ev = Float(p.exposure)
+            result = filter.outputImage ?? result
         }
-
-        // Highlights & Shadows — tone curve for precise tonal recovery
-        // Positive highlights: pull down bright areas (recover cloud detail)
-        // Negative highlights: push up bright areas
-        // Positive shadows: lift dark areas (reveal shadow detail)
-        // Negative shadows: crush dark areas
-        if parameters.highlights != 0 || parameters.shadows != 0 {
-            result = applyToneCurve(to: result, highlights: parameters.highlights, shadows: parameters.shadows)
+        result = toneCurve(result, p)
+        // Brightness -1…1 (default 0), contrast 0.25…4 (default 1), saturation 0…3 (default 1)
+        if p.brightness != 0 || p.contrast != 0 || p.saturation != 0 {
+            result = colorControls(result, brightness: p.brightness / 100.0 * 0.3,
+                                   contrast: 1.0 + p.contrast / 100.0 * 0.5,
+                                   saturation: 1.0 + p.saturation / 100.0 * 0.5)
         }
-
-        // Brightness, Contrast, Saturation
-        // inputBrightness: -1 to 1 (default 0)
-        // inputContrast: 0.25 to 4.0 (default 1.0)
-        // inputSaturation: 0 to 3.0 (default 1.0)
-        if parameters.brightness != 0 || parameters.contrast != 0 || parameters.saturation != 0 {
-            result = applyFilter("CIColorControls", to: result, params: [
-                "inputBrightness": parameters.brightness / 100.0 * 0.3,
-                "inputContrast": 1.0 + parameters.contrast / 100.0 * 0.5,
-                "inputSaturation": 1.0 + parameters.saturation / 100.0 * 0.5
-            ])
+        if p.temperature != 0 || p.tint != 0 {
+            let filter = CIFilter.temperatureAndTint()
+            filter.inputImage = result
+            filter.neutral = CIVector(x: 6500.0 + p.temperature * 25.0, y: p.tint)
+            filter.targetNeutral = CIVector(x: 6500.0, y: 0.0)
+            result = filter.outputImage ?? result
         }
-
-        // Temperature & Tint
-        if parameters.temperature != 0 || parameters.tint != 0 {
-            result = applyFilter("CITemperatureAndTint", to: result, params: [
-                "inputNeutral": CIVector(x: 6500.0 + parameters.temperature * 25.0, y: parameters.tint),
-                "inputTargetNeutral": CIVector(x: 6500.0, y: 0.0)
-            ])
+        result = vibrance(result, p)
+        result = sharpness(result, p)
+        if p.noiseReduction > 0 {
+            let filter = CIFilter.noiseReduction()
+            filter.inputImage = result
+            filter.noiseLevel = Float(p.noiseReduction / 100.0 * 0.1)
+            filter.sharpness = 0.5
+            result = filter.outputImage ?? result
         }
+        result = clarity(result, p)
+        return vignette(result, p)
+    }
 
-        // Vibrance
-        if parameters.vibrance != 0 {
-            result = applyFilter("CIVibrance", to: result, params: [
-                "inputAmount": parameters.vibrance / 100.0
-            ])
+    // MARK: Shared steps
+
+    private static func colorControls(_ image: CIImage, brightness: Double, contrast: Double, saturation: Double) -> CIImage {
+        let filter = CIFilter.colorControls()
+        filter.inputImage = image
+        filter.brightness = Float(brightness)
+        filter.contrast = Float(contrast)
+        filter.saturation = Float(saturation)
+        return filter.outputImage ?? image
+    }
+
+    private static func vibrance(_ image: CIImage, _ p: EditParameters) -> CIImage {
+        guard p.vibrance != 0 else { return image }
+        let filter = CIFilter.vibrance()
+        filter.inputImage = image
+        filter.amount = Float(p.vibrance / 100.0)
+        return filter.outputImage ?? image
+    }
+
+    /// Visible edge sharpening: a small-radius unsharp mask.
+    private static func sharpness(_ image: CIImage, _ p: EditParameters) -> CIImage {
+        guard p.sharpness > 0 else { return image }
+        return unsharpMask(image, radius: 1.5, intensity: p.sharpness / 100.0 * 2.0)
+    }
+
+    /// Local contrast (a large-radius unsharp mask) or softening (a blur, cropped back to the input extent).
+    private static func clarity(_ image: CIImage, _ p: EditParameters) -> CIImage {
+        if p.clarity > 0 {
+            return unsharpMask(image, radius: 20.0, intensity: p.clarity / 100.0)
         }
+        guard p.clarity < 0 else { return image }
+        let filter = CIFilter.gaussianBlur()
+        filter.inputImage = image
+        filter.radius = Float(-p.clarity / 100.0 * 5.0)
+        return (filter.outputImage ?? image).cropped(to: image.extent)
+    }
 
-        // Sharpness — CIUnsharpMask with small radius for visible edge sharpening
-        if parameters.sharpness > 0 {
-            result = applyFilter("CIUnsharpMask", to: result, params: [
-                "inputRadius": 1.5,
-                "inputIntensity": parameters.sharpness / 100.0 * 2.0
-            ])
-        }
+    private static func vignette(_ image: CIImage, _ p: EditParameters) -> CIImage {
+        guard p.vignetteAmount != 0 else { return image }
+        let filter = CIFilter.vignette()
+        filter.inputImage = image
+        filter.intensity = Float(p.vignetteAmount / 100.0 * 2.0)
+        filter.radius = 1.0
+        return filter.outputImage ?? image
+    }
 
-        // Noise Reduction
-        if parameters.noiseReduction > 0 {
-            result = applyFilter("CINoiseReduction", to: result, params: [
-                "inputNoiseLevel": parameters.noiseReduction / 100.0 * 0.1,
-                "inputSharpness": 0.5
-            ])
-        }
+    private static func unsharpMask(_ image: CIImage, radius: Double, intensity: Double) -> CIImage {
+        let filter = CIFilter.unsharpMask()
+        filter.inputImage = image
+        filter.radius = Float(radius)
+        filter.intensity = Float(intensity)
+        return filter.outputImage ?? image
+    }
 
-        // Clarity — local contrast (large-radius unsharp mask) or softening
-        if parameters.clarity > 0 {
-            result = applyFilter("CIUnsharpMask", to: result, params: [
-                "inputRadius": 20.0,
-                "inputIntensity": parameters.clarity / 100.0
-            ])
-        } else if parameters.clarity < 0 {
-            let extent = result.extent
-            result = applyFilter("CIGaussianBlur", to: result, params: [
-                "inputRadius": -parameters.clarity / 100.0 * 5.0
-            ])
-            result = result.cropped(to: extent)
-        }
+    /// Highlights & shadows via a tone curve. h, s: -100…+100.
+    /// - Positive highlights pull bright areas down (recover cloud detail); negative push them up.
+    /// - Positive shadows lift dark areas; negative crush them. Midtones are untouched.
+    private static func toneCurve(_ image: CIImage, _ p: EditParameters) -> CIImage {
+        guard p.highlights != 0 || p.shadows != 0 else { return image }
+        let hNorm = p.highlights / 100.0  // -1 to 1
+        let sNorm = p.shadows / 100.0     // -1 to 1
 
-        // Vignette
-        if parameters.vignetteAmount != 0 {
-            result = applyFilter("CIVignette", to: result, params: [
-                "inputIntensity": parameters.vignetteAmount / 100.0 * 2.0,
-                "inputRadius": 1.0
-            ])
-        }
+        let p0y = max(0, sNorm * 0.08)                       // slight black point lift
+        let p1y = min(1.0, max(0, 0.25 + sNorm * 0.20))      // shadow midpoint shift
+        let p3y = min(1.0, max(0, 0.75 - hNorm * 0.20))      // upper-mid shift
+        let p4y = min(1.0, max(0.3, 1.0 - hNorm * 0.30))     // white point pull-down
 
-        return result
+        let filter = CIFilter.toneCurve()
+        filter.inputImage = image
+        filter.point0 = CGPoint(x: 0.0, y: p0y)
+        filter.point1 = CGPoint(x: 0.25, y: p1y)
+        filter.point2 = CGPoint(x: 0.5, y: 0.5)
+        filter.point3 = CGPoint(x: 0.75, y: p3y)
+        filter.point4 = CGPoint(x: 1.0, y: p4y)
+        return filter.outputImage ?? image
     }
 
     // MARK: Transform
@@ -580,41 +550,6 @@ private enum EditPipeline {
     static func orientedImage(_ image: CIImage) -> CIImage {
         let o = image.properties[kCGImagePropertyOrientation as String] as? UInt32 ?? 1
         return image.oriented(CGImagePropertyOrientation(rawValue: o) ?? .up)
-    }
-
-    /// Tone curve for highlight recovery and shadow lifting.
-    /// h: -100 to +100 (positive = recover/darken highlights, negative = brighten)
-    /// s: -100 to +100 (positive = lift/brighten shadows, negative = crush)
-    static func applyToneCurve(to image: CIImage, highlights h: Double, shadows s: Double) -> CIImage {
-        let hNorm = h / 100.0  // -1 to 1
-        let sNorm = s / 100.0  // -1 to 1
-
-        // Shadow region (points 0 and 1)
-        // Positive s lifts shadows, negative crushes them
-        let p0y = max(0, sNorm * 0.08)                       // slight black point lift
-        let p1y = min(1.0, max(0, 0.25 + sNorm * 0.20))      // shadow midpoint shift
-
-        // Highlight region (points 3 and 4)
-        // Positive h pulls down highlights (recover cloud detail), negative pushes them up
-        let p3y = min(1.0, max(0, 0.75 - hNorm * 0.20))      // upper-mid shift
-        let p4y = min(1.0, max(0.3, 1.0 - hNorm * 0.30))     // white point pull-down
-
-        return applyFilter("CIToneCurve", to: image, params: [
-            "inputPoint0": CIVector(x: 0.0,  y: CGFloat(p0y)),
-            "inputPoint1": CIVector(x: 0.25, y: CGFloat(p1y)),
-            "inputPoint2": CIVector(x: 0.5,  y: 0.5),            // midtones untouched
-            "inputPoint3": CIVector(x: 0.75, y: CGFloat(p3y)),
-            "inputPoint4": CIVector(x: 1.0,  y: CGFloat(p4y))
-        ])
-    }
-
-    static func applyFilter(_ name: String, to image: CIImage, params: [String: Any]) -> CIImage {
-        guard let filter = CIFilter(name: name) else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-        for (key, value) in params {
-            filter.setValue(value, forKey: key)
-        }
-        return filter.outputImage ?? image
     }
 
     static func scaleToFit(_ image: CIImage, maxSize: CGSize) -> CIImage {
