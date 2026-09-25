@@ -15,10 +15,17 @@ final class ZoomPanState {
     var fitSize: CGSize = .zero
     var viewportSize: CGSize = .zero
 
+    /// The image viewport in the window's content coordinates (SwiftUI `.global`, top-left origin).
+    /// `.zero` while no single image is shown, so no scroll event is taken.
+    @ObservationIgnored var viewportFrame: CGRect = .zero
+
     @ObservationIgnored private var scrollMonitor: Any?
+    @ObservationIgnored private weak var hostWindow: NSWindow?
 
     func startMonitoring() {
         guard scrollMonitor == nil else { return }
+        // The detail view opens from a click or key press in its own window, so that window is key.
+        hostWindow = NSApp.keyWindow ?? NSApp.mainWindow
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             self?.handleScroll(event) ?? event
         }
@@ -61,7 +68,14 @@ final class ZoomPanState {
         dragStartOffset = imageOffset
     }
 
+    /// The monitor is app-wide, so only take scroll events over the image viewport in the detail view's own
+    /// window. Everything else (the edit sidebar's `ScrollView`, the tag popover's `List`, other windows)
+    /// gets its event back untouched (spec §D5).
     private func handleScroll(_ event: NSEvent) -> NSEvent? {
+        guard Self.shouldHandleScroll(eventWindow: event.window, hostWindow: hostWindow,
+                                      locationInWindow: event.locationInWindow,
+                                      windowHeight: event.window?.frame.height ?? 0,
+                                      viewportFrame: viewportFrame) else { return event }
         guard fitSize.width > 0 else { return event }
 
         let delta: CGFloat
@@ -78,6 +92,29 @@ final class ZoomPanState {
 
         zoomTo(newMag)
         return nil
+    }
+
+    /// Whether a scroll at `locationInWindow` (AppKit window coordinates, bottom-left origin) falls inside
+    /// `viewportFrame` (SwiftUI `.global`, top-left origin).
+    ///
+    /// `windowHeight` is the height of the window's *frame*: SwiftUI's `.global` space starts at the top of the
+    /// window frame, title bar included, not at the top of the content view (checked in
+    /// `DetailViewTests.testGlobalFrameMatchesFlippedWindowCoordinates`). The two only agree for windows with a
+    /// full-size content view.
+    nonisolated static func shouldHandleScroll(locationInWindow: CGPoint, windowHeight: CGFloat,
+                                               viewportFrame: CGRect) -> Bool {
+        guard viewportFrame.width > 0, viewportFrame.height > 0 else { return false }
+        let flipped = CGPoint(x: locationInWindow.x, y: windowHeight - locationInWindow.y)
+        return viewportFrame.contains(flipped)
+    }
+
+    /// As above, and only for events in the detail view's own window.
+    nonisolated static func shouldHandleScroll(eventWindow: AnyObject?, hostWindow: AnyObject?,
+                                               locationInWindow: CGPoint, windowHeight: CGFloat,
+                                               viewportFrame: CGRect) -> Bool {
+        guard let hostWindow, let eventWindow, eventWindow === hostWindow else { return false }
+        return shouldHandleScroll(locationInWindow: locationInWindow, windowHeight: windowHeight,
+                                  viewportFrame: viewportFrame)
     }
 }
 
@@ -252,6 +289,7 @@ struct PhotoDetailView: View {
             }
             .onAppear {
                 zoomState.viewportSize = geometry.size
+                zoomState.viewportFrame = geometry.frame(in: .global)
                 zoomState.fitSize = fitSize
                 updateImageDisplayRect(fitSize: fitSize, geometrySize: geometry.size)
             }
@@ -261,6 +299,12 @@ struct PhotoDetailView: View {
                 zoomState.fitSize = newFit
                 zoomState.clampOffset()
                 updateImageDisplayRect(fitSize: newFit, geometrySize: newSize)
+            }
+            .onChange(of: geometry.frame(in: .global)) { _, newFrame in
+                zoomState.viewportFrame = newFrame
+            }
+            .onDisappear {
+                zoomState.viewportFrame = .zero
             }
         }
         .clipped()
