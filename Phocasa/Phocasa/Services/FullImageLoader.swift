@@ -239,7 +239,12 @@ final class FullImageLoader: @unchecked Sendable {
                 case .hit(let image):
                     continuation.resume(returning: image)
                 case .join:
-                    break
+                    // The decode may be a prefetch running at .utility. Enqueuing a higher-QoS item on the serial
+                    // prefetch queue makes GCD raise the running item's QoS, so the caller doesn't wait on a
+                    // starved background decode.
+                    if queue !== prefetchQueue {
+                        prefetchQueue.async(qos: .userInitiated, flags: .enforceQoS) {}
+                    }
                 case .decode:
                     queue.async { [self] in
                         // Skip the decode if everyone who asked for it has gone away (fast navigation).
