@@ -19,6 +19,11 @@
 - `73cfedc`, `f89d705`: CLAUDE.md lines from tasks 34, 31, 32, 33 and 35, plus two rules learned while merging.
 - `5449cd6`: `MigrationTests` extended to task 33's attribute.
 - `808063d`: **integration fix**. The full suite crashed after 32 and 33 were both merged (below).
+- `7657c2e` (after the real-app check, branch `fix/delete-key-and-store-folder`):
+  - `abe892f`, the Delete key moves the selection to the Bin again (found in the check);
+  - `81be5bc`, the library moves to `Application Support/Phocasa/Phocasa.store` (the user's request).
+
+  Both are described below.
 
 ## Before dispatch: task-file fixes
 
@@ -222,6 +227,7 @@
 | 33 (`892548f` + `5449cd6`) | **host crash at 149**, then 576 / 31 / 0 after `808063d` |
 | 35 (`71ef03f`) | 616 / 41 / 0 |
 | final (`f89d705`, clean DerivedData) | **616 / 41 / 0**, no host restarts |
+| `7657c2e` (Delete key, store location; clean DerivedData) | **627 / 41 / 0**, 0 source warnings, no host restarts |
 
 - **Clean build of final `main`: 0 compiler warnings.** The AppIntents tooling notice (app and test host) is the only
   `warning:` line.
@@ -233,7 +239,91 @@
 
 ## Real-app check
 
-PENDING: the screen was locked when the benchmarks finished (06:35).
+Done on 2026-09-26, 09:32–09:55, with the screen unlocked, on a build of `237abbd` (final wave-3 `main`).
+
+- **Setup:**
+  - the built binary, launched with `XCTestConfigurationFilePath` (in-memory store) and a temp
+    `PHOCASA_THUMBNAIL_CACHE_DIR`; `lsof` showed no store file open, on both launches;
+  - temp copies of 17 pairs from `~/PhocasaBenchRAW`, copied in reverse order so creation order is the opposite of
+    capture order: `DSC08640` RAW-only, three rotated (orientations 6 and 8), a Lightroom-style sidecar and a garbage
+    `.xmp`. One more pair was added mid-check for the rescan and the permanent delete.
+- **Wave 3, all as intended:**
+  - **Capture-date order.** Newest capture first, the reverse of creation order, and oldest first after the toggle.
+    The RAW-only photo sits at its capture time.
+  - **Bin across a rescan.** The binned photo stayed in the Bin through a rescan, which added the new pair at its
+    capture-date place. Counts were right throughout.
+  - **Grid scroll.** Opening and closing a photo left the grid pixel-identical. The first click on a partly hidden
+    cell scrolls it into view, as designed.
+  - **Permanent delete.** The photo left the Bin at once, and a click straight after the confirmation was handled.
+  - **Quit.** Rating a photo and pressing Cmd-Q at once still wrote the JPG and the sidecar; the app quit at once.
+  - **Relaunch.** No thumbnail was decoded again: no new cache files, and each photo's thumbnail was read from disk.
+    That includes the photo rated just before quitting, whose cache entry was re-keyed to the file's new size.
+  - **Edits at screen size** (RAW edit of the rotated portrait `DSC08753`, +2.5 EV):
+    - sharp at fit at full screen resolution;
+    - zoomed to 579%, the native render shows per-pixel sensor noise.
+  - **Saved edits.** The saved edit showed at once after Escape. Navigating away and back showed it within 0.15 s,
+    pixel-identical to the settled frame.
+- **Waves 1–2, re-checked, all as before:**
+  - scan progress ("Adding 190 new photos…" on `~/PhocasaBenchRAW`) and counts;
+  - instant star clicks; a double-click under Unrated rated once and left the neighbour alone;
+  - rating write-backs:
+    - pairs write the JPG's XMP and the sidecar, and the RAW-only photo only its sidecar;
+    - the Lightroom sidecar kept every field (ImageIO re-serialises it);
+    - the garbage sidecar stayed byte-identical;
+    - the camera JPG's Exif segment kept its size (`segs.py`);
+  - RAW edit of the rotated portrait:
+    - the JPG comparison, the crop and the export are upright;
+    - the export is native (2558×4055 after the crop);
+    - Revert removed the edit from the sidecar and kept the rating;
+  - JPG edit of a rotated JPG: side by side upright; "Apply edits permanently" baked upright pixels
+    (3264×4912, no orientation tag), and the grid thumbnail refreshed;
+  - no `.phocasa-tmp` files, no `~/Library/Caches/com.phocasa.app`, and `~/PhocasaBenchRAW` unchanged (0 files newer
+    than the check's start).
+- **Not checkable with the in-memory store:** the Bin across a relaunch, the background load of a 500+ library and
+  the backfill of an existing library (decision 1). Unit tests on temp on-disk stores cover all three.
+- **Side effect:** the permanent delete put the extra pair's two copies (`DSC08652.JPG`, `DSC08652.ARW`, 19 MB) in
+  the user's Trash. The terminal can't list the Trash, so they're still there.
+- **Found (older than wave 3):**
+  1. **The Delete key did nothing.** ⌫ sends U+007F, but SwiftUI's `.delete` is U+0008 and `.deleteForward` U+F728.
+     The line dates from the first commit. Fixed after the check (below).
+  2. **Exports and "Apply edits permanently" write no metadata.** `writeJPEG` has never added any, and wave 1 kept
+     its output byte-identical. So an export has no Exif, capture date, rating or keywords. "Apply edits permanently"
+     also strips the camera's Exif from the original JPG, which can't be undone. Decision 6 below.
+  3. **An export becomes a separate photo on the next rescan.** A `-raw-edit` export becomes the pair's JPG. Pairing
+     is by file stem, so a rescan makes it a photo of its own, and the pair goes back to its own JPG. Having no
+     capture date, the export sorts as the newest photo.
+  4. **The export dialog of a JPG edit** is titled "Export RAW Edit" and offers the two RAW exports too.
+
+## After the real-app check (`7657c2e`)
+
+- **Delete key** (`abe892f`). The key handler also matches U+007F.
+  - `KeyboardShortcutTests` sends the keyboard's own key-downs to a hosted `ContentView`.
+  - ⌫ fails before the change. ⌦ and a digit key pass before and after, which shows the harness delivers keys.
+- **Store location** (`81be5bc`, the user's request: a bare `default.store` says nothing about Phocasa, and every
+  non-sandboxed SwiftData app that keeps the default shares it).
+  - The library is now `~/Library/Application Support/Phocasa/Phocasa.store`.
+  - `StoreLocation.prepare` runs before the container opens. It moves a `default.store` whose metadata names
+    `PhotoAsset`, with its `-wal`, `-shm` and `.default_SUPPORT` external-data folder, renamed to match.
+    - The store file moves last, so a launch that stops part way finishes the move next time.
+    - Another app's `default.store` is left alone.
+    - A store whose metadata can't be read is opened where it is, as before.
+    - The test host keeps its in-memory store and never calls it.
+  - `StoreLocationTests`, 8 tests on temp folders standing in for Application Support:
+    - a pre-task-31 store moves with every file, and opens with every value, including the externally stored edit
+      data;
+    - an existing Phocasa store wins;
+    - another app's store stays;
+    - an unreadable store stays;
+    - an interrupted move is finished;
+    - SwiftData names the external-data folder after the store, which the move relies on.
+  - Two mutations (skip the external-data folder; move another app's store) each fail the tests meant to catch them.
+  - Launch cost: two `fileExists` checks. The metadata read and the move run once. No benchmark covers the launch
+    of a real store, and none was needed.
+  - A store's SQLite files can't be compared byte for byte in tests. SwiftData checkpoints them when it likes, even
+    after its container is released, through a moved file's handle too. The tests compare file names, the external
+    data's bytes, and the contents by opening the store; CLAUDE.md now says so.
+- **Docs:** CLAUDE.md (store location, the Core Data metadata read, the testing rule) and the coordinator README (the
+  new path, `lsof … grep -c "\.store"`, and three app-driving lessons).
 
 ## Decisions for the user
 
@@ -244,11 +334,15 @@ PENDING: the screen was locked when the benchmarks finished (06:35).
    - I tried to add a `PHOCASA_STORE_URL` override (honoured only with the test flag, so a normal launch couldn't be
      redirected). The permission classifier blocked it as security-weakening, and I didn't pursue it.
    - Options: allow it, or check these three yourself on a copy of your library.
-2. **Back up `~/Library/Application Support/default.store*` before running this build normally.** Task 31's rename
-   (and 33's new attribute) migrate your library in place on first launch. A failed migration stops the app at launch,
-   and the backup is the only way back.
-   - The migration tests pass.
-   - Task 31's probe also showed an older build still opens a migrated store.
+2. **Back up your library before running this build normally.** Quit Phocasa, then copy
+   `~/Library/Application Support/default.store`, `default.store-wal`, `default.store-shm` and the hidden
+   `.default_SUPPORT` folder, if present, somewhere safe.
+   - The first launch moves them to `~/Library/Application Support/Phocasa/`. It then migrates them in place: task
+     31's rename and 33's new attribute. A failed migration stops the app at launch, and the backup is the only way
+     back.
+   - The migration and store-location tests pass, including a pre-task-31 store moved and then migrated.
+   - Task 31's probe showed an older build still opens a migrated store. An older build now looks for `default.store`
+     and finds none, so going back means moving the files back as well.
 3. **Task 35's saved-edit prefetch** (`3d8f270`) wasn't in the task file. It's what makes arrowing through edited RAWs
    instant; keep it unless you'd rather not spend up to 26 MB on one render ahead.
 4. **Sharpening and clarity at fit** now apply at screen scale, so an edit at fit looks slightly different from the
@@ -257,6 +351,12 @@ PENDING: the screen was locked when the benchmarks finished (06:35).
 5. **Launch main-actor total ≤ 150 ms** needs the grid to take photo identity from `library.shownIDs`, not the models
    (a `PhotoGridView` change; task 32's follow-up). Today the launch no longer blocks, but it spends about 300 ms of
    main-actor time in ≤ 13 ms turns.
+6. **Metadata in exports and "Apply edits permanently"** (found in the real-app check; older than wave 3).
+   - Today the written JPEG has no metadata. "Apply edits permanently" strips the camera's Exif from the original
+     JPG, including the capture date, and its rating and keywords.
+   - Suggested: copy the source's metadata into the written file, with the orientation reset to 1 (the pixels are
+     already upright), and re-apply Phocasa's rating and keywords.
+   - That changes the bytes of every export, which wave 1 kept identical on purpose. Your call.
 
 ## Follow-ups
 
@@ -275,8 +375,11 @@ PENDING: the screen was locked when the benchmarks finished (06:35).
 - **Thumbnail cache:** restore the exact `st_mtimespec` in `restoreFileDates` (`utimensat`) instead of rounding
   through `Date`. The re-key tolerates 10 µs today.
 - **Quit** waits for metadata writes only; a running trash batch is cut off (its rows stay until the next scan).
-- **In-app backup before a schema migration** (task 31's follow-up): copy `default.store*` aside once when the store's
-  model differs from the app's.
+- **In-app backup before a schema migration** (task 31's follow-up): copy the store aside once when its model differs
+  from the app's. The store is now `Phocasa/Phocasa.store` with its companions.
+- **Exports** (real-app check): a `-raw-edit` export becomes a separate photo on the next rescan, and the pair goes
+  back to its own JPG (pairing is by stem). The JPG edit's export dialog is titled "Export RAW Edit" and offers the
+  two RAW exports. Crop mode shows the unedited original.
 - **Harness:**
   - rename the `1a`/`1b` labels (they still say `isDeleted`);
   - the "single cold" thumbnail lines mostly measure CPU wake-up after a 300 ms pause;
