@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 @testable import Phocasa
@@ -8,8 +9,9 @@ import UniformTypeIdentifiers
 ///
 /// Simulates arrow-key navigation through a folder of 24 MP photos with a dwell time between key presses and
 /// measures, per navigation, the time until the image to show is decoded:
-/// - `old`: what the detail view did before task 12, a full-resolution `ImageLoader.loadFullResolution` per
-///   navigation with no cache or prefetch;
+/// - `old`: what the detail view did before task 12, a full-resolution decode per navigation with no cache or
+///   prefetch. `ImageLoader.loadFullResolution(for:)` was removed in task 34; `loadFullResolutionAsBefore(_:)` below
+///   is its code, so this line still measures the same thing under the same label;
 /// - `new`: `FullImageLoader.loadFit` (subsampled when the viewport allows), with the neighbours prefetched
 ///   the way `PhotoDetailView` does it.
 ///
@@ -66,7 +68,7 @@ final class DetailNavigationBenchmarks: XCTestCase {
     private func navigateOld(paths: [String], dwellMs: Int) async throws -> Run {
         var run = Run()
         for path in paths {
-            let (image, ms) = await measureAsync { await ImageLoader.shared.loadFullResolution(for: path) }
+            let (image, ms) = await measureAsync { await Self.loadFullResolutionAsBefore(path) }
             let cg = try XCTUnwrap(image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
             run.latencies.append(ms)
             run.mbPerImage = Double(cg.bytesPerRow * cg.height) / 1_048_576
@@ -95,6 +97,33 @@ final class DetailNavigationBenchmarks: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private static let fullResolutionQueue = DispatchQueue(
+        label: "com.phocasa.bench.full-resolution", qos: .userInitiated, attributes: .concurrent
+    )
+
+    /// The removed `ImageLoader.loadFullResolution(for:)`, unchanged: a full decode on a concurrent queue.
+    private static func loadFullResolutionAsBefore(_ path: String) async -> NSImage? {
+        await withCheckedContinuation { continuation in
+            fullResolutionQueue.async {
+                guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let options: [CFString: Any] = [
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                ]
+                guard let cgImage = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: NSImage(
+                    cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+                ))
+            }
+        }
+    }
 
     private func report(_ line: String) { print("BENCH|detail|" + line) }
 

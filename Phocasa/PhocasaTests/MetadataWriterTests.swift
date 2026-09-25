@@ -90,6 +90,32 @@ final class RecordingMetadataService: MetadataWriting, @unchecked Sendable {
     }
 }
 
+/// A `MetadataRewriteObserver` that records which paths it was asked about, and whether the write ran inside the
+/// call (`service` recorded one more call during it).
+final class RecordingRewriteObserver: MetadataRewriteObserver, @unchecked Sendable {
+    struct Observation: Equatable {
+        let path: String
+        let wroteInside: Bool
+    }
+
+    private let lock = NSLock()
+    private var recorded: [Observation] = []
+    private let service: RecordingMetadataService
+
+    init(service: RecordingMetadataService) {
+        self.service = service
+    }
+
+    var observed: [Observation] { lock.withLock { recorded } }
+
+    func rewritingMetadata(ofImageAt path: String, _ rewrite: () -> Void) {
+        let before = service.calls.count
+        rewrite()
+        let wrote = service.calls.count == before + 1 && service.calls.last?.path == path
+        lock.withLock { recorded.append(Observation(path: path, wroteInside: wrote)) }
+    }
+}
+
 @MainActor
 final class MetadataWriterTests: XCTestCase {
     private var dir: URL!
@@ -402,6 +428,47 @@ final class MetadataWriterTests: XCTestCase {
         await writer.flush()
 
         XCTAssertEqual(fake.calls.map(\.path), ["a.jpg", "b.arw", "c.jpg"])
+    }
+
+    // MARK: - Thumbnail re-key hook (task 34)
+
+    func testImageMetadataWritesRunInsideTheRewriteObserver() async {
+        let fake = RecordingMetadataService()
+        let observer = RecordingRewriteObserver(service: fake)
+        let writer = MetadataWriter(writer: fake, rewriteObserver: observer)
+
+        writer.enqueue([
+            item("a.jpg", 1),
+            item("b.ARW", 2),
+            MetadataWriteItem(path: "c.jpg", rating: 3, keywords: [], pairedRAWPath: "c.nef"),
+            item("d.heic", 4),
+        ])
+        writer.enqueueEditParameters(EditParameters(exposure: 1), forRAWAt: "e.cr3")
+        writer.enqueueEditParameters(nil, forRAWAt: "e.cr3")
+        await writer.flush()
+
+        XCTAssertEqual(observer.observed.map(\.path), ["a.jpg", "c.jpg", "d.heic"],
+                       "only writes into an image file itself; RAW sidecars and edit parameters don't touch it")
+        XCTAssertEqual(observer.observed.map(\.wroteInside), [true, true, true],
+                       "the write happens inside the observer's call, so it can compare the file before and after")
+        // The two edit-parameter writes for e.cr3 coalesce into the last one.
+        XCTAssertEqual(fake.calls.map(\.path), ["a.jpg", "b.ARW", "c.jpg", "c.nef", "d.heic", "e.cr3"])
+    }
+
+    func testWithoutAnObserverWritesAreUnchanged() async {
+        let fake = RecordingMetadataService()
+        let writer = MetadataWriter(writer: fake)
+
+        writer.enqueue([item("a.jpg", 1), item("b.arw", 2)])
+        await writer.flush()
+
+        XCTAssertEqual(fake.calls, [.metadata(path: "a.jpg", rating: 1, keywords: []),
+                                    .metadata(path: "b.arw", rating: 2, keywords: [])])
+    }
+
+    func testSharedWriterReportsRewritesToTheSharedImageLoader() {
+        XCTAssertTrue(MetadataWriter.shared.rewriteObserver as AnyObject === ImageLoader.shared)
+        XCTAssertNil(MetadataWriter(writer: RecordingMetadataService()).rewriteObserver)
     }
 
     // MARK: - Real files (MetadataService)
