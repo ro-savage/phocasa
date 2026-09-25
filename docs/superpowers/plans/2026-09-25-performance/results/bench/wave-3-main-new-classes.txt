@@ -1,0 +1,59 @@
+BENCH|capture10k-jpg|info|rows=10000 files=real JPG x190
+BENCH|capture10k-jpg|loadExistingData() warm, no capture dates yet|median_ms=246.440|min_ms=246.140|max_ms=281.285|runs=3
+BENCH|capture10k-jpg|backfill wall (find + read + plan + write + re-order)|ms=9809.931
+BENCH|capture10k-jpg|backfill find candidates (background)|ms=268.694
+BENCH|capture10k-jpg|backfill read files (background, utility)|ms=1845.618
+BENCH|capture10k-jpg|backfill plan order (background)|ms=263.445
+BENCH|capture10k-jpg|backfill write chunk main-actor time|median_ms=11.661|min_ms=10.141|max_ms=23.765|runs=299
+BENCH|capture10k-jpg|backfill write chunks|count=299|total_ms=3542.999|p90_ms=12.299|p99_ms=16.924|over16ms=4|first_ms=12.611|rows_per_chunk=33
+BENCH|capture10k-jpg|backfill re-order main-actor time|ms=5.359
+BENCH|capture10k-jpg|backfill main-actor total|ms=3548.358
+BENCH|capture10k-jpg|info|candidates=10000 written=10000 undated=0 unreadable=0 reordered=true
+BENCH|capture10k-jpg|loadExistingData() warm, every photo dated|median_ms=253.265|min_ms=252.016|max_ms=261.059|runs=5
+BENCH|capture10k-raw|info|rows=10000 files=real RAW x190
+BENCH|capture10k-raw|loadExistingData() warm, no capture dates yet|median_ms=246.282|min_ms=246.210|max_ms=280.879|runs=3
+BENCH|capture10k-raw|backfill wall (find + read + plan + write + re-order)|ms=11598.542
+BENCH|capture10k-raw|backfill find candidates (background)|ms=264.708
+BENCH|capture10k-raw|backfill read files (background, utility)|ms=3679.700
+BENCH|capture10k-raw|backfill plan order (background)|ms=261.580
+BENCH|capture10k-raw|backfill write chunk main-actor time|median_ms=11.649|min_ms=7.225|max_ms=19.620|runs=299
+BENCH|capture10k-raw|backfill write chunks|count=299|total_ms=3519.378|p90_ms=12.225|p99_ms=16.475|over16ms=4|first_ms=12.509|rows_per_chunk=33
+BENCH|capture10k-raw|backfill re-order main-actor time|ms=5.400
+BENCH|capture10k-raw|backfill main-actor total|ms=3524.779
+BENCH|capture10k-raw|info|candidates=10000 written=10000 undated=0 unreadable=0 reordered=true
+BENCH|capture10k-raw|loadExistingData() warm, every photo dated|median_ms=252.024|min_ms=251.791|max_ms=253.359|runs=5
+BENCH|capture10k-undated|backfill wall, nothing to write (every launch)|median_ms=392.329|min_ms=388.684|max_ms=471.653|runs=3
+BENCH|capture10k-undated|backfill find candidates (background)|median_ms=234.929|min_ms=232.642|max_ms=310.068|runs=3
+BENCH|capture10k-undated|backfill read files (background, utility)|median_ms=153.089|min_ms=151.717|max_ms=156.823|runs=3
+BENCH|capture10k-undated|info|write chunks=[0, 0, 0]
+BENCH|capture10k-fetch|loadExistingData() warm, none dated|median_ms=244.425|min_ms=243.495|max_ms=245.613|runs=5
+BENCH|capture10k-fetch|LibrarySort.fetch warm, none dated|median_ms=168.548|min_ms=167.804|max_ms=168.600|runs=5
+BENCH|capture10k-fetch|loadExistingData() warm, all dated|median_ms=251.934|min_ms=248.502|max_ms=256.546|runs=5
+BENCH|capture10k-fetch|LibrarySort.fetch warm, all dated|median_ms=173.858|min_ms=170.487|max_ms=176.426|runs=5
+BENCH|capture10k-fetch|loadExistingData() warm, 1% undated|median_ms=247.369|min_ms=246.664|max_ms=253.911|runs=5
+BENCH|capture10k-fetch|LibrarySort.fetch warm, 1% undated|median_ms=172.040|min_ms=171.441|max_ms=172.504|runs=5
+BENCH|capture10k-fetch|loadExistingData() warm, half dated|median_ms=256.651|min_ms=256.287|max_ms=262.824|runs=5
+BENCH|capture10k-fetch|LibrarySort.fetch warm, half dated|median_ms=181.387|min_ms=180.572|max_ms=184.858|runs=5
+BENCH|editsize|synth-24MP-jpg memory after a save|handoff_px=2894x1930|handoff_MB=21.3|saved_edit_px=3195x2130|reused=false|renders_after_save=1|held_MB=47.3
+BENCH|editsize|real-raw memory after a save|handoff_px=2894x1924|handoff_MB=21.3|saved_edit_px=3206x2130|reused=false|renders_after_save=1|held_MB=47.4
+BENCH|editsize|real-jpg saved edit on navigation: until shown|median_ms=49.6|min_ms=34.7|max_ms=59.4|runs=12|viewport=3456x2130|px=1416x2130,3206x2130|max_MB_per_render=26.1
+BENCH|editsize|synth-24MP-jpg saved edit on navigation: until shown|median_ms=50.6|min_ms=37.9|max_ms=55.1|runs=12|viewport=3456x2130|px=3195x2130|max_MB_per_render=26.0
+BENCH|editsize|real-raw saved edit while browsing (250 ms per photo): until shown|median_ms=1.2|min_ms=0.8|max_ms=1.4|runs=12
+BENCH|editsize|real-raw saved edit while browsing (60 ms per photo): until shown|median_ms=92.2|min_ms=71.6|max_ms=99.7|runs=12
+BENCH|editsize|real-raw saved edit on navigation: until shown|median_ms=159.0|min_ms=140.2|max_ms=169.0|runs=12|viewport=3456x2130|px=1416x2130,3206x2130|max_MB_per_render=26.1
+BENCH|editsize|synth-24MP-jpg slider pause: pass|median_ms=30.4|min_ms=26.2|max_ms=33.0|runs=10|viewport=2894x2130|full_px=2894x1930|full_MB=21.3
+BENCH|editsize|synth-24MP-jpg slider pause: process CPU during the pass|median_ms=28.3|min_ms=23.7|max_ms=35.6|runs=10
+BENCH|editsize|synth-24MP-jpg slider pause: preview to sharp (incl. the 300 ms pause)|median_ms=335.6|min_ms=327.7|max_ms=340.0|runs=10
+BENCH|editsize|synth-24MP-jpg slider pause: main-thread first draw of fullImage|median_ms=27.3|min_ms=15.1|max_ms=29.6|runs=10
+BENCH|editsize|real-jpg slider pause: pass|median_ms=25.6|min_ms=21.5|max_ms=35.2|runs=10|viewport=2894x2130|full_px=2894x1924|full_MB=21.3
+BENCH|editsize|real-jpg slider pause: process CPU during the pass|median_ms=22.8|min_ms=18.0|max_ms=34.2|runs=10
+BENCH|editsize|real-jpg slider pause: preview to sharp (incl. the 300 ms pause)|median_ms=329.8|min_ms=325.3|max_ms=341.2|runs=10
+BENCH|editsize|real-jpg slider pause: main-thread first draw of fullImage|median_ms=29.6|min_ms=24.0|max_ms=34.0|runs=10
+BENCH|editsize|real-raw slider pause: pass|median_ms=66.3|min_ms=56.7|max_ms=72.6|runs=10|viewport=2894x2130|full_px=2894x1924|full_MB=21.3
+BENCH|editsize|real-raw slider pause: process CPU during the pass|median_ms=52.8|min_ms=46.3|max_ms=66.9|runs=10
+BENCH|editsize|real-raw slider pause: preview to sharp (incl. the 300 ms pause)|median_ms=369.3|min_ms=361.2|max_ms=377.9|runs=10
+BENCH|editsize|real-raw slider pause: main-thread first draw of fullImage|median_ms=21.2|min_ms=19.5|max_ms=23.4|runs=10
+BENCH|editsize|real-raw-2 slider pause: pass|median_ms=58.2|min_ms=53.8|max_ms=64.7|runs=10|viewport=2894x2130|full_px=1416x2130|full_MB=11.6
+BENCH|editsize|real-raw-2 slider pause: process CPU during the pass|median_ms=53.2|min_ms=43.0|max_ms=56.7|runs=10
+BENCH|editsize|real-raw-2 slider pause: preview to sharp (incl. the 300 ms pause)|median_ms=364.4|min_ms=357.6|max_ms=370.3|runs=10
+BENCH|editsize|real-raw-2 slider pause: main-thread first draw of fullImage|median_ms=29.7|min_ms=26.3|max_ms=33.9|runs=10

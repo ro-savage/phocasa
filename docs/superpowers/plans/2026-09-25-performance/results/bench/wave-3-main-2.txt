@@ -1,0 +1,214 @@
+COORD|readMetadata real-jpg x190|median_ms=85.4|min_ms=83.1|max_ms=91.4|runs=3
+COORD|info|readMetadata real-jpg|rated=0|tagged=0
+COORD|readMetadata real-arw x190|median_ms=444.6|min_ms=443.0|max_ms=589.7|runs=3
+COORD|info|readMetadata real-arw|rated=0|tagged=0
+COORD|thumb real-arw single cold thumbnail 380px|median_ms=35.5|min_ms=17.4|max_ms=38.5|runs=20
+COORD|thumb real-arw fastScroll last20|median_ms=8.6|min_ms=7.9|max_ms=9.1|runs=5
+COORD|thumb real-arw fastScroll all tasks finished|median_ms=8.7|min_ms=7.9|max_ms=9.1|runs=5
+COORD|thumb real-jpg single cold thumbnail 380px|median_ms=62.3|min_ms=29.2|max_ms=71.4|runs=20
+COORD|thumb real-jpg fastScroll last20|median_ms=27.7|min_ms=27.2|max_ms=28.8|runs=5
+COORD|thumb real-jpg fastScroll all tasks finished|median_ms=27.8|min_ms=27.3|max_ms=28.8|runs=5
+COORD|info|thumb disk files=61
+COORD|thumb relaunch synth-jpg single cold thumbnail 380px|median_ms=1.5|min_ms=1.1|max_ms=2.9|runs=20
+COORD|info|thumb disk files=542
+COORD|thumb relaunch synth-jpg fastScroll last20|median_ms=0.0|min_ms=0.0|max_ms=0.0|runs=5
+COORD|thumb relaunch synth-jpg fastScroll all tasks finished|median_ms=0.1|min_ms=0.1|max_ms=0.2|runs=5
+COORD|info|thumb disk files=61
+COORD|thumb relaunch real-jpg single cold thumbnail 380px|median_ms=1.1|min_ms=0.8|max_ms=2.8|runs=20
+COORD|info|thumb disk files=518
+COORD|thumb relaunch real-jpg fastScroll last20|median_ms=0.0|min_ms=0.0|max_ms=0.0|runs=5
+COORD|thumb relaunch real-jpg fastScroll all tasks finished|median_ms=0.1|min_ms=0.1|max_ms=0.2|runs=5
+COORD|info|thumb disk files=61
+COORD|thumb relaunch real-arw single cold thumbnail 380px|median_ms=1.4|min_ms=0.8|max_ms=4.3|runs=20
+COORD|info|thumb disk files=515
+COORD|thumb relaunch real-arw fastScroll last20|median_ms=0.0|min_ms=0.0|max_ms=0.0|runs=5
+COORD|thumb relaunch real-arw fastScroll all tasks finished|median_ms=0.2|min_ms=0.1|max_ms=0.3|runs=5
+COORD|thumb synth-jpg fastScroll last20|median_ms=261.1|min_ms=232.8|max_ms=263.2|runs=5
+COORD|thumb synth-jpg fastScroll all tasks finished|median_ms=386.0|min_ms=370.4|max_ms=412.6|runs=5
+COORD|edit real-arw edit tick idle|median_ms=36.9|min_ms=34.8|max_ms=38.1|runs=10
+COORD|edit real-arw edit tick during full-res pass|median_ms=39.0|min_ms=36.1|max_ms=50.4|runs=10
+COORD|edit real-arw main-thread first draw of full-res result|median_ms=35.6|min_ms=22.6|max_ms=39.3|runs=10
+COORD|edit real-jpg edit tick idle|median_ms=35.7|min_ms=34.3|max_ms=37.6|runs=10
+COORD|edit real-jpg edit tick during full-res pass|median_ms=36.4|min_ms=34.4|max_ms=39.1|runs=10
+COORD|edit real-jpg main-thread first draw of full-res result|median_ms=43.0|min_ms=37.5|max_ms=64.2|runs=10
+COORD|edit synth-jpg-24MP edit tick idle|median_ms=33.4|min_ms=33.1|max_ms=34.8|runs=10
+COORD|edit synth-jpg-24MP edit tick during full-res pass|median_ms=35.9|min_ms=33.1|max_ms=36.8|runs=10
+COORD|edit synth-jpg-24MP main-thread first draw of full-res result|median_ms=65.2|min_ms=63.0|max_ms=69.4|runs=10
+BENCH|N=10000|seed (insert+save; harness, not app code)|ms=3346.734
+BENCH|N=10000|COLD setModelContext (fetch+stat+counts+tags)|ms=0.511|allPhotos=0
+BENCH|N=10000|COLD setModelContext until the library is loaded (waitForScans)|ms=328.767|allPhotos=10000
+BENCH|N=10000|COLD background load: main-actor time / longest turn|ms=292.810|longest_ms=12.197
+BENCH|N=10000|COLD fetch photos (no prefetch)|ms=225.048
+BENCH|N=10000|COLD first touch of photo.tags on all (relationship faults)|ms=46.027
+BENCH|N=10000|second touch of photo.tags on all|ms=7.297|refs=40000
+BENCH|N=10000|COLD fetch photos WITH prefetch [tags]|ms=278.812
+BENCH|N=10000|COLD touch photo.tags after prefetch|ms=7.457|refs=20000
+BENCH|N=10000|1 loadExistingData() warm|median_ms=320.381|min_ms=320.152|max_ms=321.059|runs=5
+BENCH|N=10000|1a raw fetch(!isDeleted, sorted) warm|median_ms=187.907|min_ms=187.796|max_ms=188.007|runs=5
+BENCH|N=10000|1b raw fetch(isDeleted) bin warm|median_ms=0.459|min_ms=0.453|max_ms=0.483|runs=5
+BENCH|N=10000|2 refreshAvailability() (stat all + load)|median_ms=361.618|min_ms=361.091|max_ms=361.936|runs=5
+BENCH|N=10000|2a fileExists loop only (10000 stats)|median_ms=19.016|min_ms=18.175|max_ms=19.149|runs=5
+BENCH|N=10000|3a applyFilter(.rated(3))|median_ms=0.003|min_ms=0.003|max_ms=0.005|runs=5
+BENCH|N=10000|3b applyFilter(.tag(people-0))|median_ms=0.005|min_ms=0.005|max_ms=0.007|runs=5
+BENCH|N=10000|3c applyFilter(.all)|median_ms=0.001|min_ms=0.001|max_ms=0.002|runs=5
+BENCH|N=10000|3d toggleSortOrder()|median_ms=3.988|min_ms=3.986|max_ms=4.009|runs=5
+BENCH|N=10000|3e applyFilter(.rated(3)) from no filter|median_ms=7.667|min_ms=7.646|max_ms=7.729|runs=5
+BENCH|N=10000|3f applyFilter(.tag(people-0)) from no filter|median_ms=15.779|min_ms=15.698|max_ms=15.865|runs=5
+BENCH|N=10000|3g applyFilter(.all) from .rated(3)|median_ms=1.120|min_ms=1.117|max_ms=1.129|runs=5
+BENCH|N=10000|3h applyFilter(.rated(4)) replacing .rated(3)|median_ms=7.665|min_ms=7.664|max_ms=7.702|runs=5
+BENCH|N=10000|info|rated3=1721|tagPeople0=73
+BENCH|N=10000|4 search keystroke 't' (set searchText + applyCurrentFilter)|median_ms=0.001|min_ms=0.001|max_ms=0.001|runs=5
+BENCH|N=10000|info|searchMatches=3658
+BENCH|N=10000|4b search keystroke '' -> 't' (text changes every run)|median_ms=5.015|min_ms=5.010|max_ms=5.120|runs=5
+BENCH|N=10000|5a setRating with .rated(3) filter active|median_ms=6.996|min_ms=6.870|max_ms=7.114|runs=5
+BENCH|N=10000|5b setRating no filter|median_ms=6.998|min_ms=6.982|max_ms=7.263|runs=5
+BENCH|N=10000|8a moveToBin single photo|median_ms=6.768|min_ms=6.696|max_ms=6.918|runs=5
+BENCH|N=10000|8b restoreFromBin single photo|median_ms=7.149|min_ms=7.135|max_ms=7.331|runs=5
+BENCH|N=10000|8c setRatingForSelection 50 photos|median_ms=14.715|min_ms=14.519|max_ms=14.820|runs=5
+BENCH|N=10000|6a allPhotos.filter { rating == 3 }|median_ms=9.101|min_ms=8.965|max_ms=9.762|runs=5
+BENCH|N=10000|6b one-pass rating/tag/category/type counts|median_ms=97.812|min_ms=97.472|max_ms=98.037|runs=5
+BENCH|N=10000|6c photos.map(\.id)|median_ms=9.545|min_ms=9.480|max_ms=9.672|runs=5
+BENCH|N=10000|6d photos.firstIndex(where: id == last)|median_ms=9.108|min_ms=9.010|max_ms=9.172|runs=5
+BENCH|N=10000|6e photos.firstIndex(where: id == middle)|median_ms=4.473|min_ms=4.471|max_ms=4.551|runs=5
+BENCH|N=10000|6f build [UUID: Int] index|median_ms=11.147|min_ms=11.104|max_ms=11.204|runs=5
+BENCH|N=10000|6g [UUID: Int] index lookup x1000|median_ms=0.137|min_ms=0.137|max_ms=0.137|runs=5
+BENCH|N=10000|6h Set(ids) over cached [UUID] (no model access)|median_ms=1.252|min_ms=1.247|max_ms=1.262|runs=5
+BENCH|N=10000|6i Array(allPhotos.reversed()) (sort-toggle alternative)|median_ms=1.422|min_ms=1.420|max_ms=1.425|runs=5
+BENCH|N=10000|6j search 't' in-memory over allPhotos (no refetch)|median_ms=55.552|min_ms=55.497|max_ms=55.739|runs=5
+BENCH|N=10000|6k selectedPhotosList (50 selected)|median_ms=0.050|min_ms=0.050|max_ms=0.050|runs=5
+BENCH|N=10000|7x rescanCurrentLibrary() all-existing (until !isScanning)|median_ms=335.727|min_ms=335.543|max_ms=336.569|runs=3
+BENCH|N=10000|info|scanProgress=Found 10000 photos (0 new)
+BENCH|N=10000|info|7x stored rows=10000 allPhotos=10000
+BENCH|N=10000|7x main-actor time of each rescan (scan task)|median_ms=7.623|min_ms=7.593|max_ms=7.655|runs=3
+BENCH|N=10000|7y FolderScanner.scan alone|median_ms=148.908|min_ms=148.589|max_ms=150.672|runs=3
+BENCH|N=10000|8d confirmPermanentDelete one photo from the bin (until done)|median_ms=12.779|min_ms=12.430|max_ms=13.426|runs=5
+BENCH|N=2000|seed (insert+save; harness, not app code)|ms=630.419
+BENCH|N=2000|COLD setModelContext (fetch+stat+counts+tags)|ms=0.426|allPhotos=0
+BENCH|N=2000|COLD setModelContext until the library is loaded (waitForScans)|ms=62.640|allPhotos=2000
+BENCH|N=2000|COLD background load: main-actor time / longest turn|ms=56.178|longest_ms=11.769
+BENCH|N=2000|COLD fetch photos (no prefetch)|ms=44.802
+BENCH|N=2000|COLD first touch of photo.tags on all (relationship faults)|ms=9.065
+BENCH|N=2000|second touch of photo.tags on all|ms=1.423|refs=8000
+BENCH|N=2000|COLD fetch photos WITH prefetch [tags]|ms=56.366
+BENCH|N=2000|COLD touch photo.tags after prefetch|ms=1.429|refs=4000
+BENCH|N=2000|1 loadExistingData() warm|median_ms=63.309|min_ms=63.071|max_ms=63.556|runs=5
+BENCH|N=2000|1a raw fetch(!isDeleted, sorted) warm|median_ms=36.828|min_ms=36.765|max_ms=36.874|runs=5
+BENCH|N=2000|1b raw fetch(isDeleted) bin warm|median_ms=0.136|min_ms=0.133|max_ms=0.142|runs=5
+BENCH|N=2000|2 refreshAvailability() (stat all + load)|median_ms=71.757|min_ms=71.510|max_ms=71.914|runs=5
+BENCH|N=2000|2a fileExists loop only (2000 stats)|median_ms=3.199|min_ms=3.164|max_ms=3.226|runs=5
+BENCH|N=2000|3a applyFilter(.rated(3))|median_ms=0.003|min_ms=0.003|max_ms=0.004|runs=5
+BENCH|N=2000|3b applyFilter(.tag(people-0))|median_ms=0.005|min_ms=0.005|max_ms=0.006|runs=5
+BENCH|N=2000|3c applyFilter(.all)|median_ms=0.001|min_ms=0.001|max_ms=0.002|runs=5
+BENCH|N=2000|3d toggleSortOrder()|median_ms=0.793|min_ms=0.792|max_ms=0.796|runs=5
+BENCH|N=2000|3e applyFilter(.rated(3)) from no filter|median_ms=1.545|min_ms=1.545|max_ms=1.587|runs=5
+BENCH|N=2000|3f applyFilter(.tag(people-0)) from no filter|median_ms=3.095|min_ms=3.087|max_ms=3.167|runs=5
+BENCH|N=2000|3g applyFilter(.all) from .rated(3)|median_ms=0.226|min_ms=0.226|max_ms=0.230|runs=5
+BENCH|N=2000|3h applyFilter(.rated(4)) replacing .rated(3)|median_ms=1.511|min_ms=1.510|max_ms=1.569|runs=5
+BENCH|N=2000|info|rated3=365|tagPeople0=19
+BENCH|N=2000|4 search keystroke 't' (set searchText + applyCurrentFilter)|median_ms=0.001|min_ms=0.001|max_ms=0.001|runs=5
+BENCH|N=2000|info|searchMatches=734
+BENCH|N=2000|4b search keystroke '' -> 't' (text changes every run)|median_ms=1.005|min_ms=1.004|max_ms=1.017|runs=5
+BENCH|N=2000|5a setRating with .rated(3) filter active|median_ms=1.883|min_ms=1.816|max_ms=1.933|runs=5
+BENCH|N=2000|5b setRating no filter|median_ms=1.887|min_ms=1.843|max_ms=1.952|runs=5
+BENCH|N=2000|8a moveToBin single photo|median_ms=1.827|min_ms=1.779|max_ms=1.881|runs=5
+BENCH|N=2000|8b restoreFromBin single photo|median_ms=1.862|min_ms=1.840|max_ms=1.870|runs=5
+BENCH|N=2000|8c setRatingForSelection 50 photos|median_ms=9.857|min_ms=9.722|max_ms=10.064|runs=5
+BENCH|N=2000|6a allPhotos.filter { rating == 3 }|median_ms=1.781|min_ms=1.766|max_ms=1.923|runs=5
+BENCH|N=2000|6b one-pass rating/tag/category/type counts|median_ms=19.119|min_ms=19.044|max_ms=19.180|runs=5
+BENCH|N=2000|6c photos.map(\.id)|median_ms=1.894|min_ms=1.878|max_ms=1.934|runs=5
+BENCH|N=2000|6d photos.firstIndex(where: id == last)|median_ms=1.793|min_ms=1.791|max_ms=1.836|runs=5
+BENCH|N=2000|6e photos.firstIndex(where: id == middle)|median_ms=0.899|min_ms=0.896|max_ms=0.902|runs=5
+BENCH|N=2000|6f build [UUID: Int] index|median_ms=2.186|min_ms=2.177|max_ms=2.190|runs=5
+BENCH|N=2000|6g [UUID: Int] index lookup x1000|median_ms=0.130|min_ms=0.130|max_ms=0.130|runs=5
+BENCH|N=2000|6h Set(ids) over cached [UUID] (no model access)|median_ms=0.240|min_ms=0.240|max_ms=0.243|runs=5
+BENCH|N=2000|6i Array(allPhotos.reversed()) (sort-toggle alternative)|median_ms=0.281|min_ms=0.280|max_ms=0.292|runs=5
+BENCH|N=2000|6j search 't' in-memory over allPhotos (no refetch)|median_ms=11.475|min_ms=11.450|max_ms=11.533|runs=5
+BENCH|N=2000|6k selectedPhotosList (50 selected)|median_ms=0.054|min_ms=0.054|max_ms=0.054|runs=5
+BENCH|N=2000|7x rescanCurrentLibrary() all-existing (until !isScanning)|median_ms=69.718|min_ms=67.834|max_ms=73.612|runs=3
+BENCH|N=2000|info|scanProgress=Found 2000 photos (0 new)
+BENCH|N=2000|info|7x stored rows=2000 allPhotos=2000
+BENCH|N=2000|7x main-actor time of each rescan (scan task)|median_ms=2.262|min_ms=2.249|max_ms=2.342|runs=3
+BENCH|N=2000|7y FolderScanner.scan alone|median_ms=29.319|min_ms=29.078|max_ms=29.477|runs=3
+BENCH|N=2000|8d confirmPermanentDelete one photo from the bin (until done)|median_ms=3.532|min_ms=3.419|max_ms=5.589|runs=5
+BENCH|N=10000|7v launch: setModelContext() with a library, fresh container (synchronous part)|median_ms=0.568|min_ms=0.541|max_ms=0.576|runs=3
+BENCH|N=10000|7v launch: setModelContext() until its rescan ends (!isScanning)|median_ms=378.563|min_ms=374.659|max_ms=381.064|runs=3
+BENCH|N=10000|7v launch rescan: main-actor time (scan task)|median_ms=7.782|min_ms=7.725|max_ms=7.898|runs=3
+BENCH|N=10000|7v launch background load: main-actor time (all turns)|median_ms=292.545|min_ms=291.056|max_ms=295.411|runs=3
+BENCH|N=10000|7v launch background load: longest main-actor turn|median_ms=12.558|min_ms=12.536|max_ms=12.586|runs=3
+BENCH|N=10000|7v launch: all main-actor time (synchronous part + background load + rescan)|median_ms=300.811|min_ms=299.531|max_ms=303.761|runs=3
+BENCH|N=10000|7w rescanCurrentLibrary() unchanged 10k library (until !isScanning)|median_ms=333.251|min_ms=332.710|max_ms=340.578|runs=5
+BENCH|N=10000|7w main-actor time of each rescan (scan task)|median_ms=7.676|min_ms=7.633|max_ms=7.703|runs=5
+BENCH|N=10000|info|7w scanProgress=Found 10000 photos (0 new) stored rows=10000 allPhotos=10000
+BENCH|N=10000|7u rescanCurrentLibrary() finding 10 new files in a 10k library (until !isScanning)|median_ms=348.261|min_ms=347.643|max_ms=354.069|runs=5
+BENCH|N=10000|7u main-actor time of each rescan (scan task)|median_ms=19.807|min_ms=19.586|max_ms=20.005|runs=5
+BENCH|N=10000|info|7u scanProgress=Found 10060 photos (10 new) reloaded=false allPhotos=10060
+BENCH|scan1k|generate 1000 jpegs (harness, not app code)|ms=869.898
+BENCH|scan1k|info|round-trip via app write→read: keywords=["cat:a", "cat:b"] rating=3
+BENCH|scan1k|FolderScanner.scan alone (1000 files)|median_ms=14.677|min_ms=14.589|max_ms=14.793|runs=5
+BENCH|scan1k|readMetadata x1000 (runs on main actor inside first scan)|median_ms=163.107|min_ms=161.746|max_ms=163.574|runs=5
+BENCH|scan1k|info|run0 scanProgress=Found 1000 photos (1000 new) allPhotos=1000 tags=2 tagged=500 rated=500
+BENCH|scan1k|info|run1 scanProgress=Found 1000 photos (1000 new) allPhotos=1000 tags=2 tagged=500 rated=500
+BENCH|scan1k|info|run2 scanProgress=Found 1000 photos (1000 new) allPhotos=1000 tags=2 tagged=500 rated=500
+BENCH|scan1k|FIRST rescanCurrentLibrary() fresh store (until !isScanning)|median_ms=302.165|min_ms=301.790|max_ms=307.272|runs=3
+BENCH|scan1k|7z first scan of 1k new photos: main-actor time|median_ms=117.920|min_ms=117.381|max_ms=117.950|runs=3
+BENCH|scan1k|SECOND rescanCurrentLibrary() all-existing (until !isScanning)|median_ms=33.393|min_ms=32.849|max_ms=34.926|runs=5
+BENCH|scan1k|SECOND main-actor time (scan task)|median_ms=1.399|min_ms=1.340|max_ms=1.465|runs=5
+BENCH|scan1k|findOrCreateTag x1000 (existing tags)|median_ms=248.537|min_ms=246.840|max_ms=251.414|runs=5
+BENCH|scan1k|dictionary tag lookup x1000 (alternative)|median_ms=0.178|min_ms=0.178|max_ms=0.180|runs=5
+BENCH|scan1k|context.save() nothing dirty|median_ms=0.001|min_ms=0.001|max_ms=0.001|runs=5
+BENCH|scan1k|same-value reassign 4 fields on 1000 rows + save|median_ms=109.835|min_ms=109.697|max_ms=110.726|runs=5
+BENCH|scan1k|info|ctx.hasChanges after same-value assignment=true
+BENCH|detail|setup|generate 16 × 6000x4000 JPEG (harness)|ms=381.0|fileMB=12.8
+BENCH|detail|old loadFullResolution|dwell=250ms|median_ms=101.5|p90_ms=103.9|max_ms=106.5|MB_per_image=91.6|n=16
+BENCH|detail|new loadFit+prefetch|16in full window 3456x2060|dwell=250ms|median_ms=0.1|p90_ms=0.1|max_ms=100.4|MB_per_image=91.6|subsample=1|cacheMB=457.8|decodes=16|n=16
+BENCH|detail|new loadFit+prefetch|14in full window 3024x1780|dwell=250ms|median_ms=0.1|p90_ms=0.1|max_ms=53.1|MB_per_image=22.9|subsample=2|cacheMB=366.2|decodes=16|n=16
+BENCH|detail|new loadFit+prefetch|window 1400x900pt@2x|dwell=250ms|median_ms=0.1|p90_ms=0.2|max_ms=56.6|MB_per_image=22.9|subsample=2|cacheMB=366.2|decodes=16|n=16
+BENCH|detail|old loadFullResolution|dwell=60ms|median_ms=85.2|p90_ms=89.2|max_ms=93.2|MB_per_image=91.6|n=16
+BENCH|detail|new loadFit+prefetch|16in full window 3456x2060|dwell=60ms|median_ms=0.0|p90_ms=17.1|max_ms=83.9|MB_per_image=91.6|subsample=1|cacheMB=457.8|decodes=16|n=16
+BENCH|detail|new loadFit+prefetch|14in full window 3024x1780|dwell=60ms|median_ms=0.0|p90_ms=0.1|max_ms=55.0|MB_per_image=22.9|subsample=2|cacheMB=366.2|decodes=16|n=16
+BENCH|detail|new loadFit+prefetch|window 1400x900pt@2x|dwell=60ms|median_ms=0.0|p90_ms=0.1|max_ms=57.6|MB_per_image=22.9|subsample=2|cacheMB=366.2|decodes=16|n=16
+BENCH|editvm|24MP JPEG|tick idle|median_ms=37.8|min_ms=35.2|max_ms=39.4|runs=8
+BENCH|editvm|24MP JPEG|tick during full pass|median_ms=35.0|min_ms=33.8|max_ms=35.6|runs=8
+BENCH|editvm|24MP JPEG|main-thread first draw of fullResEditImage|median_ms=52.4|min_ms=48.9|max_ms=57.3|runs=8
+BENCH|edit|main-thread first draw of full-res result (24MP JPEG -> 1600x1067)|median_ms=34.130|min_ms=34.021|max_ms=34.273|runs=10
+BENCH|edit|full-res render call, awaited (24MP JPEG)|median_ms=39.768|min_ms=38.115|max_ms=47.411|runs=10
+BENCH|edit|preview requested 10 ms into a full-res render (24MP JPEG)|median_ms=5.244|min_ms=4.510|max_ms=6.340|runs=10
+BENCH|edit|full-res render duration, measured concurrently (24MP JPEG)|median_ms=40.831|min_ms=39.913|max_ms=41.294|runs=10
+BENCH|editmem|50 previews of a 24MP JPEG (fresh service)|start_footprint_mb=1012.4|after_footprint_mb=1094.4|cleared_footprint_mb=1087.9|start_resident_mb=1085.2|after_resident_mb=1098.4|cleared_resident_mb=1091.8
+BENCH|edit|preview 24MP JPEG, 50 renders on a fresh service|median_ms=3.574|min_ms=3.412|max_ms=9.215|runs=50
+BENCH|edit|preview 24MP JPEG (fit 1600x1100)|median_ms=5.437|min_ms=4.841|max_ms=8.027|runs=30
+BENCH|sidecar|readMetadata x200 fake RAW, no sidecar|median_ms=13.519|min_ms=13.454|max_ms=15.466|runs=7
+BENCH|sidecar|info|no sidecar|rated=0
+BENCH|sidecar|readMetadata x200 fake RAW, old Phocasa sidecar|median_ms=47.292|min_ms=46.748|max_ms=49.782|runs=7
+BENCH|sidecar|info|old Phocasa sidecar|rated=200
+BENCH|sidecar|readMetadata x200 fake RAW, Lightroom-style sidecar|median_ms=72.644|min_ms=72.500|max_ms=74.174|runs=7
+BENCH|sidecar|info|Lightroom-style sidecar|rated=200
+BENCH|thumbDisk|200 x 6000x4000 JPEG fast scroll @380 last20: no disk cache|median_ms=271.92|min_ms=231.86|max_ms=290.56|runs=5
+BENCH|thumbDisk|200 x 6000x4000 JPEG fast scroll @380 all done: no disk cache|median_ms=435.99|min_ms=417.00|max_ms=447.78|runs=5
+BENCH|thumbDisk|200 x 6000x4000 JPEG fast scroll @380 last20: disk cache empty (cold)|median_ms=269.26|min_ms=240.60|max_ms=300.05|runs=5
+BENCH|thumbDisk|200 x 6000x4000 JPEG fast scroll @380 all done: disk cache empty (cold)|median_ms=429.51|min_ms=401.64|max_ms=435.57|runs=5
+BENCH|thumbDisk|200 x 6000x4000 JPEG fast scroll @380 last20: disk warm, memory empty (relaunch)|median_ms=0.04|min_ms=0.01|max_ms=1.86|runs=5
+BENCH|thumbDisk|200 x 6000x4000 JPEG fast scroll @380 all done: disk warm, memory empty (relaunch)|median_ms=0.26|min_ms=0.06|max_ms=1.95|runs=5
+BENCH|thumbDisk|10,000 cached files, relaunch: first trimIfNeeded()|median_ms=0.06|min_ms=0.06|max_ms=0.11|runs=3
+BENCH|thumbDisk|10,000 cached files, relaunch: 100 stores including the first automatic trim|median_ms=44.16|min_ms=43.69|max_ms=45.24|runs=3
+BENCH|thumbDisk|100 x disk read: exact 384 file (decoded KB=384)|median_ms=0.30|min_ms=0.27|max_ms=0.36|runs=100
+BENCH|thumbDisk|100 x disk read: 512 file as is (decoded KB=682)|median_ms=0.45|min_ms=0.42|max_ms=0.52|runs=100
+BENCH|thumbDisk|100 x disk read: 512 file decoded down to 384 (decoded KB=384)|median_ms=1.60|min_ms=1.52|max_ms=1.73|runs=100
+BENCH|thumbDisk|100 x disk read: 512 file decoded down to 256 (decoded KB=172)|median_ms=0.48|min_ms=0.45|max_ms=0.56|runs=100
+BENCH|thumbDisk|100 x 6000x4000 JPEG rated, then relaunch @380: load|median_ms=0.32|min_ms=0.30|max_ms=0.57|runs=300
+BENCH|thumbDisk|100 x 6000x4000 JPEG rated, then relaunch @380: decodes from the original|per_run=[0, 0, 0]|keys_changed=[100, 100, 100]
+BENCH|thumbDisk|100 x 6000x4000 JPEG rated without the re-key hook (main's path), then relaunch @380: load|median_ms=101.42|min_ms=100.74|max_ms=105.78|runs=300
+BENCH|thumbDisk|100 x 6000x4000 JPEG rated without the re-key hook (main's path), then relaunch @380: decodes from the original|per_run=[100, 100, 100]|keys_changed=[100, 100, 100]
+BENCH|thumbDisk|100 x 6000x4000 JPEG @512, one at a time: cold decode from the original|median_ms=102.29|min_ms=101.90|max_ms=107.29|runs=100
+BENCH|thumbDisk|100 x 6000x4000 JPEG @512, one at a time: warm disk cache, empty memory|median_ms=0.62|min_ms=0.56|max_ms=0.84|runs=100
+BENCH|thumbDisk|100 x 6000x4000 JPEG @512: speedup|x=164.4
+BENCH|thumbDisk|MetadataWriter 200 x 1024x1024 JPEG rating writes, per write|median_ms=2.60|min_ms=1.89|max_ms=2.69|runs=6
+BENCH|thumbDisk|MetadataWriter 200 x 1024x1024 JPEG rating writes, per write, without the re-key hook (main's path)|median_ms=2.60|min_ms=2.53|max_ms=2.62|runs=6
+BENCH|thumbDisk|100 x 6000x4000 JPEG cached @512, relaunch, load @512|median_ms=0.49|min_ms=0.47|max_ms=0.72|runs=300
+BENCH|thumbDisk|100 x 6000x4000 JPEG cached @512, relaunch, load @512: decodes from the original|per_run=[0, 0, 0]|long_edge_px=512
+BENCH|thumbDisk|100 x 6000x4000 JPEG cached @512, relaunch, load @380|median_ms=1.70|min_ms=1.59|max_ms=2.15|runs=300
+BENCH|thumbDisk|100 x 6000x4000 JPEG cached @512, relaunch, load @380: decodes from the original|per_run=[0, 0, 0]|long_edge_px=384
+BENCH|thumbDisk|100 x 6000x4000 JPEG cached @512, relaunch, load @256|median_ms=0.56|min_ms=0.52|max_ms=0.76|runs=300
+BENCH|thumbDisk|100 x 6000x4000 JPEG cached @512, relaunch, load @256: decodes from the original|per_run=[0, 0, 0]|long_edge_px=256
+BENCH|thumbScheduler|200 x 80ms CPU, 2.5ms apart, cancel >40 behind|ThumbnailScheduler(maxConcurrent: 10) last20_ms=158.7|all_ms=265.4|runs=3
+BENCH|thumbScheduler|200 x 80ms CPU, 2.5ms apart, cancel >40 behind|unbounded FIFO GCD (old) last20_ms=978.1|all_ms=978.2|runs=3
