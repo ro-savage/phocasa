@@ -124,17 +124,18 @@ struct PhotoDetailView: View {
     @Bindable var viewModel: PhotoLibraryViewModel
     let photo: PhotoAsset
 
-    @State private var displayedImage: NSImage?
-    @State private var renderedEditImage: NSImage?
-    @State private var originalImage: NSImage?
+    // Images carry their EXIF orientation, applied at display time (spec §D1).
+    @State private var displayedImage: DisplayImage?
+    @State private var renderedEditImage: DisplayImage?
+    @State private var originalImage: DisplayImage?
     @State private var loadedPath: String?
     @State private var showTagEditor = false
     @State private var minimapThumbnail: NSImage?
     @State private var zoomState = ZoomPanState()
     @State private var imageDisplayRect: CGRect = .zero
 
-    // The active image to show
-    private var currentImage: NSImage? {
+    // The active image to show. Edit-pipeline images are NSImages that are already upright.
+    private var currentImage: DisplayImage? {
         if viewModel.isCropping {
             return displayedImage ?? renderedEditImage
         }
@@ -142,14 +143,20 @@ struct PhotoDetailView: View {
             return originalImage ?? displayedImage
         }
         if viewModel.isEditing {
-            return viewModel.fullResEditImage ?? viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage
+            return (viewModel.fullResEditImage ?? viewModel.editedPreviewImage).flatMap(DisplayImage.init(nsImage:))
+                ?? renderedEditImage ?? displayedImage
         }
         return renderedEditImage ?? displayedImage
     }
 
     // For side-by-side: the original image
-    private var comparisonOriginal: NSImage? {
+    private var comparisonOriginal: DisplayImage? {
         originalImage ?? displayedImage
+    }
+
+    // For side-by-side and the JPG comparison: the edited image
+    private var comparisonEdited: DisplayImage? {
+        viewModel.editedPreviewImage.flatMap(DisplayImage.init(nsImage:)) ?? renderedEditImage ?? displayedImage
     }
 
     var body: some View {
@@ -226,8 +233,11 @@ struct PhotoDetailView: View {
         let path = photo.displayPath
         guard path != loadedPath, !path.isEmpty else { return }
 
-        // Load original full-resolution
-        if let newImage = await ImageLoader.shared.loadFullResolution(for: path) {
+        // Load original full-resolution. The hardware decode doesn't rotate; the orientation comes with it.
+        let newImage = await FullImageLoader.shared.load(path: path, subsample: 1)
+        // A newer navigation cancels this task; don't let a slow load overwrite the newer photo.
+        guard !Task.isCancelled else { return }
+        if let newImage {
             withAnimation(.easeInOut(duration: 0.15)) {
                 displayedImage = newImage
                 originalImage = newImage
@@ -248,9 +258,13 @@ struct PhotoDetailView: View {
                 return await ImageEditingService.shared.processRAW(url: URL(fileURLWithPath: rawPath), parameters: params)
             }
         }
-        renderedEditImage = await Self.renderSavedEdit(jpg: jpgRender, raw: rawRender)
+        let savedEdit = await Self.renderSavedEdit(jpg: jpgRender, raw: rawRender)
+        guard !Task.isCancelled else { return }
+        renderedEditImage = savedEdit.flatMap(DisplayImage.init(nsImage:))
 
-        minimapThumbnail = await ImageLoader.shared.loadThumbnail(for: path, maxSize: 400)
+        let thumbnail = await ImageLoader.shared.loadThumbnail(for: path, maxSize: 400)
+        guard !Task.isCancelled else { return }
+        minimapThumbnail = thumbnail
     }
 
     /// The saved-edit render to show. The JPG render takes precedence, so the RAW render, which takes seconds
@@ -265,15 +279,13 @@ struct PhotoDetailView: View {
     // MARK: - Single Image View
 
     @ViewBuilder
-    private func singleImageView(image: NSImage) -> some View {
+    private func singleImageView(image: DisplayImage) -> some View {
         GeometryReader { geometry in
-            let fitSize = Self.fittedSize(imageSize: image.size, in: geometry.size)
+            let fitSize = Self.fittedSize(imageSize: image.orientedSize, in: geometry.size)
 
             ZStack {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(zoomState.magnification > 4 ? .none : .high)
-                    .aspectRatio(contentMode: .fit)
+                OrientedImage(image, interpolation: zoomState.magnification > 4 ? .none : .high)
+                    .aspectRatio(image.orientedSize, contentMode: .fit)
                     .frame(
                         width: fitSize.width * zoomState.magnification,
                         height: fitSize.height * zoomState.magnification
@@ -288,7 +300,7 @@ struct PhotoDetailView: View {
                     .gesture(panGesture())
                     .simultaneousGesture(pinchGesture())
                     .onTapGesture(count: 2) {
-                        handleDoubleClick(imageSize: image.size, fitSize: fitSize)
+                        handleDoubleClick(imageSize: image.orientedSize, fitSize: fitSize)
                     }
             }
             .onAppear {
@@ -299,10 +311,16 @@ struct PhotoDetailView: View {
             }
             .onChange(of: geometry.size) { _, newSize in
                 zoomState.viewportSize = newSize
-                let newFit = Self.fittedSize(imageSize: image.size, in: newSize)
+                let newFit = Self.fittedSize(imageSize: image.orientedSize, in: newSize)
                 zoomState.fitSize = newFit
                 zoomState.clampOffset()
                 updateImageDisplayRect(fitSize: newFit, geometrySize: newSize)
+            }
+            .onChange(of: fitSize) { _, newFit in
+                // A new image with another aspect ratio (a portrait photo after a landscape one, a crop).
+                zoomState.fitSize = newFit
+                zoomState.clampOffset()
+                updateImageDisplayRect(fitSize: newFit, geometrySize: geometry.size)
             }
             .onChange(of: geometry.frame(in: .global)) { _, newFrame in
                 zoomState.viewportFrame = newFrame
@@ -325,20 +343,18 @@ struct PhotoDetailView: View {
                         Text("ORIGINAL")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Image(nsImage: orig)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
+                        OrientedImage(orig)
+                            .aspectRatio(orig.orientedSize, contentMode: .fit)
                     }
                     .frame(width: geometry.size.width / 2)
                 }
-                if let edited = viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage {
+                if let edited = comparisonEdited {
                     VStack(spacing: 4) {
                         Text("EDITED")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Image(nsImage: edited)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
+                        OrientedImage(edited)
+                            .aspectRatio(edited.orientedSize, contentMode: .fit)
                     }
                     .frame(width: geometry.size.width / 2)
                 }
@@ -351,25 +367,24 @@ struct PhotoDetailView: View {
     private var jpgComparisonView: some View {
         GeometryReader { geometry in
             HStack(spacing: 2) {
-                if let jpgImage = viewModel.jpgComparisonImage {
+                // Still unrotated for portrait JPGs: the view model loads it with loadFullResolution (task 22).
+                if let jpgImage = viewModel.jpgComparisonImage.flatMap(DisplayImage.init(nsImage:)) {
                     VStack(spacing: 4) {
                         Text("JPG")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Image(nsImage: jpgImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
+                        OrientedImage(jpgImage)
+                            .aspectRatio(jpgImage.orientedSize, contentMode: .fit)
                     }
                     .frame(width: geometry.size.width / 2)
                 }
-                if let edited = viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage {
+                if let edited = comparisonEdited {
                     VStack(spacing: 4) {
                         Text("RAW EDIT")
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Image(nsImage: edited)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
+                        OrientedImage(edited)
+                            .aspectRatio(edited.orientedSize, contentMode: .fit)
                     }
                     .frame(width: geometry.size.width / 2)
                 }
