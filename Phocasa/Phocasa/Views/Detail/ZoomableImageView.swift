@@ -131,16 +131,26 @@ final class ZoomPanState {
 struct ZoomableImageView: View, @preconcurrency Equatable {
     let image: DisplayImage
     let zoom: ZoomPanState
+    /// Oriented pixel size of the photo itself, when `image` is a subsampled decode or a RAW preview of it.
+    /// The double-click zoom target is computed from it, as it was from the full-resolution image before.
+    var sourcePixelSize: CGSize?
     /// The unzoomed image rect in this view's coordinates (the crop overlay's `imageDisplayRect`).
     var onDisplayRectChange: (CGRect) -> Void = { _ in }
+    /// Called when the image is shown with more screen pixels than it has (zoomed in, or the viewport grew),
+    /// so the container can swap in a higher-resolution decode.
+    var onNeedsMorePixels: () -> Void = {}
+
+    @Environment(\.displayScale) private var displayScale
 
     static func == (lhs: ZoomableImageView, rhs: ZoomableImageView) -> Bool {
-        lhs.image == rhs.image && lhs.zoom === rhs.zoom
+        lhs.image == rhs.image && lhs.zoom === rhs.zoom && lhs.sourcePixelSize == rhs.sourcePixelSize
     }
 
     var body: some View {
         GeometryReader { geometry in
             let fitSize = Self.fittedSize(imageSize: image.orientedSize, in: geometry.size)
+            let needsMorePixels = Self.needsMorePixels(imagePixelSize: image.orientedSize, fitSize: fitSize,
+                                                       magnification: zoom.magnification, displayScale: displayScale)
 
             ZStack {
                 OrientedImage(image, interpolation: zoom.magnification > 4 ? .none : .high)
@@ -159,7 +169,7 @@ struct ZoomableImageView: View, @preconcurrency Equatable {
                     .gesture(panGesture())
                     .simultaneousGesture(pinchGesture())
                     .onTapGesture(count: 2) {
-                        handleDoubleClick(imageSize: image.orientedSize, fitSize: fitSize)
+                        handleDoubleClick(imageSize: sourcePixelSize ?? image.orientedSize, fitSize: fitSize)
                     }
             }
             .onAppear {
@@ -185,6 +195,10 @@ struct ZoomableImageView: View, @preconcurrency Equatable {
             .onChange(of: geometry.frame(in: .global)) { _, newFrame in
                 zoom.viewportFrame = newFrame
             }
+            // Keyed on the image too: a new image that is also short of pixels must ask again.
+            .onChange(of: needsMorePixels ? ObjectIdentifier(image.cgImage) : nil, initial: true) { _, short in
+                if short != nil { onNeedsMorePixels() }
+            }
             .onDisappear {
                 zoom.viewportFrame = .zero
                 zoom.stopMonitoring()
@@ -196,13 +210,20 @@ struct ZoomableImageView: View, @preconcurrency Equatable {
 
     // MARK: - Geometry
 
-    static func fittedSize(imageSize: CGSize, in container: CGSize) -> CGSize {
+    nonisolated static func fittedSize(imageSize: CGSize, in container: CGSize) -> CGSize {
         guard imageSize.width > 0, imageSize.height > 0 else { return container }
         let scale = min(container.width / imageSize.width, container.height / imageSize.height)
         return CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
     }
 
-    static func displayRect(fitSize: CGSize, in container: CGSize) -> CGRect {
+    /// Whether the image is drawn with more device pixels than it has.
+    nonisolated static func needsMorePixels(imagePixelSize: CGSize, fitSize: CGSize, magnification: CGFloat,
+                                            displayScale: CGFloat) -> Bool {
+        guard imagePixelSize.width > 0, fitSize.width > 0 else { return false }
+        return fitSize.width * magnification * displayScale > imagePixelSize.width + 0.5
+    }
+
+    nonisolated static func displayRect(fitSize: CGSize, in container: CGSize) -> CGRect {
         CGRect(
             x: (container.width - fitSize.width) / 2,
             y: (container.height - fitSize.height) / 2,

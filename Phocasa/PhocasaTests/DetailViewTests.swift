@@ -1,6 +1,8 @@
 import XCTest
 import SwiftUI
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 @testable import Phocasa
 
 /// Detail-view logic that can be checked without UI automation.
@@ -80,6 +82,24 @@ final class DetailViewTests: XCTestCase {
         XCTAssertTrue(pixels(80, 90).isClose(to: RGBA(r: 0, g: 0, b: 255, a: 255)), "bottom-right: \(pixels(80, 90))")
     }
 
+    /// Full resolution is requested once the image is drawn with more device pixels than it has.
+    func testNeedsMorePixels() {
+        // A subsample-2 decode (3000 px) fitted at 1500 pt on a 2× display is exactly 1:1.
+        XCTAssertFalse(ZoomableImageView.needsMorePixels(imagePixelSize: CGSize(width: 3000, height: 2000),
+                                                         fitSize: CGSize(width: 1500, height: 1000),
+                                                         magnification: 1, displayScale: 2))
+        // Zooming in past that needs the full decode.
+        XCTAssertTrue(ZoomableImageView.needsMorePixels(imagePixelSize: CGSize(width: 3000, height: 2000),
+                                                        fitSize: CGSize(width: 1500, height: 1000),
+                                                        magnification: 1.1, displayScale: 2))
+        // A 1616 px RAW preview in a 1728 pt wide fit on a 2× display is short of pixels without zooming.
+        XCTAssertTrue(ZoomableImageView.needsMorePixels(imagePixelSize: CGSize(width: 1616, height: 1080),
+                                                        fitSize: CGSize(width: 1728, height: 1155),
+                                                        magnification: 1, displayScale: 2))
+        XCTAssertFalse(ZoomableImageView.needsMorePixels(imagePixelSize: .zero, fitSize: CGSize(width: 10, height: 10),
+                                                         magnification: 5, displayScale: 2))
+    }
+
     /// The crop overlay's `imageDisplayRect` comes from the oriented size.
     func testCropDisplayRectUsesOrientedSize() throws {
         let display = DisplayImage(cgImage: try makeQuadrantBitmap(width: 60, height: 40), orientation: .left)
@@ -87,6 +107,60 @@ final class DetailViewTests: XCTestCase {
         let fit = ZoomableImageView.fittedSize(imageSize: display.orientedSize, in: container)
         XCTAssertEqual(fit, CGSize(width: 80, height: 120))
         XCTAssertEqual(ZoomableImageView.displayRect(fitSize: fit, in: container), CGRect(x: 20, y: 0, width: 80, height: 120))
+    }
+
+    // MARK: - Loading, prefetch and full resolution, in a hosted window
+
+    /// Opens the detail view on photo 0 of 3 in a small window and checks, through the shared loader's cache:
+    /// the neighbours are prefetched at the fit subsample; navigating to photo 1 needs no decode; growing the
+    /// window past the fit image's pixels loads full resolution.
+    @MainActor
+    func testDetailViewPrefetchesNeighboursAndUpgradesToFullResolution() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("PhocasaDetailViewTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let loader = FullImageLoader.shared
+        loader.clear()
+        defer { loader.clear() }
+
+        let paths = try (0..<3).map { i -> String in
+            let url = dir.appendingPathComponent("photo\(i).jpg")
+            try writeJPEG(makeQuadrantBitmap(width: 2400, height: 1600), to: url)
+            return url.path
+        }
+        let viewModel = PhotoLibraryViewModel()
+        let photos = paths.map { PhotoAsset(fileName: ($0 as NSString).lastPathComponent, jpgPath: $0, folderPath: dir.path) }
+        viewModel.photos = photos
+        viewModel.openDetail(for: photos[0])
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = NSHostingView(rootView: DetailHost(viewModel: viewModel))
+        let scale = window.backingScaleFactor
+        let small = CGSize(width: 400 * scale, height: 300 * scale)
+        let smallFactor = FullImageLoader.subsampleFactor(imagePixelSize: CGSize(width: 2400, height: 1600),
+                                                          viewportPixelSize: small)
+        XCTAssertGreaterThan(smallFactor, 1, "the small window should need fewer pixels than the photo has")
+
+        // Photo 0 at the fit subsample, then photos 1 and 2 (forward) prefetched at theirs.
+        for path in paths {
+            let cached = spin(until: { loader.cachedImage(path: path, subsample: smallFactor) })
+            XCTAssertNotNil(cached, "\((path as NSString).lastPathComponent) at subsample \(smallFactor)")
+        }
+        XCTAssertNil(loader.cachedImage(path: paths[0], subsample: 1), "no full-resolution decode at fit")
+        let decodesBeforeNavigation = loader.decodeCount
+
+        viewModel.navigateDetail(direction: 1)
+        _ = spin(seconds: 0.5, until: { nil as Int? })
+        XCTAssertEqual(loader.decodeCount, decodesBeforeNavigation, "photo 1 came from the prefetch cache")
+
+        // A bigger window draws photo 1 with more pixels than the fit decode has: full resolution loads.
+        window.setContentSize(NSSize(width: 1400, height: 1000))
+        let full = spin(until: { loader.cachedImage(path: paths[1], subsample: 1) })
+        XCTAssertNotNil(full, "growing the viewport loads full resolution")
+        XCTAssertEqual(full?.cgImage.width, 2400)
     }
 
     // MARK: - Saved edit renders (spec §D4)
@@ -184,6 +258,36 @@ final class DetailViewTests: XCTestCase {
             window.close()
         }
     }
+}
+
+/// Shows the detail view for the view model's current detail photo, as `ContentView` does.
+private struct DetailHost: View {
+    let viewModel: PhotoLibraryViewModel
+    var body: some View {
+        if let photo = viewModel.selectedDetailPhoto {
+            PhotoDetailView(viewModel: viewModel, photo: photo)
+        }
+    }
+}
+
+extension DetailViewTests {
+    /// Runs the main run loop (so SwiftUI lays out and main-actor tasks run) until `body` returns non-nil or
+    /// time runs out.
+    @MainActor
+    fileprivate func spin<T>(seconds: TimeInterval = 5, until body: () -> T?) -> T? {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let value = body() { return value }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        return body()
+    }
+}
+
+private func writeJPEG(_ image: CGImage, to url: URL) throws {
+    let dest = try XCTUnwrap(CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+    CGImageDestinationAddImage(dest, image, nil)
+    XCTAssertTrue(CGImageDestinationFinalize(dest))
 }
 
 // MARK: - Bitmap helpers
