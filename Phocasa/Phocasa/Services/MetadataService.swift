@@ -341,6 +341,13 @@ final class MetadataService: Sendable {
 
     private enum ApplyResult { case changed, unchanged, failed }
 
+    /// Sorted keys, so the same edits always serialise to the same bytes (JSONEncoder's default order varies).
+    private static var editParametersEncoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return encoder
+    }
+
     private static func apply(_ update: SidecarUpdate, to meta: CGMutableImageMetadata) -> ApplyResult {
         var changed = false
 
@@ -374,13 +381,15 @@ final class MetadataService: Sendable {
         if case .set(let params) = update.editParameters {
             let path = "phocasa:EditParameters" as CFString
             if let params, !params.isDefault {
-                guard let json = try? JSONEncoder().encode(params) else { return .failed }
-                let value = json.base64EncodedString()
-                if CGImageMetadataCopyStringValueWithPath(meta, nil, path) as String? != value {
+                // Compared as values: the same edits can be stored as differently ordered JSON.
+                let stored = (CGImageMetadataCopyStringValueWithPath(meta, nil, path) as String?).flatMap(decodeEditParameters)
+                if stored != params {
+                    guard let json = try? editParametersEncoder.encode(params) else { return .failed }
                     // Fails if the sidecar already uses another prefix for this namespace; then nothing is written.
                     guard CGImageMetadataRegisterNamespaceForPrefix(meta, phocasaNamespace as CFString,
                                                                     "phocasa" as CFString, nil),
-                          CGImageMetadataSetValueWithPath(meta, nil, path, value as CFString) else { return .failed }
+                          CGImageMetadataSetValueWithPath(meta, nil, path, json.base64EncodedString() as CFString)
+                    else { return .failed }
                     changed = true
                 }
             } else if CGImageMetadataCopyTagWithPath(meta, nil, path) != nil {

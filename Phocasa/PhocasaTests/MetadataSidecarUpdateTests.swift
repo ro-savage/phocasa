@@ -222,9 +222,31 @@ final class MetadataSidecarUpdateTests: XCTestCase {
 
         let fresh = try makeRAW("NEW.ARW", sidecar: nil)
         XCTAssertEqual(service.updateSidecar(of: fresh, update), .written)
-        XCTAssertEqual(service.updateSidecar(of: fresh, update), .unchanged, "the same values again change nothing")
+        // JSONEncoder's key order varies between calls, so this repeats enough to catch a byte comparison.
+        for attempt in 0..<30 {
+            XCTAssertEqual(service.updateSidecar(of: fresh, update), .unchanged, "the same values again change nothing (\(attempt))")
+        }
         XCTAssertEqual(service.updateSidecar(of: try makeRAW("NONE.ARW", sidecar: nil),
                                              .init(editParameters: .set(nil))), .unchanged)
+    }
+
+    func testSameEditsEncodedDifferentlyCountAsUnchanged() throws {
+        // JSONEncoder doesn't promise a key order, so the same edits can be stored as different JSON (and a
+        // repeat write once came back `.written`). Equal values must not rewrite the file.
+        let params = EditParameters(exposure: 1, contrast: 12, cropRect: NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let base64 = try encoder.encode(params).base64EncodedString()
+        let raw = try makeRAW("ORDER.ARW", sidecar: """
+        <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+        <rdf:Description rdf:about="" xmlns:phocasa="http://phocasa.app/ns/1.0/">
+        <phocasa:EditParameters>\(base64)</phocasa:EditParameters>
+        </rdf:Description></rdf:RDF></x:xmpmeta>
+        """)
+        let before = try Data(contentsOf: raw.xmpSidecarURL)
+
+        XCTAssertEqual(service.updateSidecar(of: raw, .init(editParameters: .set(params))), .unchanged)
+        XCTAssertEqual(try Data(contentsOf: raw.xmpSidecarURL), before)
     }
 
     func testSidecarUsingAnotherPrefixForPhocasasNamespaceIsLeftAlone() throws {
