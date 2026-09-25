@@ -2,7 +2,9 @@
 // Uses only APIs that exist both on main (after task 00) and on the wave-1 branches.
 //   COORD_BENCH_DATA = an imagebench data dir (master.jpg + copy_000…199.jpg)
 //   COORD_REAL_DIR   = the user's read-only folder of real JPG+ARW pairs (read only; nothing here writes)
-// Pass them as TEST_RUNNER_COORD_BENCH_DATA / TEST_RUNNER_COORD_REAL_DIR.
+//   PHOCASA_THUMBNAIL_CACHE_DIR = (task 21 and later) a temp folder for the test host's thumbnail disk cache.
+//     Code without a disk cache ignores it. Cold runs empty it first; "relaunch" runs keep it and empty memory only.
+// Pass them as TEST_RUNNER_COORD_BENCH_DATA / TEST_RUNNER_COORD_REAL_DIR / TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR.
 
 import XCTest
 import SwiftData
@@ -46,10 +48,55 @@ final class CoordinatorBenchmarks: XCTestCase {
     /// Fast scroll: cells request a 380 px thumbnail 2.5 ms apart; a cell more than 40 behind the newest is
     /// cancelled (scrolled away), as SwiftUI cancels `.task` for cells that leave the lazy grid.
     /// last20 = time from the final request until the last 20 requested cells have their image.
-    private func fastScroll(_ label: String, paths: [String], runs: Int = 5) async throws {
+    // MARK: Thumbnail disk cache (task 21)
+
+    private var thumbDiskDir: String? { env["PHOCASA_THUMBNAIL_CACHE_DIR"] }
+
+    private nonisolated static func fileCount(_ dir: String) -> Int {
+        guard let e = FileManager.default.enumerator(atPath: dir) else { return 0 }
+        var n = 0
+        while e.nextObject() != nil { n += 1 }
+        return n
+    }
+
+    /// Waits until the disk cache folder stops changing (its writes run on a background queue): no change in the
+    /// file count for 300 ms, at most 15 s. Returns at once when there is no disk cache folder.
+    private func settleThumbDisk() async throws {
+        guard let dir = thumbDiskDir else { return }
+        var last = -1
+        var stableSince = clock.now
+        let deadline = clock.now + .seconds(15)
+        while clock.now < deadline {
+            let n = Self.fileCount(dir)
+            if n != last { last = n; stableSince = clock.now } else if clock.now - stableSince > .milliseconds(300) { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    /// Empties memory and, if there is one, the disk cache (after its pending writes land): a first launch.
+    private func clearThumbnailsCold() async throws {
+        try await settleThumbDisk()
+        ImageLoader.shared.clearCache()
+        if let dir = thumbDiskDir {
+            let fm = FileManager.default
+            for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] { try? fm.removeItem(atPath: dir + "/" + name) }
+        }
+    }
+
+    /// Loads every path once so the disk cache (if any) holds them, then waits for its writes.
+    private func warmThumbDisk(_ paths: [String]) async throws {
+        try await clearThumbnailsCold()
+        for p in paths { _ = await ImageLoader.shared.loadThumbnail(for: p, maxSize: 380) }
+        try await settleThumbDisk()
+        print("COORD|info|thumb disk files=\(thumbDiskDir.map { Self.fileCount($0) } ?? -1)")
+    }
+
+    private func fastScroll(_ label: String, paths: [String], runs: Int = 5, relaunch: Bool = false) async throws {
         var last20: [Double] = [], allDone: [Double] = []
+        if relaunch { try await warmThumbDisk(paths) }
         for _ in 0..<runs {
-            ImageLoader.shared.clearCache()
+            // Relaunch: the memory cache is empty, the disk cache (if any) is warm. Otherwise: a first launch.
+            if relaunch { ImageLoader.shared.clearCache() } else { try await clearThumbnailsCold() }
             var tasks: [Task<Void, Never>] = []
             for (i, path) in paths.enumerated() {
                 tasks.append(Task { _ = await ImageLoader.shared.loadThumbnail(for: path, maxSize: 380) })
@@ -67,10 +114,11 @@ final class CoordinatorBenchmarks: XCTestCase {
     }
 
     /// Cold thumbnail of one file at a time (no concurrency): the per-image decode cost.
-    private func singleThumb(_ label: String, paths: [String]) async {
+    private func singleThumb(_ label: String, paths: [String], relaunch: Bool = false) async throws {
         var samples: [Double] = []
+        if relaunch { try await warmThumbDisk(Array(paths.prefix(20))) }
         for path in paths.prefix(20) {
-            ImageLoader.shared.clearCache()
+            if relaunch { ImageLoader.shared.clearCache() } else { try await clearThumbnailsCold() }
             let t = clock.now
             _ = await ImageLoader.shared.loadThumbnail(for: path, maxSize: 380)
             samples.append(ms(clock.now - t))
@@ -86,14 +134,28 @@ final class CoordinatorBenchmarks: XCTestCase {
 
     func testThumbRealJPG() async throws {
         let paths = try realFiles("jpg")
-        await singleThumb("thumb real-jpg", paths: paths)
+        try await singleThumb("thumb real-jpg", paths: paths)
         try await fastScroll("thumb real-jpg", paths: paths)
     }
 
     func testThumbRealARW() async throws {
         let paths = try realFiles("arw")
-        await singleThumb("thumb real-arw", paths: paths)
+        try await singleThumb("thumb real-arw", paths: paths)
         try await fastScroll("thumb real-arw", paths: paths)
+    }
+
+    /// After a relaunch: memory cache empty, disk cache (task 21) warm. Without a disk cache this equals a cold run.
+    func testThumbRelaunch() async throws {
+        let d = try synthDir()
+        let synth = (0..<200).map { d + "/copy_" + String(format: "%03d", $0) + ".jpg" }
+        try await singleThumb("thumb relaunch synth-jpg", paths: synth, relaunch: true)
+        try await fastScroll("thumb relaunch synth-jpg", paths: synth, relaunch: true)
+        for ext in ["jpg", "arw"] {
+            let paths = try realFiles(ext)
+            try await singleThumb("thumb relaunch real-\(ext)", paths: paths, relaunch: true)
+            try await fastScroll("thumb relaunch real-\(ext)", paths: paths, relaunch: true)
+        }
+        try await clearThumbnailsCold()
     }
 
     // MARK: Metadata (read-only)
