@@ -199,7 +199,6 @@ final class CaptureDateReadingTests: XCTestCase {
         let metadata = MetadataService.shared.readMetadata(from: file.path)
         XCTAssertEqual(try XCTUnwrap(metadata.captureDate).timeIntervalSince1970,
                        CaptureDateFixtures.utc(2021, 7, 4, 11, 45, 10).timeIntervalSince1970 + 0.25, accuracy: 1e-6)
-        XCTAssertTrue(metadata.captureDateChecked)
         XCTAssertEqual(CaptureDate.read(from: file.path), metadata.captureDate.map(CaptureDate.Read.date))
     }
 
@@ -208,16 +207,14 @@ final class CaptureDateReadingTests: XCTestCase {
         try CaptureDateFixtures.writeJPEG(at: file, exifDate: "2013:01:02 16:14:49")
         let metadata = MetadataService.shared.readMetadata(from: file.path)
         XCTAssertEqual(metadata.captureDate, CaptureDateFixtures.date(2013, 1, 2, 16, 14, 49))
-        XCTAssertTrue(metadata.captureDateChecked)
     }
 
-    func testImageWithoutACaptureDateIsCheckedWithNoDate() throws {
+    func testImageWithoutACaptureDateHasNone() throws {
         let file = url("none.jpg")
         try CaptureDateFixtures.writeJPEG(at: file, exifDate: nil)
         let metadata = MetadataService.shared.readMetadata(from: file.path)
         XCTAssertNil(metadata.captureDate)
-        XCTAssertTrue(metadata.captureDateChecked, "the file was read: it has no capture date")
-        XCTAssertEqual(CaptureDate.read(from: file.path), CaptureDate.Read.noDate)
+        XCTAssertEqual(CaptureDate.read(from: file.path), CaptureDate.Read.noDate, "read as an image, with no date")
     }
 
     func testMalformedExifDateIsNil() throws {
@@ -225,17 +222,15 @@ final class CaptureDateReadingTests: XCTestCase {
         try CaptureDateFixtures.writeJPEG(at: file, exifDate: "0000:00:00 00:00:00")
         let metadata = MetadataService.shared.readMetadata(from: file.path)
         XCTAssertNil(metadata.captureDate)
-        XCTAssertTrue(metadata.captureDateChecked)
         XCTAssertEqual(CaptureDate.read(from: file.path), CaptureDate.Read.noDate)
     }
 
-    func testMissingOrEmptyFilesAreNotChecked() throws {
+    func testMissingOrEmptyFilesAreUnreadable() throws {
         let empty = url("empty.jpg")
         FileManager.default.createFile(atPath: empty.path, contents: nil)
         for path in [empty.path, url("missing.jpg").path] {
             let metadata = MetadataService.shared.readMetadata(from: path)
             XCTAssertNil(metadata.captureDate, path)
-            XCTAssertFalse(metadata.captureDateChecked, "\(path): couldn't be read, so try again later")
             XCTAssertEqual(CaptureDate.read(from: path), CaptureDate.Read.unreadable, path)
         }
     }
@@ -265,7 +260,6 @@ final class CaptureDateReadingTests: XCTestCase {
         }
         let raw = MetadataService.shared.readMetadata(from: rawPath)
         let rawDate = try XCTUnwrap(raw.captureDate, "the RAW has a DateTimeOriginal")
-        XCTAssertTrue(raw.captureDateChecked)
         XCTAssertEqual(CaptureDate.read(from: rawPath), .date(rawDate))
         let jpgPath = URL(fileURLWithPath: rawPath).deletingPathExtension().appendingPathExtension("JPG").path
         if FileManager.default.fileExists(atPath: jpgPath) {

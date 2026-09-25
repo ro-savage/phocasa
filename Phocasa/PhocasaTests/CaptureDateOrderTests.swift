@@ -13,7 +13,6 @@ final class CaptureDateOrderTests: LibraryTestCase {
         let photo = PhotoAsset(fileName: name, jpgPath: "/fake/\(name).jpg", folderPath: "/fake",
                                creationDate: created.map(date), fileSize: 1000)
         photo.captureDate = captured.map(date)
-        photo.captureDateChecked = true
         context.insert(photo)
         try? context.save()
         return photo

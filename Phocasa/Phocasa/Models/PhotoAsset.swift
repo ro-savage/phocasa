@@ -20,13 +20,11 @@ final class PhotoAsset {
 
     @Relationship var tags: [Tag] = []
 
-    /// When the photo was taken (EXIF `DateTimeOriginal`, see `CaptureDate`). The grid is ordered by it, falling back
-    /// to `creationDate` (`LibrarySort`). Set from the scan's metadata read for new photos, and by the backfill after
-    /// launch for rows stored before capture dates were read (`CaptureDateBackfill`).
+    /// When the photo was taken (EXIF `DateTimeOriginal`, see `CaptureDate`), or nil if the file has none or hasn't
+    /// been read yet. The grid is ordered by it, falling back to `creationDate` (`LibrarySort`). Set from the scan's
+    /// metadata read for new photos, and by the backfill after launch (`CaptureDateBackfill`). The only capture-date
+    /// attribute: every attribute costs every fetch and save (a second one, a "checked" flag, measured +4%).
     var captureDate: Date? = nil
-    /// Whether the file's capture date has been read, so a nil `captureDate` means the file has none and the backfill
-    /// doesn't read it again on every launch. Stays false while the file can't be read (it is tried again).
-    var captureDateChecked: Bool = false
 
     var displayPath: String {
         jpgPath ?? rawPath ?? ""

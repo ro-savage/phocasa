@@ -277,5 +277,6 @@ enum CaptureDate {
 
 private extension UInt8 {
     static let hyphen = UInt8(ascii: "-"), colon = UInt8(ascii: ":"), space = UInt8(ascii: " ")
-    static let letterT = UInt8(ascii: "T"), letterZ = UInt8(ascii: "Z"), period = UInt8(ascii: "."), plus = UInt8(ascii: "+")
+    static let letterT = UInt8(ascii: "T"), letterZ = UInt8(ascii: "Z")
+    static let period = UInt8(ascii: "."), plus = UInt8(ascii: "+")
 }

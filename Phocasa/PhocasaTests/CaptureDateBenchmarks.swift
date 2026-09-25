@@ -76,7 +76,7 @@ final class CaptureDateBenchmarks: XCTestCase {
         return (paths, "generated \(raw ? "TIFF .dng" : "JPEG") x\(count)")
     }
 
-    /// `n` rows as an older version stored them: no capture date, not checked, creation dates descending.
+    /// `n` rows as an older version stored them: no capture date, creation dates descending.
     private func seed(n: Int, paths: [String], raw: Bool, into context: ModelContext, dated: (Int) -> Bool = { _ in false }) throws {
         let base = Date(timeIntervalSince1970: 1_700_000_000)
         for i in 0..<n {
@@ -84,10 +84,7 @@ final class CaptureDateBenchmarks: XCTestCase {
             let photo = PhotoAsset(fileName: String(format: "ROW_%05d", i), jpgPath: raw ? nil : path, rawPath: raw ? path : nil,
                                    folderPath: (path as NSString).deletingLastPathComponent,
                                    creationDate: base.addingTimeInterval(Double(-i) * 60), fileSize: 1000)
-            if dated(i) {
-                photo.captureDate = base.addingTimeInterval(Double((i * 7919) % n) * -30)
-                photo.captureDateChecked = true
-            }
+            if dated(i) { photo.captureDate = base.addingTimeInterval(Double((i * 7919) % n) * -30) }
             context.insert(photo)
         }
         try context.save()
@@ -136,6 +133,37 @@ final class CaptureDateBenchmarks: XCTestCase {
     func testBackfill10kRAWOnly() async throws {
         try skipUnlessBenchmarking()
         try await runBackfill(tag: "capture10k-raw", raw: true)
+    }
+
+    /// Every launch re-reads the files that have no capture date (nothing is written for them): 10k such rows, pointing
+    /// at 1,000 generated JPEGs without EXIF dates.
+    func testBackfill10kUndatedRereadsOnly() async throws {
+        try skipUnlessBenchmarking()
+        let tag = "capture10k-undated"
+        let dir = try makeTempDir("undated")
+        var paths: [String] = []
+        for i in 0..<1000 {
+            let url = dir.appendingPathComponent(String(format: "NODATE_%04d.jpg", i))
+            try CaptureDateFixtures.writeImage(at: url, exif: nil)
+            paths.append(url.path)
+        }
+        let storeURL = try makeTempDir("store").appendingPathComponent("bench.store")
+        try seed(n: 10_000, paths: paths, raw: false, into: try makeContainer(storeURL).mainContext)
+        let library = LibraryStore()
+        library.open(try makeContainer(storeURL).mainContext)
+        var walls: [Double] = [], finds: [Double] = [], reads: [Double] = [], chunks: [Double] = []
+        for _ in 0..<3 {
+            let result = await library.backfillCaptureDates()
+            XCTAssertEqual(result.undated, 10_000)
+            walls.append(ms(result.wallTime))
+            finds.append(ms(result.findTime))
+            reads.append(ms(result.readTime))
+            chunks.append(Double(result.chunkMainActorTimes.count))
+        }
+        report(tag, "backfill wall, nothing to write (every launch)", walls)
+        report(tag, "backfill find candidates (background)", finds)
+        report(tag, "backfill read files (background, utility)", reads)
+        print("BENCH|\(tag)|info|write chunks=\(chunks.map { Int($0) })")
     }
 
     /// The fetch's in-memory merge of dated and undated photos, at 10k, against a library with none dated (one run).

@@ -142,7 +142,7 @@ struct ScanPlan: Sendable {
                             fileSize: found.fileSize
                         )
                         asset.rating = found.metadata?.rating ?? 0
-                        asset.setCaptureDate(from: found.metadata)
+                        asset.captureDate = found.metadata?.captureDate
                         context.insert(asset)
                     }
                     do {

@@ -2,41 +2,29 @@ import Foundation
 import SwiftData
 import os
 
-extension PhotoAsset {
-    /// Stores what a metadata read found about the photo's capture date. Scans call it when they insert a photo
-    /// (`found.metadata` is nil when no read was attempted, and then nothing is recorded).
-    func setCaptureDate(from metadata: MetadataService.PhotoMetadata?) {
-        guard let metadata else { return }
-        captureDate = metadata.captureDate
-        captureDateChecked = metadata.captureDateChecked
-    }
-}
-
-// MARK: - The backfill
-
 /// Capture dates for rows stored before Phocasa read them, after launch (`LibraryStore.backfillCaptureDates()`).
 ///
-/// 1. Off the main actor: find the rows with no capture date whose file hasn't been read (`captureDateChecked`), and
-///    read their files, concurrently, at utility priority.
+/// 1. Off the main actor: find the rows with no capture date, and read their files, concurrently, at utility priority.
 /// 2. Off the main actor: plan the new order of every row (`LibrarySort.ranks(of:)`), from plain values.
 /// 3. On the main context, because a background context must never change a row the main context holds
-///    (CLAUDE.md): write the dates in chunks sized to take about 8 ms each, saving each one and letting the run loop
-///    run between them.
+///    (CLAUDE.md): write the dates in chunks of about 12 ms each, saving each one and leaving the run loop as long again
+///    between them.
 /// 4. On the main actor, once: put the library and the bin in the new order in memory (`LibrarySort.reorder`), with
 ///    no model reads and no reload.
 ///
-/// A file that can't be read (missing, empty, not an image) isn't marked, so it is tried again on the next launch;
-/// one read as an image without a capture date is marked, so it isn't.
+/// Files without a capture date (or that can't be read: missing, empty, not an image) are read again on each launch,
+/// in the background, and nothing is written for them. A "checked" attribute would avoid the re-reads, but every
+/// attribute costs every fetch and save: a second one measured +4% on the library's fetch-bound benchmarks.
 enum CaptureDateBackfill {
     /// What one run did. For tests and benchmarks.
     struct Report: Sendable {
-        /// Rows with no capture date whose file hadn't been read.
+        /// Rows with no capture date (and a non-empty file).
         var candidates = 0
         /// Rows given a capture date.
         var datesWritten = 0
-        /// Files read as images that have no capture date (marked, so they aren't read again).
+        /// Files read as images that have no capture date.
         var undated = 0
-        /// Files that couldn't be read (tried again next time).
+        /// Files that couldn't be read.
         var unreadable = 0
         /// Whether the library was put in the new order.
         var reordered = false
@@ -52,7 +40,7 @@ enum CaptureDateBackfill {
         var wallTime: Duration = .zero
     }
 
-    /// A row whose capture date hasn't been read.
+    /// A row without a capture date.
     struct Candidate: Sendable {
         let id: UUID
         let jpgPath: String?
@@ -68,8 +56,7 @@ enum CaptureDateBackfill {
     static func candidates(in container: ModelContainer) async -> [Candidate] {
         await offMain {
             let context = ModelContext(container)
-            var descriptor = FetchDescriptor<PhotoAsset>(
-                predicate: #Predicate { $0.captureDate == nil && !$0.captureDateChecked && $0.fileSize > 0 })
+            var descriptor = FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.captureDate == nil && $0.fileSize > 0 })
             descriptor.propertiesToFetch = [\.id, \.jpgPath, \.rawPath]
             let rows = (try? context.fetch(descriptor)) ?? []
             return rows.map { Candidate(id: $0.id, jpgPath: $0.jpgPath, rawPath: $0.rawPath) }
@@ -141,7 +128,7 @@ extension LibraryStore {
     /// Main-actor time each write chunk aims at: chunks grow below 11 ms and shrink above 15 ms, so none takes much
     /// more than a frame (about 16 ms). With 10k photos loaded, a main-context save costs about 7 ms however few rows
     /// it writes (`setRating` pays it too), plus about 0.15 ms per row with its fetch, so chunks settle at about
-    /// 30–55 rows there, and at more in smaller libraries.
+    /// 25–40 rows there, and at more in smaller libraries.
     private static let captureDateChunkGrowBelow: Duration = .milliseconds(11)
     private static let captureDateChunkShrinkAbove: Duration = .milliseconds(15)
 
@@ -161,10 +148,10 @@ extension LibraryStore {
         }
     }
 
-    /// Reads the capture dates of stored photos that have none and whose files haven't been read, writes them on the
-    /// main context in short chunks, then puts the library and the bin in the new order once, in memory (see
-    /// `CaptureDateBackfill`). Photos added or moved meanwhile keep their changes: each chunk looks its rows up by id,
-    /// and the re-order merges in photos the plan didn't know. Until it ends, the lists keep the old order.
+    /// Reads the capture dates of stored photos that have none, writes the ones found on the main context in short
+    /// chunks, then puts the library and the bin in the new order once, in memory (see `CaptureDateBackfill`). Photos
+    /// added or moved meanwhile keep their changes: each chunk looks its rows up by id, and the re-order merges in
+    /// photos the plan didn't know. Until it ends, the lists keep the old order.
     @discardableResult
     func backfillCaptureDates() async -> CaptureDateBackfill.Report {
         let clock = ContinuousClock()
@@ -181,28 +168,20 @@ extension LibraryStore {
         phase = clock.now
         let reads = await CaptureDateBackfill.read(candidates)
         report.readTime = clock.now - phase
-        var found: [(id: UUID, read: CaptureDate.Read)] = []
-        var newDates: [UUID: Date] = [:]
+        var found: [(id: UUID, date: Date)] = []
         for (candidate, read) in zip(candidates, reads) {
             switch read {
-            case .date(let date):
-                newDates[candidate.id] = date
-                found.append((candidate.id, read))
-            case .noDate:
-                report.undated += 1
-                found.append((candidate.id, read))
-            case .unreadable:
-                report.unreadable += 1
+            case .date(let date): found.append((candidate.id, date))
+            case .noDate: report.undated += 1
+            case .unreadable: report.unreadable += 1
             }
         }
         guard !found.isEmpty else { return finishCaptureDateBackfill(report, start) }
 
-        var ranks: [UUID: Int]?
-        if !newDates.isEmpty {
-            phase = clock.now
-            ranks = await CaptureDateBackfill.ranks(in: container, newDates: newDates)
-            report.planTime = clock.now - phase
-        }
+        phase = clock.now
+        let newDates = Dictionary(found.map { ($0.id, $0.date) }, uniquingKeysWith: { first, _ in first })
+        let ranks = await CaptureDateBackfill.ranks(in: container, newDates: newDates)
+        report.planTime = clock.now - phase
 
         var chunkRows = min(32, captureDates.maxChunkRows)
         var next = 0
@@ -224,7 +203,7 @@ extension LibraryStore {
             if next < found.count { try? await Task.sleep(for: max(elapsed, .milliseconds(2))) }
         }
 
-        if let ranks, report.datesWritten > 0 {
+        if report.datesWritten > 0 {
             phase = clock.now
             (allPhotos, allFacts) = sort.reorder(allPhotos, allFacts, ranks: ranks)
             (binPhotos, binFacts) = sort.reorder(binPhotos, binFacts, ranks: ranks)
@@ -237,21 +216,18 @@ extension LibraryStore {
         return finishCaptureDateBackfill(report, start)
     }
 
-    /// Writes one chunk's results into its rows (looked up by id: rows deleted since are skipped) and saves. A capture
-    /// date already there is kept. Returns how many dates it wrote.
-    private func applyCaptureDates(_ chunk: ArraySlice<(id: UUID, read: CaptureDate.Read)>,
-                                   in context: ModelContext) -> Int {
+    /// Writes one chunk's dates into its rows (looked up by id: rows deleted since are skipped; the fetch also keeps a
+    /// binned row's flag from being written back, spec §H5) and saves. A capture date already there is kept. Returns
+    /// how many dates it wrote.
+    private func applyCaptureDates(_ chunk: ArraySlice<(id: UUID, date: Date)>, in context: ModelContext) -> Int {
         let ids = chunk.map(\.id)
         let rows = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
-        let reads = Dictionary(chunk.map { ($0.id, $0.read) }, uniquingKeysWith: { first, _ in first })
+        let dates = Dictionary(chunk.map { ($0.id, $0.date) }, uniquingKeysWith: { first, _ in first })
         var written = 0
-        for row in rows {
-            guard let read = reads[row.id] else { continue }
-            if case .date(let date) = read, row.captureDate == nil {
-                row.captureDate = date
-                written += 1
-            }
-            if !row.captureDateChecked { row.captureDateChecked = true }
+        for row in rows where row.captureDate == nil {
+            guard let date = dates[row.id] else { continue }
+            row.captureDate = date
+            written += 1
         }
         if context.hasChanges { try? context.save() }
         return written

@@ -54,9 +54,6 @@ final class MetadataService: Sendable {
         var editParameters: EditParameters?
         /// When the photo was taken (EXIF `DateTimeOriginal`, see `CaptureDate`), or nil if the file has none.
         var captureDate: Date?
-        /// Whether ImageIO read the file as an image, so a nil `captureDate` means the file has none, rather than
-        /// that it couldn't be read (missing, empty, not an image).
-        var captureDateChecked = false
     }
 
     /// Reads the rating and keywords embedded in the file, then lets its `.xmp` sidecar override them.
@@ -71,7 +68,6 @@ final class MetadataService: Sendable {
         var keywords: [String] = []
         var editParameters: EditParameters?
         var captureDate: Date?
-        var captureDateChecked = false
 
         // Try reading from image file directly
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
@@ -83,16 +79,12 @@ final class MetadataService: Sendable {
                 // Reading only this is cheaper than also copying the properties dictionary.
                 keywords = Self.xmpSubject(in: meta)
                 captureDate = CaptureDate.date(in: meta)
-                captureDateChecked = true
-            } else if CaptureDate.isImage(source) {
-                captureDateChecked = true
-                if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] {
-                    if let iptc = properties[kCGImagePropertyIPTCDictionary as String] as? [String: Any],
-                       let iptcKeywords = iptc[kCGImagePropertyIPTCKeywords as String] as? [String] {
-                        keywords = iptcKeywords
-                    }
-                    captureDate = CaptureDate.date(inProperties: properties)
+            } else if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] {
+                if let iptc = properties[kCGImagePropertyIPTCDictionary as String] as? [String: Any],
+                   let iptcKeywords = iptc[kCGImagePropertyIPTCKeywords as String] as? [String] {
+                    keywords = iptcKeywords
                 }
+                captureDate = CaptureDate.date(inProperties: properties)
             }
         }
 
@@ -105,7 +97,7 @@ final class MetadataService: Sendable {
         }
 
         return PhotoMetadata(rating: rating, keywords: keywords, editParameters: editParameters,
-                             captureDate: captureDate, captureDateChecked: captureDateChecked)
+                             captureDate: captureDate)
     }
 
     /// `xmp:Rating` as a star count. Values outside 0...5 (Adobe's -1 means "rejected") read as unrated.

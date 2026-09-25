@@ -247,7 +247,7 @@ extension LibraryStore {
                 fileSize: found.fileSize
             )
             asset.rating = found.metadata?.rating ?? 0
-            asset.setCaptureDate(from: found.metadata)
+            asset.captureDate = found.metadata?.captureDate
             context.insert(asset)
 
             guard let keywords = found.metadata?.keywords, !keywords.isEmpty else { continue }

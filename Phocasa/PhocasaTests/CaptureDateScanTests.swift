@@ -120,20 +120,19 @@ final class CaptureDateBackfillTests: CaptureDateStoreTestCase {
         let stored = try storedPhotos(container)
         XCTAssertEqual(stored["a"]?.captureDate, local("2010:06:01 12:00:00"))
         XCTAssertEqual(stored["d"]?.captureDate, local("2013:06:01 12:00:00"))
-        XCTAssertEqual(stored["a"]?.captureDateChecked, true)
         XCTAssertNil(stored["undated"]?.captureDate)
-        XCTAssertEqual(stored["undated"]?.captureDateChecked, true, "read once: not read again on the next launch")
-        XCTAssertEqual(stored["missing"]?.captureDateChecked, false, "couldn't be read: tried again next time")
+        XCTAssertNil(stored["missing"]?.captureDate)
 
-        // The next launch reads only the file that couldn't be read.
+        // The next launch reads only the files still without a date, and writes nothing.
         let next = PhotoLibraryViewModel()
         next.library.captureDates.startDelay = .milliseconds(10)
         next.setModelContext(ModelContext(container))
         try await waitForScan(next)
         await next.library.captureDates.task?.value
         let nextReport = try XCTUnwrap(next.library.captureDates.lastReport)
-        XCTAssertEqual(nextReport.candidates, 1)
+        XCTAssertEqual(nextReport.candidates, 2, "the undated and the missing file")
         XCTAssertEqual(nextReport.datesWritten, 0)
+        XCTAssertTrue(nextReport.chunkMainActorTimes.isEmpty, "nothing to write")
         XCTAssertFalse(nextReport.reordered)
         XCTAssertEqual(names(next.library.photos), ["undated", "d", "c", "b", "a"], "a fresh launch fetches capture order")
     }
@@ -319,9 +318,6 @@ final class CaptureDateScanTests: CaptureDateStoreTestCase {
                        CaptureDateFixtures.utc(2015, 5, 1, 8, 0, 0).timeIntervalSince1970 + 0.5, accuracy: 1e-6)
         XCTAssertEqual(stored["old"]?.captureDate, local("2010:05:01 10:00:00"))
         XCTAssertNil(stored["none"]?.captureDate)
-        for (name, photo) in stored {
-            XCTAssertTrue(photo.captureDateChecked, "\(name): the scan read its file")
-        }
 
         vm.library.toggleSortOrder()
         XCTAssertEqual(names(vm.library.photos), ["old", "mid", "raw", "new", "none"])
