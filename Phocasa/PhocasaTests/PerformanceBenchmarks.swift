@@ -92,6 +92,24 @@ final class DataPathBenchmarks: XCTestCase {
         while vm.isScanning { try await Task.sleep(for: .milliseconds(1)) }
     }
 
+    /// Main-actor time of the view model's last scan, from task 20's `lastScanReport` hook. To run this harness
+    /// against code without that hook, make this return nil: the main-actor lines are then left out.
+    private func lastScanMainActorMs(_ vm: PhotoLibraryViewModel) -> Double? {
+        vm.lastScanReport.map { ms($0.mainActorTime) }
+    }
+
+    private func reportIfAny(_ tag: String, _ label: String, _ samples: [Double]) {
+        if !samples.isEmpty { report(tag, label, samples) }
+    }
+
+    /// The path the folder enumerator reports for `url` (`/private/var/…`, where `resolvingSymlinksInPath()`
+    /// gives `/var/…`), so seeded rows match what a scan finds.
+    private func canonical(_ url: URL) throws -> URL {
+        let path = try XCTUnwrap(realpath(url.path, nil))
+        defer { free(path) }
+        return URL(fileURLWithPath: String(cString: path), isDirectory: true)
+    }
+
     // MARK: Seeding
 
     /// Seeds `n` photos (real empty .jpg files), 40 tags in 5 categories, 2 tags each.
@@ -285,7 +303,7 @@ final class DataPathBenchmarks: XCTestCase {
             vm.setRatingForSelection(flip ? 4 : 3)
         }
         vm.selectedPhotos = []
-        try await Task.sleep(for: .milliseconds(500)) // let detached metadata writes drain
+        await MetadataWriter.shared.flush() // let the queued metadata writes drain
 
         // 6 in-memory baselines
         vm.applyFilter(.all)
@@ -336,11 +354,19 @@ final class DataPathBenchmarks: XCTestCase {
         try context.save()
         vm.loadExistingData()
         XCTAssertNotNil(vm.currentLibrary)
+        var rescanMainActor: [Double] = [] // (added by task 20)
         try await benchAsync(tag, "7x rescanCurrentLibrary() all-existing (until !isScanning)", runs: 3) {
             vm.rescanCurrentLibrary()
             try await waitForScan(vm)
+            if let t = lastScanMainActorMs(vm) { rescanMainActor.append(t) }
         }
         print("BENCH|\(tag)|info|scanProgress=\(vm.scanProgress)")
+        // (added by task 20) The seed's `/var/…` paths aren't the `/private/var/…` ones the folder enumerator
+        // reports, so 7x's warm-up run inserts a second row per file and its timed runs rescan twice the rows.
+        // 7w (testRescanUnchanged10k) is the true unchanged-library rescan.
+        let storedRows = (try? context.fetchCount(FetchDescriptor<PhotoAsset>())) ?? -1
+        print("BENCH|\(tag)|info|7x stored rows=\(storedRows) allPhotos=\(vm.allPhotos.count)")
+        reportIfAny(tag, "7x main-actor time of each rescan (scan task)", Array(rescanMainActor.dropFirst()))
         try await benchAsync(tag, "7y FolderScanner.scan alone", runs: 3) {
             _ = await FolderScanner().scan(folderURL: filesDir)
         }
@@ -348,6 +374,54 @@ final class DataPathBenchmarks: XCTestCase {
 
     func testBench2k() async throws { try skipUnlessBenchmarking(); try await runSuite(n: 2_000) }
     func testBench10k() async throws { try skipUnlessBenchmarking(); try await runSuite(n: 10_000) }
+
+    // MARK: Launch and rescan of an unchanged 10k library (added by task 20)
+
+    /// Unlike 7x, the rows are seeded under the paths the folder enumerator reports, so a rescan finds exactly
+    /// the stored photos: the launch case of spec §B1.
+    func testRescanUnchanged10k() async throws {
+        try skipUnlessBenchmarking()
+        let tag = "N=10000"
+        let dir = try makeTempDir("rescan10k")
+        let filesDir = try canonical(dir.appendingPathComponent("files", isDirectory: true).creatingDir())
+        let storeURL = dir.appendingPathComponent("bench.store")
+        let context = try makeContainer(storeURL: storeURL).mainContext
+        _ = try seed(n: 10_000, into: context, filesDir: filesDir)
+        context.insert(PhotoLibrary(rootFolderPath: filesDir.path))
+        try context.save()
+
+        // 7v: launch on a fresh container, like opening the app: the synchronous part, then its rescan.
+        var launchSync: [Double] = [], launchScan: [Double] = [], launchMainActor: [Double] = []
+        for _ in 0..<3 {
+            let launchContext = try makeContainer(storeURL: storeURL).mainContext
+            let launchVM = PhotoLibraryViewModel()
+            let start = clock.now
+            launchVM.setModelContext(launchContext)
+            launchSync.append(ms(clock.now - start))
+            try await waitForScan(launchVM)
+            launchScan.append(ms(clock.now - start))
+            if let t = lastScanMainActorMs(launchVM) { launchMainActor.append(t) }
+            XCTAssertEqual(launchVM.allPhotos.count, 10_000)
+            retained.append(launchVM)
+        }
+        report(tag, "7v launch: setModelContext() with a library, fresh container (synchronous part)", launchSync)
+        report(tag, "7v launch: setModelContext() until its rescan ends (!isScanning)", launchScan)
+        reportIfAny(tag, "7v launch rescan: main-actor time (scan task)", launchMainActor)
+
+        // 7w: rescan of the unchanged library, warm.
+        let vm = PhotoLibraryViewModel()
+        vm.setModelContext(context)
+        try await waitForScan(vm)
+        var mainActor: [Double] = []
+        try await benchAsync(tag, "7w rescanCurrentLibrary() unchanged 10k library (until !isScanning)") {
+            vm.rescanCurrentLibrary()
+            try await waitForScan(vm)
+            if let t = lastScanMainActorMs(vm) { mainActor.append(t) }
+        }
+        reportIfAny(tag, "7w main-actor time of each rescan (scan task)", Array(mainActor.dropFirst()))
+        let storedRows = (try? context.fetchCount(FetchDescriptor<PhotoAsset>())) ?? -1
+        print("BENCH|\(tag)|info|7w scanProgress=\(vm.scanProgress) stored rows=\(storedRows) allPhotos=\(vm.allPhotos.count)")
+    }
 
     // MARK: Scan of real JPEGs
 
@@ -391,6 +465,7 @@ final class DataPathBenchmarks: XCTestCase {
 
         // First scan into fresh stores (3 separate runs)
         var firstSamples: [Double] = []
+        var firstMainActor: [Double] = [] // (added by task 20)
         var lastVM: PhotoLibraryViewModel?
         var lastCtx: ModelContext?
         for run in 0..<3 {
@@ -407,18 +482,23 @@ final class DataPathBenchmarks: XCTestCase {
             vm.rescanCurrentLibrary()
             try await waitForScan(vm)
             firstSamples.append(ms(clock.now - start))
+            if let t = lastScanMainActorMs(vm) { firstMainActor.append(t) }
             print("BENCH|\(tag)|info|run\(run) scanProgress=\(vm.scanProgress) allPhotos=\(vm.allPhotos.count) tags=\(vm.allTags.count) tagged=\(vm.allPhotos.filter { !$0.tags.isEmpty }.count) rated=\(vm.allPhotos.filter { $0.rating > 0 }.count)")
             lastVM = vm
             lastCtx = ctx
         }
         report(tag, "FIRST rescanCurrentLibrary() fresh store (until !isScanning)", firstSamples)
+        reportIfAny(tag, "7z first scan of 1k new photos: main-actor time", firstMainActor) // (added by task 20)
 
         let vm = lastVM!
         let ctx = lastCtx!
+        var secondMainActor: [Double] = [] // (added by task 20)
         try await benchAsync(tag, "SECOND rescanCurrentLibrary() all-existing (until !isScanning)") {
             vm.rescanCurrentLibrary()
             try await waitForScan(vm)
+            if let t = lastScanMainActorMs(vm) { secondMainActor.append(t) }
         }
+        reportIfAny(tag, "SECOND main-actor time (scan task)", Array(secondMainActor.dropFirst()))
 
         // 1000 calls = 500 tagged photos x 2 keywords; tags already exist → one fetch per call
         bench(tag, "findOrCreateTag x1000 (existing tags)") {

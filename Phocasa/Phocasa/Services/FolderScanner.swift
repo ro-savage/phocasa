@@ -1,4 +1,5 @@
 import Foundation
+import os
 import UniformTypeIdentifiers
 
 struct DiscoveredPhoto: Sendable {
@@ -8,6 +9,28 @@ struct DiscoveredPhoto: Sendable {
     let folderPath: String
     let fileSize: Int64
     let creationDate: Date?
+    /// `"\(folderPath)/\(fileName)"`: the identity a scan matches stored photos by.
+    let key: String
+    /// The file's rating and keywords. Filled only for photos whose key the library doesn't know yet
+    /// (see `FolderScanner.scan(folderURL:knownKeys:)`); nil otherwise.
+    var metadata: MetadataService.PhotoMetadata?
+
+    init(fileName: String, jpgPath: String?, rawPath: String?, folderPath: String, fileSize: Int64,
+         creationDate: Date?, metadata: MetadataService.PhotoMetadata? = nil) {
+        self.fileName = fileName
+        self.jpgPath = jpgPath
+        self.rawPath = rawPath
+        self.folderPath = folderPath
+        self.fileSize = fileSize
+        self.creationDate = creationDate
+        self.key = Self.key(folderPath: folderPath, fileName: fileName)
+        self.metadata = metadata
+    }
+
+    /// The matching key for a photo stored with this folder path and file name (stem).
+    static func key(folderPath: String, fileName: String) -> String {
+        "\(folderPath)/\(fileName)"
+    }
 }
 
 final class FolderScanner: Sendable {
@@ -22,6 +45,11 @@ final class FolderScanner: Sendable {
 
     static let allExtensions: Set<String> = standardExtensions.union(rawExtensions)
 
+    /// Files per unit of work when reading metadata concurrently.
+    private static let metadataChunkSize = 64
+
+    /// Finds the photos under `folderURL` (JPG+RAW with the same stem are one photo), off the main thread.
+    /// Reads no metadata. The order is unspecified: the view model sorts on fetch.
     func scan(folderURL: URL) async -> [DiscoveredPhoto] {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -29,6 +57,64 @@ final class FolderScanner: Sendable {
                 continuation.resume(returning: results)
             }
         }
+    }
+
+    /// Enumerates the folder and reads metadata for new files, concurrently and off the main thread.
+    /// Photos whose `key` is in `knownKeys` keep `metadata == nil`.
+    func scan(folderURL: URL, knownKeys: Set<String>) async -> [DiscoveredPhoto] {
+        let discovered = await scan(folderURL: folderURL)
+        return await readMetadata(for: discovered, skipping: knownKeys)
+    }
+
+    /// Fills `metadata` for every photo whose key isn't in `knownKeys`, reading the JPG if there is one and
+    /// the RAW otherwise. Runs off the main thread, about 64 files per work item across all cores.
+    /// `progress(done, total)` is called from worker threads after each work item.
+    func readMetadata(
+        for photos: [DiscoveredPhoto],
+        skipping knownKeys: Set<String> = [],
+        progress: (@Sendable (_ done: Int, _ total: Int) -> Void)? = nil
+    ) async -> [DiscoveredPhoto] {
+        let targets = photos.indices.filter { !knownKeys.contains(photos[$0].key) }
+        guard !targets.isEmpty else { return photos }
+        let paths = targets.map { photos[$0].jpgPath ?? photos[$0].rawPath ?? "" }
+        let metadata = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: Self.readMetadataConcurrently(paths: paths, progress: progress))
+            }
+        }
+        var result = photos
+        for (position, index) in targets.enumerated() {
+            result[index].metadata = metadata[position]
+        }
+        return result
+    }
+
+    private struct MetadataChunks: Sendable {
+        var parts: [[MetadataService.PhotoMetadata?]]
+        var done = 0
+    }
+
+    private static func readMetadataConcurrently(
+        paths: [String],
+        progress: (@Sendable (Int, Int) -> Void)?
+    ) -> [MetadataService.PhotoMetadata?] {
+        let chunkSize = metadataChunkSize
+        let chunkCount = (paths.count + chunkSize - 1) / chunkSize
+        // Each work item reads its own range and hands it in once, so the lock is taken once per 64 files.
+        let chunks = OSAllocatedUnfairLock(initialState: MetadataChunks(parts: Array(repeating: [], count: chunkCount)))
+        DispatchQueue.concurrentPerform(iterations: chunkCount) { chunk in
+            let range = (chunk * chunkSize)..<min(paths.count, (chunk + 1) * chunkSize)
+            let part: [MetadataService.PhotoMetadata?] = range.map { i in
+                paths[i].isEmpty ? nil : MetadataService.shared.readMetadata(from: paths[i])
+            }
+            let finished = chunks.withLock { state in
+                state.parts[chunk] = part
+                state.done += range.count
+                return state.done
+            }
+            progress?(finished, paths.count)
+        }
+        return chunks.withLock { $0.parts }.flatMap { $0 }
     }
 
     private func scanSync(folderURL: URL) -> [DiscoveredPhoto] {
@@ -94,7 +180,6 @@ final class FolderScanner: Sendable {
             }
         }
 
-        results.sort { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
         return results
     }
 }
