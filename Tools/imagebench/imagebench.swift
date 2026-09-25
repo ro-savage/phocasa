@@ -1,8 +1,11 @@
 // imagebench.swift — standalone benchmark of Phocasa's image-loading and editing paths.
 // Mirrors Services/ImageLoader.swift and Services/ImageEditingService.swift. Measures only.
 //
-// Build:  swiftc -O -swift-version 5 imagebench.swift -o imagebench
-// Run:    ./imagebench gen [noiseAmp] [quality] | copies | orient | thumb | detail | conc | ci | raw | clean
+// Build:  swiftc -O -swift-version 5 imagebench.swift -o "$TMPDIR/imagebench"
+// Run:    "$TMPDIR/imagebench" gen [noiseAmp] [quality] | copies | orient | thumb | detail | conc [px] | ci | raw | clean
+// Data:   $IMAGEBENCH_DIR (default $TMPDIR/phocasa-imagebench), about 3 GB after gen + copies; `clean` removes it.
+// RAW:    `raw` opens only the file named by $IMAGEBENCH_RAW, read-only, and is skipped when it isn't set.
+//         See README.md in this folder.
 
 import Foundation
 import ImageIO
@@ -554,21 +557,15 @@ func ciDiag() {
 
 // MARK: - 7. RAW (read-only)
 
+/// The RAW file to measure, named explicitly by $IMAGEBENCH_RAW. Never searches the disk: camera RAW files on this
+/// machine live in the user's photo folders. Returns nil unless the path is a local, readable regular file.
 func findRAW() -> String? {
-    let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-    p.arguments = ["kMDItemContentTypeTree == 'public.camera-raw-image'"]
-    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
-    try? p.run()
-    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    p.waitUntilExit()
-    for line in out.split(separator: "\n").prefix(5) {
-        let path = String(line)
-        var st = stat()
-        guard stat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_flags & 0x4000_0000 == 0 /* SF_DATALESS */,
-              st.st_size > 1_000_000, access(path, R_OK) == 0 else { continue }
-        return path
-    }
-    return nil
+    guard let path = ProcessInfo.processInfo.environment["IMAGEBENCH_RAW"], !path.isEmpty else { return nil }
+    var st = stat()
+    guard stat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG,
+          st.st_flags & 0x4000_0000 == 0 /* SF_DATALESS: reading would trigger a cloud download */,
+          access(path, R_OK) == 0 else { return nil }
+    return path
 }
 func applyRAWParams(_ f: CIRAWFilter, _ p: Params) {
     // Same mapping as ImageEditingService.applyRAWParameters (temperature/tint/NR/etc. at their 0 defaults).
@@ -594,7 +591,14 @@ func rawRender(_ ctx: CIContext, _ f: CIRAWFilter, draft: Bool, scaleFactor: Flo
 }
 
 func rawTest() {
-    guard let path = findRAW() else { print("No local (non-dataless) camera RAW found — skipped."); return }
+    guard let path = findRAW() else {
+        if let named = ProcessInfo.processInfo.environment["IMAGEBENCH_RAW"], !named.isEmpty {
+            print("IMAGEBENCH_RAW (\(named)) is not a local, readable regular file — skipped.")
+        } else {
+            print("IMAGEBENCH_RAW isn't set — skipped. Set it to the path of one camera RAW file (opened read-only).")
+        }
+        return
+    }
     let url = URL(fileURLWithPath: path)
     let src0 = source(path)!
     let pr = CGImageSourceCopyPropertiesAtIndex(src0, 0, nil) as? [String: Any] ?? [:]
