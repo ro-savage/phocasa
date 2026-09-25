@@ -81,6 +81,36 @@ final class FullImageLoaderTests: XCTestCase {
         XCTAssertEqual(loader.cachedFit(path: path, viewportPixelSize: CGSize(width: 400, height: 300)), image)
     }
 
+    /// A decode with more pixels than the fit needs (e.g. full resolution after zooming, or a first load made
+    /// before the viewport size was known) serves the fit request instead of a second decode.
+    func testFitReusesCachedHigherResolutionDecode() async throws {
+        let path = try writeJPEG(width: 600, height: 400, orientation: .up)
+        let loader = FullImageLoader(byteLimit: 64 << 20)
+        let viewport = CGSize(width: 300, height: 200)   // fit alone would be subsample 2
+
+        let full = await loader.load(path: path, subsample: 1)
+        _ = await loader.info(path: path)
+        let fit = await loader.loadFit(path: path, viewportPixelSize: viewport)
+
+        XCTAssertEqual(fit, full)
+        XCTAssertEqual(loader.cachedFit(path: path, viewportPixelSize: viewport), full)
+        XCTAssertEqual(loader.decodeCount, 1)
+    }
+
+    func testClearEmptiesCacheAndDropsQueuedPrefetches() async throws {
+        let paths = try (0..<6).map { _ in try writeJPEG(width: 800, height: 600, orientation: .up) }
+        let loader = FullImageLoader(byteLimit: 256 << 20)
+        _ = await loader.load(path: paths[0], subsample: 1)
+
+        loader.prefetch(paths: Array(paths.dropFirst()), subsample: 1)
+        loader.clear()
+        try await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertNil(loader.cachedImage(path: paths[0], subsample: 1))
+        // At most the prefetch that had already started when clear() ran lands in the cache.
+        XCTAssertLessThanOrEqual(paths.dropFirst().filter { loader.cachedImage(path: $0, subsample: 1) != nil }.count, 1)
+    }
+
     // MARK: - Cache
 
     func testCacheIsBoundedByBytes() async throws {

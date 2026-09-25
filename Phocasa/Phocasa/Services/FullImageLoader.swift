@@ -99,21 +99,34 @@ final class FullImageLoader: @unchecked Sendable {
     /// file's embedded preview.
     func loadFit(path: String, viewportPixelSize: CGSize) async -> DisplayImage? {
         guard let info = await info(path: path) else { return nil }
+        if let hit = cachedCovering(path: path, info: info, viewportPixelSize: viewportPixelSize) { return hit }
         return await load(Key(path: path, variant: Self.fitVariant(info: info, viewportPixelSize: viewportPixelSize)),
                           queue: foregroundQueue)
     }
 
-    /// The cached fit image, if the file's header has been read and its fit variant is cached.
+    /// The cached fit image, if the file's header has been read and its fit variant (or a decode with more
+    /// pixels) is cached.
     func cachedFit(path: String, viewportPixelSize: CGSize) -> DisplayImage? {
         guard let info = cachedInfo(path: path) else { return nil }
-        return lookup(Key(path: path, variant: Self.fitVariant(info: info, viewportPixelSize: viewportPixelSize)))
+        return cachedCovering(path: path, info: info, viewportPixelSize: viewportPixelSize)
     }
 
     /// Prefetches the fit image of each path, choosing the variant per image. Replaces any previous prefetch set.
     func prefetchFit(paths: [String], viewportPixelSize: CGSize) {
         enqueuePrefetch(paths) { [self] path in
-            guard let info = readInfo(path: path) else { return nil }
+            guard let info = readInfo(path: path),
+                  cachedCovering(path: path, info: info, viewportPixelSize: viewportPixelSize) == nil else { return nil }
             return Key(path: path, variant: Self.fitVariant(info: info, viewportPixelSize: viewportPixelSize))
+        }
+    }
+
+    /// Drops queued prefetches and empties the cache (the detail view closing). Decodes already running
+    /// still finish.
+    func clear() {
+        lock.withLock {
+            prefetchGeneration += 1
+            entries.removeAll()
+            totalBytes = 0
         }
     }
 
@@ -163,14 +176,6 @@ final class FullImageLoader: @unchecked Sendable {
     /// Decodes performed so far (cache misses that reached ImageIO).
     var decodeCount: Int { lock.withLock { decodes } }
 
-    func removeAll() {
-        lock.withLock {
-            entries.removeAll()
-            totalBytes = 0
-            infoCache.removeAll()
-        }
-    }
-
     // MARK: - Variants
 
     private static func validFactor(_ subsample: Int) -> Int {
@@ -188,6 +193,28 @@ final class FullImageLoader: @unchecked Sendable {
             return .rawPreview(maxPixelSize: max(1, Int(longEdge.rounded(.up))))
         }
         return .subsample(subsampleFactor(imagePixelSize: info.orientedSize, viewportPixelSize: viewportPixelSize))
+    }
+
+    /// The fit variant if cached, else any cached decode of the file with more pixels. For RAW files a cached
+    /// full decode is preferred to the embedded preview.
+    private func cachedCovering(path: String, info: ImageInfo, viewportPixelSize: CGSize) -> DisplayImage? {
+        let fit = Self.fitVariant(info: info, viewportPixelSize: viewportPixelSize)
+        var candidates: [Variant]
+        switch fit {
+        case .subsample(let factor):
+            candidates = [fit]
+            var larger = factor / 2
+            while larger >= 1 {
+                candidates.append(.subsample(larger))
+                larger /= 2
+            }
+        case .rawPreview:
+            candidates = [.subsample(1), fit]
+        }
+        for variant in candidates {
+            if let hit = lookup(Key(path: path, variant: variant)) { return hit }
+        }
+        return nil
     }
 
     // MARK: - Loading
