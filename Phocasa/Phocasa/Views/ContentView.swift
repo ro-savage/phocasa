@@ -22,7 +22,10 @@ struct ContentView: View {
                     }
                 }
             }
-            .onChange(of: viewModel.searchText) {
+            .task(id: viewModel.searchText) {
+                // Debounce: a new keystroke cancels this task before it filters.
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
                 viewModel.applyCurrentFilter()
             }
             .onChange(of: viewModel.showingDetail) {
@@ -183,9 +186,7 @@ struct ContentView: View {
     }
 
     private var firstSelectedPhoto: PhotoAsset? {
-        viewModel.selectedPhotos.first.flatMap { id in
-            viewModel.photos.first { $0.id == id }
-        }
+        viewModel.primarySelectedPhoto
     }
 
     @ToolbarContentBuilder

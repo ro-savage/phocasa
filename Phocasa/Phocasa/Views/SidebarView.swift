@@ -61,7 +61,7 @@ struct SidebarView: View {
                             Label(category.capitalized, systemImage: "folder")
                         }
 
-                        ForEach(viewModel.allTags.filter { $0.category == category && $0.parent == nil }, id: \.id) { tag in
+                        ForEach(viewModel.tagsByCategory[category] ?? [], id: \.id) { tag in
                             sidebarRow(filter: .tag(tag.id), badge: viewModel.tagCounts[tag.id, default: 0]) {
                                 Label(tag.name, systemImage: "tag")
                                     .padding(.leading, 16)
