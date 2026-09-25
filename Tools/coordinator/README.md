@@ -91,6 +91,9 @@ that.** When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-m
 - **A line over 5% that the branch doesn't touch:** re-run just that test alternately on both sides with
   `-only-testing:…/<test> -test-iterations 3`, in two separate worktrees so nothing rebuilds between runs. In wave 2
   two such lines were suite-order effects, not regressions.
+- **Keep the display awake.** `runtests.sh` (and so `ab.sh`) runs `xcodebuild` under `caffeinate -d -u`. With the
+  display asleep (after the idle display-sleep timeout, e.g. overnight), `GridKeepAliveTests` fail (scroll offset 0) and
+  image/GPU lines shift, so runs taken with the display off aren't comparable with runs taken with it on.
 - **The "single cold thumbnail" lines** run after a ≥ 300 ms idle pause (the disk-cache settle), so they read higher
   than wave 1's numbers on every checkout. Compare them only within this harness.
 
