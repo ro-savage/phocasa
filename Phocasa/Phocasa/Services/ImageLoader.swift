@@ -27,7 +27,7 @@ final class ThumbnailCacheKey: NSObject, Sendable {
 final class ImageLoader: @unchecked Sendable {
     /// The app's loader, caching thumbnails where `LibraryLocation.current` says. A test host
     /// (`XCTestConfigurationFilePath` set) gets no disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names one, so tests
-    /// never write into the real Caches folder.
+    /// never write into the real Caches folder; the development library keeps its own in its folder.
     static let shared = ImageLoader(
         diskCache: LibraryLocation.current.thumbnailCacheDirectory.map { ThumbnailDiskCache(directory: $0) }
     )
