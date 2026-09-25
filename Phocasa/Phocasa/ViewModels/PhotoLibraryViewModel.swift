@@ -86,27 +86,16 @@ final class PhotoLibraryViewModel {
     private static let patchLimit = 8
 
     // MARK: - Image Editing State
-    var isEditing: Bool = false
-    var editingRAW: Bool = false
-    var editParameters: EditParameters = EditParameters()
-    var editedPreviewImage: NSImage?
-    var fullResEditImage: NSImage?
-    var showOriginal: Bool = false
-    var showSideBySide: Bool = false
-    var showJPGComparison: Bool = false
-    var jpgComparisonImage: NSImage?
-    var isCropping: Bool = false
-    var cropRect: NormalizedRect = .full
+    /// The edit in progress: its photo, parameters, renders, comparison and crop state. Exists only while editing.
+    private(set) var editSession: EditSession?
+    var isEditing: Bool { editSession != nil }
+    /// What the last editing session saved, so the detail view shows the saved edit at once rather than the
+    /// unedited photo. Cleared when the detail photo changes or the detail view closes.
+    private(set) var savedEditHandoff: SavedEditHandoff?
+    /// Bumped when an export rewrites a photo's file, so the detail view decodes it again.
+    private(set) var editedFilesVersion = 0
     var editPresets: [EditPreset] = []
-    var showExportOptions: Bool = false
     var presetNameInput: String = ""
-    private var renderGeneration: Int = 0
-
-    var canExport: Bool {
-        guard isEditing, let photo = selectedDetailPhoto else { return false }
-        if editingRAW { return photo.rawPath != nil }
-        return photo.jpgPath != nil
-    }
 
     var selectedPhotosList: [PhotoAsset] {
         selectedPhotos.compactMap { index(of: $0) }.sorted().map { photos[$0] }
@@ -124,8 +113,6 @@ final class PhotoLibraryViewModel {
     /// stay visible instead of silently disappearing.
     private var missingPhotoIDs: Set<UUID> = []
     private var needsAvailabilityCheck = true
-    private var previewTask: Task<Void, Never>?
-    private var fullResRenderTask: Task<Void, Never>?
 
     func setModelContext(_ context: ModelContext) {
         self.modelContext = context
@@ -1088,22 +1075,13 @@ final class PhotoLibraryViewModel {
         showGridTagEditor = true
     }
 
-    private func clearRAWSidecarEdits(for photo: PhotoAsset) {
-        photo.hasRawEdits = false
-        if let rawPath = photo.rawPath {
-            let existing = metadata.readMetadata(from: rawPath)
-            metadata.writeSidecar(
-                rating: existing.rating,
-                keywords: existing.keywords,
-                for: URL(fileURLWithPath: rawPath),
-                editParameters: nil
-            )
-        }
-    }
-
+    /// Clears the photo's saved JPG and RAW edits. The sidecar write goes through `MetadataWriter`.
     func revertEditsForPhoto(_ photo: PhotoAsset) {
         photo.jpgEditParametersData = nil
-        clearRAWSidecarEdits(for: photo)
+        photo.hasRawEdits = false
+        if let rawPath = photo.rawPath {
+            RAWEditStore.shared.save(nil, forRAWAt: rawPath)
+        }
         try? modelContext?.save()
     }
 
@@ -1206,11 +1184,15 @@ final class PhotoLibraryViewModel {
 
         let newIndex = index + direction
         if newIndex >= 0 && newIndex < photos.count {
-            // Save edits before navigating
-            if isEditing {
-                saveCurrentEditParameters()
-            }
+            // Save edits before navigating, then keep editing on the next photo (a session belongs to one photo).
+            let editingRAW = editSession?.isRAW
+            editSession?.end(save: true)
+            editSession = nil
+            savedEditHandoff = nil
             selectedDetailPhoto = photos[newIndex]
+            if let editingRAW {
+                continueEditing(photos[newIndex], isRAW: editingRAW)
+            }
         }
     }
 
@@ -1218,6 +1200,7 @@ final class PhotoLibraryViewModel {
         if isEditing {
             stopEditing(save: true)
         }
+        savedEditHandoff = nil
         if let photo = selectedDetailPhoto {
             selectedPhotos = [photo.id]
             lastSelectedId = photo.id
@@ -1323,260 +1306,64 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Image Editing
 
+    /// Saves the current session, if any, then starts editing `photo` in a new one.
     func startEditing(photo: PhotoAsset, isRAW: Bool) {
-        // Save any current edits first
-        if isEditing {
-            saveCurrentEditParameters()
+        if let current = editSession {
+            if let handoff = current.end(save: true) { savedEditHandoff = handoff }
+            editSession = nil
         }
-
-        editingRAW = isRAW
         selectedDetailPhoto = photo
-
-        // Load existing edit parameters
-        if isRAW, let rawPath = photo.rawPath {
-            editParameters = metadata.readEditParameters(forRAWAt: rawPath) ?? EditParameters()
-        } else {
-            editParameters = photo.jpgEditParameters ?? EditParameters()
-        }
-
-        isEditing = true
-        showOriginal = false
-        showSideBySide = false
-        showJPGComparison = false
-        jpgComparisonImage = nil
-        isCropping = false
-
-        // Pre-load the image into the editing service cache so first slider move is instant
-        let path = isRAW ? photo.rawPath : photo.jpgPath
-        if let path {
-            let url = URL(fileURLWithPath: path)
-            Task {
-                if isRAW {
-                    await ImageEditingService.shared.prepareRAW(url: url)
-                } else {
-                    await ImageEditingService.shared.prepareStandard(url: url)
-                }
-                updateEditPreview()
-            }
-        }
+        let session = EditSession(photo: photo, isRAW: isRAW, modelContext: modelContext)
+        editSession = session
+        Task { await session.begin() }
     }
 
+    /// Ends the session. With `save`, its edits are saved and the detail view shows them.
     func stopEditing(save: Bool = true) {
-        if save {
-            saveCurrentEditParameters()
-        }
-        isEditing = false
-        editedPreviewImage = nil
-        fullResEditImage = nil
-        fullResRenderTask?.cancel()
-        showOriginal = false
-        showSideBySide = false
-        showJPGComparison = false
-        jpgComparisonImage = nil
-        isCropping = false
-        editParameters = EditParameters()
-        ImageEditingService.shared.clearCache()
+        guard let session = editSession else { return }
+        let handoff = session.end(save: save)
+        editSession = nil
+        if let handoff { savedEditHandoff = handoff }
     }
 
-    func saveCurrentEditParameters() {
-        guard let photo = selectedDetailPhoto else { return }
-
-        if editParameters.isDefault {
-            if editingRAW {
-                clearRAWSidecarEdits(for: photo)
-            } else {
-                photo.jpgEditParametersData = nil
-            }
-        } else {
-            if editingRAW, let rawPath = photo.rawPath {
-                metadata.writeEditParameters(editParameters, forRAWAt: rawPath)
-                photo.hasRawEdits = true
-            } else {
-                photo.jpgEditParameters = editParameters
-            }
-        }
-
-        try? modelContext?.save()
-    }
-
-    /// Reset all sliders to zero without saving to disk yet.
-    func resetAllParameters() {
-        editParameters = EditParameters()
-        updateEditPreview()
-    }
-
-    func revertEdits() {
-        editParameters = EditParameters()
-        if let photo = selectedDetailPhoto {
-            if editingRAW {
-                clearRAWSidecarEdits(for: photo)
-            } else {
-                photo.jpgEditParametersData = nil
-            }
-            try? modelContext?.save()
-        }
-        updateEditPreview()
-    }
-
-    /// When editing RAW, copy the paired JPG's saved edit parameters.
-    func copyJPGSettingsToRAW() {
-        guard editingRAW, let photo = selectedDetailPhoto else { return }
-        if let jpgParams = photo.jpgEditParameters {
-            editParameters = jpgParams
-        }
-        updateEditPreview()
-    }
-
-    /// Whether "Copy from JPG" is available (editing RAW + paired JPG has saved edits).
-    var canCopyFromJPG: Bool {
-        editingRAW && selectedDetailPhoto?.jpgEditParameters != nil
-    }
-
-    func updateEditPreview() {
-        guard isEditing, let photo = selectedDetailPhoto else { return }
-
-        previewTask?.cancel()
-        fullResRenderTask?.cancel()
-        fullResEditImage = nil
-        renderGeneration += 1
-        let generation = renderGeneration
-        let params = editParameters
-        let isRAW = editingRAW
-        let path = isRAW ? photo.rawPath : photo.jpgPath
-        guard let path else { return }
-
-        let url = URL(fileURLWithPath: path)
-        let maxSize = CGSize(width: 1600, height: 1100)
-
-        previewTask = Task {
-            try? await Task.sleep(for: .milliseconds(30))
-            guard !Task.isCancelled, renderGeneration == generation else { return }
-
-            let result: NSImage?
-            if isRAW {
-                result = await ImageEditingService.shared.processRAW(url: url, parameters: params, maxSize: maxSize, lane: .preview)
-            } else {
-                result = await ImageEditingService.shared.processStandard(url: url, parameters: params, maxSize: maxSize, lane: .preview)
-            }
-
-            if renderGeneration == generation {
-                editedPreviewImage = result
-                renderFullResEdit(url: url, params: params, isRAW: isRAW, generation: generation)
-            }
-        }
-    }
-
-    private func renderFullResEdit(url: URL, params: EditParameters, isRAW: Bool, generation: Int) {
-        fullResRenderTask?.cancel()
-        fullResRenderTask = Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled, renderGeneration == generation else { return }
-
-            let result: NSImage?
-            if isRAW {
-                result = await ImageEditingService.shared.processRAW(url: url, parameters: params, lane: .full)
-            } else {
-                result = await ImageEditingService.shared.processStandard(url: url, parameters: params, lane: .full)
-            }
-
-            if renderGeneration == generation {
-                fullResEditImage = result
-            }
-        }
-    }
-
-    // MARK: - JPG Comparison
-
-    func toggleJPGComparison() {
-        showJPGComparison.toggle()
-        if showJPGComparison {
-            showSideBySide = false
-            loadJPGComparisonImage()
-        } else {
-            jpgComparisonImage = nil
-        }
-    }
-
-    func loadJPGComparisonImage() {
-        guard let photo = selectedDetailPhoto, let jpgPath = photo.jpgPath else { return }
-
-        Task {
-            if let params = photo.jpgEditParameters, !params.isDefault {
-                let url = URL(fileURLWithPath: jpgPath)
-                jpgComparisonImage = await ImageEditingService.shared.processStandard(url: url, parameters: params)
-            } else {
-                jpgComparisonImage = await ImageLoader.shared.loadFullResolution(for: jpgPath)
-            }
-        }
-    }
-
-    // MARK: - Crop
-
-    func enterCropMode() {
-        isCropping = true
-        cropRect = editParameters.cropRect ?? .full
-    }
-
-    func applyCrop() {
-        editParameters.cropRect = cropRect.isApproximatelyFull ? nil : cropRect
-        isCropping = false
-    }
-
-    func cancelCrop() {
-        cropRect = editParameters.cropRect ?? .full
-        isCropping = false
+    /// After navigating while editing: edit the new photo too, if it has a file of the kind being edited.
+    private func continueEditing(_ photo: PhotoAsset, isRAW: Bool) {
+        guard (isRAW ? photo.rawPath : photo.jpgPath) != nil else { return }
+        startEditing(photo: photo, isRAW: isRAW)
     }
 
     // MARK: - Export
 
+    /// Exports the session's RAW edit to a JPEG (see `EditSession.exportRAWToJPG`), then refreshes what depends
+    /// on the file: the in-memory library facts when the photo got a new JPG, and cached decodes of the written file.
     func exportRAWToJPG(replaceExisting: Bool) {
-        guard let photo = selectedDetailPhoto, let rawPath = photo.rawPath else { return }
-
-        let rawURL = URL(fileURLWithPath: rawPath)
-        let params = editParameters
-
-        let outputURL: URL
-        if replaceExisting, let jpgPath = photo.jpgPath {
-            outputURL = URL(fileURLWithPath: jpgPath)
-        } else {
-            let dir = rawURL.deletingLastPathComponent()
-            let stem = rawURL.deletingPathExtension().lastPathComponent
-            outputURL = dir.appendingPathComponent("\(stem)-raw-edit.jpg")
-        }
-
+        guard let session = editSession else { return }
+        let photo = session.photo
+        let jpgBefore = photo.jpgPath
         Task {
-            let success = await ImageEditingService.shared.exportRAWToJPEG(
-                rawURL: rawURL, parameters: params, outputURL: outputURL
-            )
-            if success {
-                // Update the photo's jpgPath if a new file was created
-                if !replaceExisting || photo.jpgPath == nil {
-                    photo.jpgPath = outputURL.path
-                }
-                try? modelContext?.save()
+            guard await session.exportRAWToJPG(replaceExisting: replaceExisting) else { return }
+            if photo.jpgPath != jpgBefore {
+                photosDidChange([photo])
+            }
+            if let written = photo.jpgPath {
+                fileWasRewritten(written)
             }
         }
     }
 
+    /// Bakes the session's edits into the JPG file (see `EditSession.exportJPGPermanent`).
     func exportJPGPermanent() {
-        guard let photo = selectedDetailPhoto, let jpgPath = photo.jpgPath else { return }
-
-        let url = URL(fileURLWithPath: jpgPath)
-        let params = editParameters
-
+        guard let session = editSession, let jpgPath = session.photo.jpgPath else { return }
         Task {
-            let success = await ImageEditingService.shared.exportStandardToJPEG(
-                sourceURL: url, parameters: params, outputURL: url
-            )
-            if success {
-                // Clear saved edit parameters since they're baked in
-                photo.jpgEditParametersData = nil
-                editParameters = EditParameters()
-                try? modelContext?.save()
-                editedPreviewImage = nil
-                fullResEditImage = nil
-            }
+            guard await session.exportJPGPermanent() else { return }
+            fileWasRewritten(jpgPath)
         }
+    }
+
+    /// An export rewrote `path`: drop its cached thumbnails and have the detail view decode it again.
+    private func fileWasRewritten(_ path: String) {
+        ImageLoader.shared.invalidate(path: path)
+        editedFilesVersion += 1
     }
 
     // MARK: - Presets
@@ -1587,12 +1374,13 @@ final class PhotoLibraryViewModel {
         editPresets = (try? context.fetch(descriptor)) ?? []
     }
 
+    /// Saves the session's current parameters (defaults when not editing) as a preset named `presetNameInput`.
     func savePreset() {
         guard let context = modelContext else { return }
         let name = presetNameInput.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
 
-        let preset = EditPreset(name: name, parameters: editParameters)
+        let preset = EditPreset(name: name, parameters: editSession?.parameters ?? EditParameters())
         context.insert(preset)
         try? context.save()
         presetNameInput = ""
@@ -1606,10 +1394,11 @@ final class PhotoLibraryViewModel {
     }
 
     func applyPreset(_ preset: EditPreset) {
-        editParameters = preset.parameters
-        updateEditPreview()
+        editSession?.apply(preset)
     }
 
+    /// Saves `preset` as the edits of every selected photo: JPG edits in the model, RAW edits in the sidecar
+    /// (through `MetadataWriter`).
     func applyPresetToSelection(_ preset: EditPreset) {
         let params = preset.parameters
 
@@ -1618,7 +1407,7 @@ final class PhotoLibraryViewModel {
                 photo.jpgEditParameters = params
             }
             if let rawPath = photo.rawPath {
-                metadata.writeEditParameters(params, forRAWAt: rawPath)
+                RAWEditStore.shared.save(params, forRAWAt: rawPath)
                 photo.hasRawEdits = true
             }
         }

@@ -3,6 +3,9 @@ import SwiftUI
 // MARK: - Edit Sidebar
 
 struct EditSidebarView: View {
+    /// The edit: parameters, comparison, crop and export state.
+    @Bindable var session: EditSession
+    /// Presets, which outlive a session.
     @Bindable var viewModel: PhotoLibraryViewModel
 
     var body: some View {
@@ -19,7 +22,7 @@ struct EditSidebarView: View {
                     sectionDivider
                     effectsSection
 
-                    if viewModel.editingRAW {
+                    if session.isRAW {
                         sectionDivider
                         rawSection
                     }
@@ -42,13 +45,13 @@ struct EditSidebarView: View {
     private var editToolbar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 12) {
-                Text(viewModel.editingRAW ? "RAW Edit" : "JPG Edit")
+                Text(session.isRAW ? "RAW Edit" : "JPG Edit")
                     .font(.headline)
-                    .foregroundStyle(viewModel.editingRAW ? .blue : .orange)
+                    .foregroundStyle(session.isRAW ? .blue : .orange)
 
                 Spacer()
 
-                Button(action: { viewModel.enterCropMode() }) {
+                Button(action: { session.enterCropMode() }) {
                     Image(systemName: "crop")
                         .font(.body)
                 }
@@ -56,30 +59,27 @@ struct EditSidebarView: View {
                 .help("Crop & Rotate")
 
                 Button(action: {
-                    viewModel.showSideBySide.toggle()
-                    if viewModel.showSideBySide {
-                        viewModel.showJPGComparison = false
-                        viewModel.jpgComparisonImage = nil
-                    }
+                    // Turning it on turns the JPG comparison off.
+                    session.showSideBySide.toggle()
                 }) {
-                    Image(systemName: viewModel.showSideBySide ? "square.split.2x1.fill" : "square.split.2x1")
+                    Image(systemName: session.showSideBySide ? "square.split.2x1.fill" : "square.split.2x1")
                         .font(.body)
                 }
                 .buttonStyle(.plain)
                 .help("Side-by-side comparison")
 
-                if viewModel.editingRAW && viewModel.selectedDetailPhoto?.hasRawPair == true {
-                    Button(action: { viewModel.toggleJPGComparison() }) {
-                        Image(systemName: viewModel.showJPGComparison ? "photo.on.rectangle.fill" : "photo.on.rectangle")
+                if session.isRAW && session.photo.hasRawPair {
+                    Button(action: { session.toggleJPGComparison() }) {
+                        Image(systemName: session.showJPGComparison ? "photo.on.rectangle.fill" : "photo.on.rectangle")
                             .font(.body)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(viewModel.showJPGComparison ? .blue : .primary)
+                    .foregroundStyle(session.showJPGComparison ? .blue : .primary)
                     .help("Compare with JPG")
                 }
 
-                if viewModel.canExport {
-                    Button(action: { viewModel.showExportOptions = true }) {
+                if session.canExport {
+                    Button(action: { session.showExportOptions = true }) {
                         Image(systemName: "square.and.arrow.up")
                             .font(.body)
                     }
@@ -90,23 +90,23 @@ struct EditSidebarView: View {
 
             HStack(spacing: 8) {
                 Button("Reset All") {
-                    viewModel.resetAllParameters()
+                    session.resetAllParameters()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("Reset all sliders to zero")
 
                 Button("Revert") {
-                    viewModel.revertEdits()
+                    session.revert()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(.red)
                 .help("Revert and clear saved edits")
 
-                if viewModel.canCopyFromJPG {
+                if session.canCopyFromJPG {
                     Button("JPG Settings") {
-                        viewModel.copyJPGSettingsToRAW()
+                        session.copyJPGSettings()
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -125,53 +125,53 @@ struct EditSidebarView: View {
 
     private var lightSection: some View {
         EditSection(title: "Light") {
-            EditSlider(label: "Exposure", value: $viewModel.editParameters.exposure,
+            EditSlider(label: "Exposure", value: $session.parameters.exposure,
                        range: -5...5, format: "%.1f")
-            EditSlider(label: "Highlights", value: $viewModel.editParameters.highlights)
-            EditSlider(label: "Shadows", value: $viewModel.editParameters.shadows)
-            EditSlider(label: "Brightness", value: $viewModel.editParameters.brightness)
-            EditSlider(label: "Contrast", value: $viewModel.editParameters.contrast)
+            EditSlider(label: "Highlights", value: $session.parameters.highlights)
+            EditSlider(label: "Shadows", value: $session.parameters.shadows)
+            EditSlider(label: "Brightness", value: $session.parameters.brightness)
+            EditSlider(label: "Contrast", value: $session.parameters.contrast)
         }
     }
 
     private var colorSection: some View {
         EditSection(title: "Color") {
-            EditSlider(label: "Temperature", value: $viewModel.editParameters.temperature)
-            EditSlider(label: "Tint", value: $viewModel.editParameters.tint)
-            EditSlider(label: "Saturation", value: $viewModel.editParameters.saturation)
-            EditSlider(label: "Vibrance", value: $viewModel.editParameters.vibrance)
+            EditSlider(label: "Temperature", value: $session.parameters.temperature)
+            EditSlider(label: "Tint", value: $session.parameters.tint)
+            EditSlider(label: "Saturation", value: $session.parameters.saturation)
+            EditSlider(label: "Vibrance", value: $session.parameters.vibrance)
         }
     }
 
     private var detailSection: some View {
         EditSection(title: "Detail") {
-            EditSlider(label: "Sharpness", value: $viewModel.editParameters.sharpness,
+            EditSlider(label: "Sharpness", value: $session.parameters.sharpness,
                        range: 0...100)
-            EditSlider(label: "Noise Reduction", value: $viewModel.editParameters.noiseReduction,
+            EditSlider(label: "Noise Reduction", value: $session.parameters.noiseReduction,
                        range: 0...100)
-            EditSlider(label: "Color NR", value: $viewModel.editParameters.colorNoiseReduction,
+            EditSlider(label: "Color NR", value: $session.parameters.colorNoiseReduction,
                        range: 0...100)
         }
     }
 
     private var effectsSection: some View {
         EditSection(title: "Effects") {
-            EditSlider(label: "Clarity", value: $viewModel.editParameters.clarity)
-            EditSlider(label: "Vignette", value: $viewModel.editParameters.vignetteAmount)
+            EditSlider(label: "Clarity", value: $session.parameters.clarity)
+            EditSlider(label: "Vignette", value: $session.parameters.vignetteAmount)
         }
     }
 
     private var rawSection: some View {
         EditSection(title: "RAW") {
-            EditSlider(label: "Local Tone Map", value: $viewModel.editParameters.localToneMap,
+            EditSlider(label: "Local Tone Map", value: $session.parameters.localToneMap,
                        range: 0...100)
-            EditSlider(label: "Moiré Reduction", value: $viewModel.editParameters.moireReduction,
+            EditSlider(label: "Moiré Reduction", value: $session.parameters.moireReduction,
                        range: 0...100)
-            Toggle("Lens Correction", isOn: $viewModel.editParameters.enableLensCorrection)
+            Toggle("Lens Correction", isOn: $session.parameters.enableLensCorrection)
                 .font(.caption)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-            Toggle("Gamut Mapping", isOn: $viewModel.editParameters.enableGamutMapping)
+            Toggle("Gamut Mapping", isOn: $session.parameters.enableGamutMapping)
                 .font(.caption)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
@@ -180,31 +180,31 @@ struct EditSidebarView: View {
 
     private var transformSection: some View {
         EditSection(title: "Transform") {
-            EditSlider(label: "Rotation", value: $viewModel.editParameters.rotation,
+            EditSlider(label: "Rotation", value: $session.parameters.rotation,
                        range: -45...45, format: "%.1f°")
 
             HStack(spacing: 12) {
-                Button(action: { viewModel.editParameters.flipHorizontal.toggle() }) {
+                Button(action: { session.parameters.flipHorizontal.toggle() }) {
                     Label("Flip H", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .tint(viewModel.editParameters.flipHorizontal ? .accentColor : nil)
+                .tint(session.parameters.flipHorizontal ? .accentColor : nil)
 
-                Button(action: { viewModel.editParameters.flipVertical.toggle() }) {
+                Button(action: { session.parameters.flipVertical.toggle() }) {
                     Label("Flip V", systemImage: "arrow.up.and.down.righttriangle.up.righttriangle.down")
                         .font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .tint(viewModel.editParameters.flipVertical ? .accentColor : nil)
+                .tint(session.parameters.flipVertical ? .accentColor : nil)
 
                 Spacer()
 
-                if !viewModel.editParameters.isDefault {
+                if !session.parameters.isDefault {
                     Button("Reset Transform") {
-                        viewModel.editParameters.resetTransform()
+                        session.parameters.resetTransform()
                     }
                     .font(.caption)
                     .controlSize(.small)

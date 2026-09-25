@@ -184,7 +184,7 @@ final class DetailViewTests: XCTestCase {
     func testSavedJPGEditSkipsRAWRender() async {
         let jpgImage = NSImage(size: NSSize(width: 4, height: 4))
         var rawRendered = false
-        let shown = await PhotoDetailView.renderSavedEdit(
+        let shown = await SavedEdit.render(
             jpg: { jpgImage },
             raw: { rawRendered = true; return NSImage(size: NSSize(width: 8, height: 8)) })
         XCTAssertTrue(shown === jpgImage)
@@ -194,21 +194,137 @@ final class DetailViewTests: XCTestCase {
     @MainActor
     func testSavedRAWEditRendersWithoutJPGEdit() async {
         let rawImage = NSImage(size: NSSize(width: 8, height: 8))
-        let shown = await PhotoDetailView.renderSavedEdit(jpg: nil, raw: { rawImage })
+        let shown = await SavedEdit.render(jpg: nil, raw: { rawImage })
         XCTAssertTrue(shown === rawImage)
     }
 
     @MainActor
     func testSavedRAWEditRendersWhenJPGRenderFails() async {
         let rawImage = NSImage(size: NSSize(width: 8, height: 8))
-        let shown = await PhotoDetailView.renderSavedEdit(jpg: { nil }, raw: { rawImage })
+        let shown = await SavedEdit.render(jpg: { nil }, raw: { rawImage })
         XCTAssertTrue(shown === rawImage)
     }
 
     @MainActor
     func testNoSavedEditsRenderNothing() async {
-        let shown = await PhotoDetailView.renderSavedEdit(jpg: nil, raw: nil)
+        let shown: NSImage? = await SavedEdit.render(jpg: nil, raw: nil)
         XCTAssertNil(shown)
+    }
+
+    // MARK: - After a save, the detail view shows the saved edit (task 22)
+
+    /// Bug (found in the wave-1 app check): after saving an edit (Escape, or the edit button), the detail view
+    /// showed the unedited photo until you navigated away and back. Here the full-resolution pass has finished
+    /// before the save, so the saved edit is shown straight from the session's render, without rendering again.
+    @MainActor
+    func testDetailViewShowsSavedEditAfterSaving() throws {
+        let setup = try SavedEditHost()
+        defer { setup.close() }
+        let original = try XCTUnwrap(setup.waitForPhoto())
+
+        let session = try setup.editBrightly()
+        XCTAssertNotNil(spin(until: { session.fullImage }), "the full-resolution pass finishes")
+        let edited = try XCTUnwrap(spin(until: { setup.centreLuma() > original + 50 ? setup.centreLuma() : nil }))
+
+        let rendersBeforeSave = ImageEditingService.shared.renderCount
+        setup.viewModel.stopEditing(save: true)
+        let darkest = setup.darkestLuma(over: 1)
+        XCTAssertGreaterThan(darkest, original + 50,
+                             "after saving, the detail view shows the saved edit (luma \(edited)), not the unedited image (luma \(original)); darkest seen \(darkest)")
+        XCTAssertEqual(ImageEditingService.shared.renderCount, rendersBeforeSave,
+                       "the session's full-resolution render is reused, not rendered again")
+        XCTAssertNotNil(setup.photo.jpgEditParameters, "the edit was saved")
+    }
+
+    /// Same, but the save comes right after the first preview, before the 300 ms full pass: the preview stands in
+    /// until the saved edit has been rendered at full resolution.
+    @MainActor
+    func testDetailViewShowsSavedEditWhenSavedBeforeTheFullPass() throws {
+        let setup = try SavedEditHost()
+        defer { setup.close() }
+        let original = try XCTUnwrap(setup.waitForPhoto())
+
+        let session = try setup.editBrightly()
+        XCTAssertNotNil(spin(until: { session.previewImage }))
+        // The preview is on screen (drawn on a later run-loop pass than the one that set it).
+        XCTAssertNotNil(spin(seconds: 0.25, until: { setup.centreLuma() > original + 50 ? true : nil }))
+        XCTAssertNil(session.fullImage, "saving before the full-resolution pass")
+        setup.viewModel.stopEditing(save: true)
+
+        let darkest = setup.darkestLuma(over: 1)
+        XCTAssertGreaterThan(darkest, original + 50, "the unedited photo (luma \(original)) must not show; darkest \(darkest)")
+    }
+
+    // MARK: - What shows between the save and the saved edit's render
+
+    private func handoff(isRAW: Bool, exposure: Double, image: NSImage?, full: Bool = true) -> SavedEditHandoff {
+        var params = EditParameters()
+        params.exposure = exposure
+        return SavedEditHandoff(photoID: UUID(), saved: SavedEditKey(isRAW: isRAW, parameters: params), image: image,
+                                imageParameters: params, isFullResolution: full)
+    }
+
+    private func params(exposure: Double) -> EditParameters {
+        var params = EditParameters()
+        params.exposure = exposure
+        return params
+    }
+
+    func testInterimShowsTheSessionWhenItsEditWins() {
+        let sessionImage = NSImage(size: NSSize(width: 2, height: 2))
+        // A JPG session with edits: the JPG edit wins.
+        XCTAssertTrue(SavedEdit.interimImage(after: handoff(isRAW: false, exposure: 1, image: sessionImage),
+                                             jpgParameters: params(exposure: 1), current: nil) === sessionImage)
+        // A RAW session, no JPG edit: the RAW edit wins.
+        XCTAssertTrue(SavedEdit.interimImage(after: handoff(isRAW: true, exposure: 1, image: sessionImage),
+                                             jpgParameters: nil, current: nil) === sessionImage)
+    }
+
+    func testInterimKeepsTheJPGEditOverASavedRAWEdit() {
+        let sessionImage = NSImage(size: NSSize(width: 2, height: 2))
+        let jpgRender = SavedEditRender(key: SavedEditKey(isRAW: false, parameters: params(exposure: 2)),
+                                        image: NSImage(size: NSSize(width: 3, height: 3)))
+        let shown = SavedEdit.interimImage(after: handoff(isRAW: true, exposure: 1, image: sessionImage),
+                                           jpgParameters: params(exposure: 2), current: jpgRender)
+        XCTAssertTrue(shown === jpgRender.image, "a JPG edit wins over a RAW one, as when the photo is reopened")
+    }
+
+    func testInterimAfterClearingEdits() {
+        let rawRender = SavedEditRender(key: SavedEditKey(isRAW: true, parameters: params(exposure: 2)),
+                                        image: NSImage(size: NSSize(width: 3, height: 3)))
+        // Clearing the JPG edit uncovers the RAW edit already known.
+        XCTAssertTrue(SavedEdit.interimImage(after: handoff(isRAW: false, exposure: 0, image: nil),
+                                             jpgParameters: nil, current: rawRender) === rawRender.image)
+        // Clearing the RAW edit, with no JPG edit: nothing to show but the photo.
+        XCTAssertNil(SavedEdit.interimImage(after: handoff(isRAW: true, exposure: 0, image: nil),
+                                            jpgParameters: nil, current: rawRender))
+        // Clearing the JPG edit when the RAW edit isn't known yet: the photo until it has been read.
+        XCTAssertNil(SavedEdit.interimImage(after: handoff(isRAW: false, exposure: 0, image: nil),
+                                            jpgParameters: nil, current: nil))
+    }
+
+    func testInterimKeepsTheRenderOnScreenWhenTheSessionSavedItUnchanged() {
+        // A RAW session started and stopped before its first render: no session image, same edit as on screen.
+        let rawRender = SavedEditRender(key: SavedEditKey(isRAW: true, parameters: params(exposure: 1)),
+                                        image: NSImage(size: NSSize(width: 3, height: 3)))
+        XCTAssertTrue(SavedEdit.interimImage(after: handoff(isRAW: true, exposure: 1, image: nil, full: false),
+                                             jpgParameters: nil, current: rawRender) === rawRender.image)
+        // Changed in the session: the session's render, not the stale one on screen.
+        let sessionImage = NSImage(size: NSSize(width: 2, height: 2))
+        XCTAssertTrue(SavedEdit.interimImage(after: handoff(isRAW: true, exposure: 2, image: sessionImage),
+                                             jpgParameters: nil, current: rawRender) === sessionImage)
+    }
+
+    func testHandoffReusesOnlyAFinishedFullResolutionRenderOfTheSavedEdit() {
+        let image = NSImage(size: NSSize(width: 2, height: 2))
+        let key = SavedEditKey(isRAW: false, parameters: params(exposure: 1))
+        XCTAssertTrue(handoff(isRAW: false, exposure: 1, image: image).fullResolutionImage(for: key) === image)
+        XCTAssertNil(handoff(isRAW: false, exposure: 1, image: image, full: false).fullResolutionImage(for: key),
+                     "a preview is too small to keep")
+        XCTAssertNil(handoff(isRAW: true, exposure: 1, image: image).fullResolutionImage(for: key), "another kind")
+        let lagging = SavedEditHandoff(photoID: UUID(), saved: key, image: image,
+                                       imageParameters: params(exposure: 0.5), isFullResolution: true)
+        XCTAssertNil(lagging.fullResolutionImage(for: key), "the render shows an earlier slider value")
     }
 
     /// The monitor compares `NSEvent.locationInWindow`, flipped with the window's height, against a SwiftUI
@@ -283,6 +399,98 @@ private struct DetailHost: View {
             PhotoDetailView(viewModel: viewModel, photo: photo)
         }
     }
+}
+
+/// A mid-grey 300×200 JPG in a temp folder, shown by `PhotoDetailView` in a 400×300 window. The luma of the pixel at
+/// the window's centre tells what the detail view draws: the photo, or an edit of it.
+@MainActor
+private final class SavedEditHost {
+    let dir: URL
+    let viewModel = PhotoLibraryViewModel()
+    let photo: PhotoAsset
+    private let container: ModelContainer
+    private let window: NSWindow
+    private let hosting: NSView
+
+    init() throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("PhocasaSavedEditTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("grey.jpg")
+        let ctx = try XCTUnwrap(CGContext(data: nil, width: 300, height: 200, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.setFillColor(CGColor(srgbRed: 0.35, green: 0.35, blue: 0.35, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 300, height: 200))
+        try writeJPEG(XCTUnwrap(ctx.makeImage()), to: url)
+
+        container = try ModelContainer(for: PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self,
+                                       configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+        photo = PhotoAsset(fileName: "grey.jpg", jpgPath: url.path, folderPath: dir.path, creationDate: Date())
+        context.insert(photo)
+        try context.save()
+        viewModel.setModelContext(context)
+        viewModel.openDetail(for: photo)
+
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        hosting = NSHostingView(rootView: DetailHost(viewModel: viewModel))
+        window.contentView = hosting
+    }
+
+    func close() {
+        viewModel.stopEditing(save: false)
+        window.close()
+        FullImageLoader.shared.clear()
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Waits for the photo to be on screen and its fade-in to finish; returns its luma.
+    func waitForPhoto() -> Int? {
+        guard spinRunLoop(until: { centreLuma() > 40 ? true : nil }) != nil else { return nil }
+        _ = spinRunLoop(seconds: 0.4, until: { nil as Bool? })
+        return centreLuma()
+    }
+
+    /// Starts a JPG edit with exposure +2 (much brighter than the photo).
+    func editBrightly() throws -> EditSession {
+        viewModel.startEditing(photo: photo, isRAW: false)
+        let session = try XCTUnwrap(viewModel.editSession)
+        session.parameters.exposure = 2
+        return session
+    }
+
+    /// The darkest centre luma seen while running the run loop for `seconds`.
+    func darkestLuma(over seconds: TimeInterval) -> Int {
+        var darkest = 255
+        _ = spinRunLoop(seconds: seconds, until: { darkest = min(darkest, centreLuma()); return nil as Bool? })
+        return darkest
+    }
+
+    /// Luma of the pixel at the centre of what the window draws, rendered from its layer tree.
+    func centreLuma() -> Int {
+        let w = Int(hosting.bounds.width), h = Int(hosting.bounds.height)
+        guard w > 0, h > 0, let layer = hosting.layer,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = ctx.data else { return 0 }
+        layer.render(in: ctx)
+        let p = data.assumingMemoryBound(to: UInt8.self) + ((h / 2) * w + w / 2) * 4
+        return (Int(p[0]) * 299 + Int(p[1]) * 587 + Int(p[2]) * 114) / 1000
+    }
+}
+
+/// Runs the main run loop (SwiftUI layout, main-actor tasks) until `body` returns non-nil or time runs out.
+@MainActor
+private func spinRunLoop<T>(seconds: TimeInterval = 5, until body: () -> T?) -> T? {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if let value = body() { return value }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    return body()
 }
 
 extension DetailViewTests {

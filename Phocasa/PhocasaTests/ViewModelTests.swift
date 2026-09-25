@@ -426,69 +426,6 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.selectedDetailPhoto)
     }
 
-    // MARK: - Crop
-
-    func testApplyCropFull() {
-        viewModel.cropRect = .full
-        viewModel.editParameters.cropRect = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
-        viewModel.isCropping = true
-
-        viewModel.applyCrop()
-
-        XCTAssertNil(viewModel.editParameters.cropRect, "Full crop rect should be cleared to nil")
-        XCTAssertFalse(viewModel.isCropping)
-    }
-
-    func testApplyCropApproximatelyFull() {
-        viewModel.cropRect = NormalizedRect(x: 0.0001, y: -0.0001, width: 0.9999, height: 1.0001)
-        viewModel.isCropping = true
-
-        viewModel.applyCrop()
-
-        XCTAssertNil(viewModel.editParameters.cropRect, "Approximately full crop should be cleared to nil")
-    }
-
-    func testApplyCropPartial() {
-        let crop = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
-        viewModel.cropRect = crop
-        viewModel.isCropping = true
-
-        viewModel.applyCrop()
-
-        XCTAssertEqual(viewModel.editParameters.cropRect, crop)
-        XCTAssertFalse(viewModel.isCropping)
-    }
-
-    func testEnterCropMode() {
-        viewModel.editParameters.cropRect = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
-
-        viewModel.enterCropMode()
-
-        XCTAssertTrue(viewModel.isCropping)
-        XCTAssertEqual(viewModel.cropRect.x, 0.1)
-    }
-
-    func testEnterCropModeNoCrop() {
-        viewModel.editParameters.cropRect = nil
-
-        viewModel.enterCropMode()
-
-        XCTAssertTrue(viewModel.isCropping)
-        XCTAssertEqual(viewModel.cropRect, .full)
-    }
-
-    func testCancelCrop() {
-        let existing = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
-        viewModel.editParameters.cropRect = existing
-        viewModel.isCropping = true
-        viewModel.cropRect = NormalizedRect(x: 0.5, y: 0.5, width: 0.3, height: 0.3)
-
-        viewModel.cancelCrop()
-
-        XCTAssertEqual(viewModel.cropRect, existing)
-        XCTAssertFalse(viewModel.isCropping)
-    }
-
     // MARK: - Zoom
 
     func testZoomIn() {
@@ -667,53 +604,6 @@ final class ViewModelTests: XCTestCase {
         viewModel.searchText = ""
         viewModel.applyCurrentFilter()
         XCTAssertEqual(viewModel.photos.count, 2)
-    }
-
-    // MARK: - Presets
-
-    func testSaveAndLoadPreset() {
-        viewModel.editParameters.exposure = 2.0
-        viewModel.editParameters.contrast = 30
-        viewModel.presetNameInput = "My Preset"
-
-        viewModel.savePreset()
-
-        XCTAssertEqual(viewModel.editPresets.count, 1)
-        XCTAssertEqual(viewModel.editPresets.first?.name, "My Preset")
-        XCTAssertEqual(viewModel.editPresets.first?.parameters.exposure, 2.0)
-        XCTAssertTrue(viewModel.presetNameInput.isEmpty)
-    }
-
-    func testSavePresetEmptyNameIgnored() {
-        viewModel.presetNameInput = "   "
-
-        viewModel.savePreset()
-
-        XCTAssertTrue(viewModel.editPresets.isEmpty)
-    }
-
-    func testDeletePreset() {
-        viewModel.editParameters.exposure = 1.0
-        viewModel.presetNameInput = "Test"
-        viewModel.savePreset()
-        XCTAssertEqual(viewModel.editPresets.count, 1)
-
-        viewModel.deletePreset(viewModel.editPresets.first!)
-
-        XCTAssertTrue(viewModel.editPresets.isEmpty)
-    }
-
-    func testApplyPreset() {
-        viewModel.editParameters.exposure = 1.0
-        viewModel.presetNameInput = "Warm"
-        viewModel.savePreset()
-
-        viewModel.editParameters = EditParameters()
-        XCTAssertEqual(viewModel.editParameters.exposure, 0)
-
-        viewModel.applyPreset(viewModel.editPresets.first!)
-
-        XCTAssertEqual(viewModel.editParameters.exposure, 1.0)
     }
 
     // MARK: - File Type Filter

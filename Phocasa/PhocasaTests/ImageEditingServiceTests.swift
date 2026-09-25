@@ -556,11 +556,12 @@ final class EditViewModelBenchmarks: XCTestCase {
     }
 }
 
-/// End to end through the view model: `startEditing`, then a slider tick (`editParameters.exposure` +
-/// `updateEditPreview()`), timed until `editedPreviewImage` changes, including the 30 ms debounce.
+/// End to end through the view model: `startEditing`, then a slider tick (setting `editSession.parameters.exposure`,
+/// which schedules the render), timed until `editSession.previewImage` changes, including the 30 ms debounce.
 /// - idle: nothing else is rendering;
 /// - during: the tick lands 5 ms after the 300 ms full-resolution pass starts;
-/// - draw: main-thread time of the first `CGContext.draw` of `fullResEditImage` into a 1600x1067 bitmap.
+/// - draw: main-thread time of the first `CGContext.draw` of `editSession.fullImage` into a 1600x1067 bitmap.
+/// (Before task 22 these were `editParameters` + `updateEditPreview()`, `editedPreviewImage` and `fullResEditImage`.)
 @MainActor
 enum EditViewModelBench {
     private static func ms(_ d: Duration) -> Double {
@@ -578,11 +579,11 @@ enum EditViewModelBench {
     /// One slider tick: returns its latency and when the new preview landed.
     private static func tick(_ vm: PhotoLibraryViewModel, exposure: Double) async throws
         -> (ms: Double, landed: ContinuousClock.Instant) {
-        let old = vm.editedPreviewImage
-        vm.editParameters.exposure = exposure
+        let session = try XCTUnwrap(vm.editSession)
+        let old = session.previewImage
         let start = ContinuousClock.now
-        vm.updateEditPreview()
-        try await waitUntil { vm.editedPreviewImage != nil && vm.editedPreviewImage !== old }
+        session.parameters.exposure = exposure   // schedules the render
+        try await waitUntil { session.previewImage != nil && session.previewImage !== old }
         let landed = ContinuousClock.now
         return (ms(landed - start), landed)
     }
@@ -603,14 +604,14 @@ enum EditViewModelBench {
         var idle: [Double] = [], during: [Double] = [], draw: [Double] = []
         for round in 0...rounds {   // round 0 is a warm-up
             vm.startEditing(photo: photo, isRAW: isRAW)
-            try await waitUntil { vm.fullResEditImage != nil }
+            try await waitUntil { vm.editSession?.fullImage != nil }
 
             let a = try await tick(vm, exposure: 0.30 + Double(round) * 0.01)
             try await Task.sleep(until: a.landed + .milliseconds(305), clock: .continuous)
             let b = try await tick(vm, exposure: 0.60 + Double(round) * 0.01)
 
-            try await waitUntil { vm.fullResEditImage != nil }
-            let cg = try XCTUnwrap(vm.fullResEditImage.flatMap(EditTestImages.cgImage))
+            try await waitUntil { vm.editSession?.fullImage != nil }
+            let cg = try XCTUnwrap(vm.editSession?.fullImage.flatMap(EditTestImages.cgImage))
             let ctx = try XCTUnwrap(CGContext(data: nil, width: 1600, height: 1067, bitsPerComponent: 8, bytesPerRow: 0,
                                               space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
             let drawStart = ContinuousClock.now
@@ -631,7 +632,7 @@ enum EditViewModelBench {
         }
         report("tick idle", idle)
         report("tick during full pass", during)
-        report("main-thread first draw of fullResEditImage", draw)
+        report("main-thread first draw of fullResEditImage", draw)   // label kept for comparisons with earlier runs
     }
 }
 
