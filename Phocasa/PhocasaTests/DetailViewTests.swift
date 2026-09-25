@@ -55,6 +55,40 @@ final class DetailViewTests: XCTestCase {
             windowHeight: windowHeight, viewportFrame: viewport), "no host window captured: never consume")
     }
 
+    // MARK: - Portrait photos in the detail image view (spec §D1)
+
+    /// A 60×40 bitmap tagged orientation 6 (`.right`) displays as 40×60. In a 120×120 viewport it must be fitted
+    /// by its oriented size (80×120, letterboxed left and right) and drawn upright.
+    @MainActor
+    func testZoomableImageViewFitsAndDrawsPortraitPhotoUpright() throws {
+        let stored = try makeQuadrantBitmap(width: 60, height: 40)
+        let display = DisplayImage(cgImage: stored, orientation: .right)
+        let renderer = ImageRenderer(content: ZoomableImageView(image: display, zoom: ZoomPanState())
+            .frame(width: 120, height: 120))
+        renderer.scale = 1
+        let rendered = try XCTUnwrap(renderer.cgImage)
+        let pixels = try readRGBA(rendered)
+
+        // Letterbox: nothing drawn left of x = 20 or right of x = 100.
+        XCTAssertEqual(pixels(5, 60).a, 0, "left of the fitted image")
+        XCTAssertEqual(pixels(114, 60).a, 0, "right of the fitted image")
+        // EXIF 6: stored row 0 is the displayed right edge, stored column 0 the displayed top edge. So the
+        // stored quadrants red TL, blue TR, green BL, white BR display as green TL, red TR, white BL, blue BR.
+        XCTAssertTrue(pixels(40, 30).isClose(to: RGBA(r: 0, g: 255, b: 0, a: 255)), "top-left: \(pixels(40, 30))")
+        XCTAssertTrue(pixels(80, 30).isClose(to: RGBA(r: 255, g: 0, b: 0, a: 255)), "top-right: \(pixels(80, 30))")
+        XCTAssertTrue(pixels(40, 90).isClose(to: RGBA(r: 255, g: 255, b: 255, a: 255)), "bottom-left: \(pixels(40, 90))")
+        XCTAssertTrue(pixels(80, 90).isClose(to: RGBA(r: 0, g: 0, b: 255, a: 255)), "bottom-right: \(pixels(80, 90))")
+    }
+
+    /// The crop overlay's `imageDisplayRect` comes from the oriented size.
+    func testCropDisplayRectUsesOrientedSize() throws {
+        let display = DisplayImage(cgImage: try makeQuadrantBitmap(width: 60, height: 40), orientation: .left)
+        let container = CGSize(width: 120, height: 120)
+        let fit = ZoomableImageView.fittedSize(imageSize: display.orientedSize, in: container)
+        XCTAssertEqual(fit, CGSize(width: 80, height: 120))
+        XCTAssertEqual(ZoomableImageView.displayRect(fitSize: fit, in: container), CGRect(x: 20, y: 0, width: 80, height: 120))
+    }
+
     // MARK: - Saved edit renders (spec §D4)
 
     @MainActor
@@ -149,6 +183,52 @@ final class DetailViewTests: XCTestCase {
             XCTAssertFalse(handles(CGPoint(x: truth.midX, y: truth.minY - 3)), "below it: " + context)
             window.close()
         }
+    }
+}
+
+// MARK: - Bitmap helpers
+
+private struct RGBA: CustomStringConvertible {
+    let r: Int, g: Int, b: Int, a: Int
+    func isClose(to o: RGBA, tolerance: Int = 8) -> Bool {
+        abs(r - o.r) <= tolerance && abs(g - o.g) <= tolerance && abs(b - o.b) <= tolerance && abs(a - o.a) <= tolerance
+    }
+    var description: String { "(\(r), \(g), \(b), \(a))" }
+}
+
+/// Red top-left, blue top-right, green bottom-left, white bottom-right (as stored).
+private func makeQuadrantBitmap(width w: Int, height h: Int) throws -> CGImage {
+    let ctx = try XCTUnwrap(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    // CGContext's origin is bottom-left.
+    let quadrants: [(CGRect, CGColor)] = [
+        (CGRect(x: 0, y: h / 2, width: w / 2, height: h / 2), CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)),
+        (CGRect(x: w / 2, y: h / 2, width: w / 2, height: h / 2), CGColor(srgbRed: 0, green: 0, blue: 1, alpha: 1)),
+        (CGRect(x: 0, y: 0, width: w / 2, height: h / 2), CGColor(srgbRed: 0, green: 1, blue: 0, alpha: 1)),
+        (CGRect(x: w / 2, y: 0, width: w / 2, height: h / 2), CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)),
+    ]
+    for (rect, colour) in quadrants {
+        ctx.setFillColor(colour)
+        ctx.fill(rect)
+    }
+    return try XCTUnwrap(ctx.makeImage())
+}
+
+/// Reads `image` through an sRGB RGBA8 bitmap; the returned function takes top-left-origin coordinates.
+private func readRGBA(_ image: CGImage) throws -> (Int, Int) -> RGBA {
+    let w = image.width, h = image.height, bytesPerRow = w * 4
+    var pixels = [UInt8](repeating: 0, count: bytesPerRow * h)
+    try pixels.withUnsafeMutableBytes { buffer in
+        let ctx = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                          bytesPerRow: bytesPerRow, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    }
+    let snapshot = pixels
+    return { x, y in
+        let i = y * bytesPerRow + x * 4
+        return RGBA(r: Int(snapshot[i]), g: Int(snapshot[i + 1]), b: Int(snapshot[i + 2]), a: Int(snapshot[i + 3]))
     }
 }
 
