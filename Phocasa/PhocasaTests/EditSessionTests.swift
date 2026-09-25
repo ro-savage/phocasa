@@ -767,6 +767,29 @@ final class EditSessionTests: XCTestCase {
         XCTAssertGreaterThan(after, before + 20, "the preview shows the baked +1.5 EV file (mean luma \(before) → \(after))")
     }
 
+    /// An export rewrites the photo's file, so the grid's cached thumbnail of it goes (the view model calls
+    /// `ImageLoader.invalidate(path:)`; task 22 wired it, task 30 checks it).
+    func testExportJPGPermanentInvalidatesTheCachedThumbnail() async throws {
+        let viewModel = makeViewModel()
+        let url = try makeJPEG(width: 300, height: 200, detail: false)
+        let photo = try insertPhoto(jpg: url)
+        viewModel.loadExistingData()
+        let thumbnail = await ImageLoader.shared.loadThumbnail(for: url.path, maxSize: 256)
+        XCTAssertNotNil(thumbnail)
+        XCTAssertNotNil(ImageLoader.shared.cachedThumbnail(for: url.path, maxSize: 256), "the grid's thumbnail is cached")
+        viewModel.openDetail(for: photo)
+        viewModel.startEditing(photo: photo, isRAW: false)
+        let session = try XCTUnwrap(viewModel.editSession)
+        session.parameters.exposure = 1
+        _ = await waitFor { session.previewImage }
+        let version = viewModel.editedFilesVersion
+
+        viewModel.exportJPGPermanent()
+
+        _ = try await eventually(5, "the export finishes") { viewModel.editedFilesVersion != version ? true : nil }
+        XCTAssertNil(ImageLoader.shared.cachedThumbnail(for: url.path, maxSize: 256), "the old thumbnail is gone")
+    }
+
     private func meanLuma(_ image: CGImage) -> Double {
         let pixels = EditTestImages.rgba8(image)
         var total = 0.0
