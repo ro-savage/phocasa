@@ -151,9 +151,11 @@ final class EditRenderSizeBenchmarks: XCTestCase {
     // MARK: - The pass after each slider pause, at fit
 
     /// Each round: a slider value, its preview, then the pass the session renders 300 ms after the preview landed.
-    /// "pass" is the time from that 300 ms mark until `fullImage` is set: the cost of each pause. Also the process
-    /// CPU time over the same span, the main-thread first draw of `fullImage` into 1600×1067 (as the coordinator's
-    /// harness), and the bytes `fullImage` holds.
+    /// "pass" is the time from the moment the render lane starts it (the service's render count goes up; nothing
+    /// else renders then) until `fullImage` is set: the cost of each pause, without the timer's slack. Also the
+    /// process CPU time over the same span, "pause to sharp" (preview landed → `fullImage` set, which includes the
+    /// 300 ms pause), the main-thread first draw of `fullImage` into 1600×1067 (as the coordinator's harness), and
+    /// the bytes `fullImage` holds.
     private func sliderPause(_ label: String, url: URL, isRAW: Bool, rounds: Int = 10) async throws {
         let photo = try insertPhoto(url, isRAW: isRAW)
         let viewport = Self.editingViewport
@@ -164,17 +166,21 @@ final class EditRenderSizeBenchmarks: XCTestCase {
         try await waitUntil { session.fullImage != nil }
 
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-        var pass: [Double] = [], cpu: [Double] = [], draw: [Double] = []
+        var pass: [Double] = [], cpu: [Double] = [], draw: [Double] = [], sharp: [Double] = []
         for i in 0...rounds {   // round 0 warms up
             let before = session.previewImage
             session.parameters = edit(10 + i)
             try await waitUntil { session.previewImage != nil && session.previewImage !== before }
-            let passStart = clock.now + EditSession.fullPassDelay
-            try await Task.sleep(until: passStart, clock: .continuous)
+            let previewLanded = clock.now
+            let rendersAtPreview = ImageEditingService.shared.renderCount
+            try await Task.sleep(until: previewLanded + EditSession.fullPassDelay - .milliseconds(5), clock: .continuous)
+            try await waitUntil { ImageEditingService.shared.renderCount > rendersAtPreview || session.fullImage != nil }
+            let passStart = clock.now
             let cpuStart = cpuMs()
             try await waitUntil { session.fullImage != nil }
             let passMs = ms(clock.now - passStart)
             let cpuUsed = cpuMs() - cpuStart
+            let sharpMs = ms(clock.now - previewLanded)
             let cg = try XCTUnwrap(session.fullImage.flatMap(EditTestImages.cgImage))
             let ctx = try XCTUnwrap(CGContext(data: nil, width: 1600, height: 1067, bitsPerComponent: 8, bytesPerRow: 0,
                                               space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
@@ -185,11 +191,13 @@ final class EditRenderSizeBenchmarks: XCTestCase {
                 pass.append(passMs)
                 cpu.append(cpuUsed)
                 draw.append(drawMs)
+                sharp.append(sharpMs)
             }
         }
         let size = "|viewport=\(Int(viewport.width))x\(Int(viewport.height))|full_px=\(pixels(session.fullImage))|full_MB=\(mb(bytes(session.fullImage)))"
         report("\(label) slider pause: pass", pass, extra: size)
         report("\(label) slider pause: process CPU during the pass", cpu)
+        report("\(label) slider pause: preview to sharp (incl. the 300 ms pause)", sharp)
         report("\(label) slider pause: main-thread first draw of fullImage", draw)
     }
 
@@ -277,22 +285,25 @@ final class EditRenderSizeBenchmarks: XCTestCase {
 
     // MARK: - Memory after a save
 
-    /// Edit at fit, pause, save. Reports what the hand-off holds and what the detail view holds once it has resolved
-    /// the saved edit (the same object when the session's render is reused).
+    /// Edit at fit beside the edit sidebar, pause, save. The sidebar then closes, so the detail view resolves the
+    /// saved edit for the wider viewport, as in the app. Reports what the hand-off holds (the view model keeps it
+    /// until the next navigation), what the detail view holds once it has resolved the saved edit (the same object
+    /// when the session's render is reused), and the renders that took.
     private func memoryAfterSave(_ label: String, url: URL, isRAW: Bool) async throws {
         let photo = try insertPhoto(url, isRAW: isRAW)
-        let viewport = Self.editingViewport
-        let session = makeSession(photo, isRAW: isRAW, viewport: viewport)
+        let session = makeSession(photo, isRAW: isRAW, viewport: Self.editingViewport)
         await session.begin()
         session.parameters = edit(3)
         try await waitUntil { session.fullImage != nil }
         let handoff = try XCTUnwrap(session.end(save: true))
         await MetadataWriter.shared.flush()
-        let resolved = await renderSavedEdit(photo, viewport: viewport, reusing: handoff)
+        let rendersBefore = ImageEditingService.shared.renderCount
+        let resolved = await renderSavedEdit(photo, viewport: Self.browsingViewport, reusing: handoff)
+        let renders = ImageEditingService.shared.renderCount - rendersBefore
         let reused = resolved?.image === handoff.image
         let heldBytes = bytes(handoff.image) + (reused ? 0 : bytes(resolved?.image))
         print("BENCH|editsize|\(label) memory after a save|handoff_px=\(pixels(handoff.image))|handoff_MB=\(mb(bytes(handoff.image)))"
-              + "|saved_edit_px=\(pixels(resolved?.image))|reused=\(reused)|held_MB=\(mb(heldBytes))")
+              + "|saved_edit_px=\(pixels(resolved?.image))|reused=\(reused)|renders_after_save=\(renders)|held_MB=\(mb(heldBytes))")
     }
 
     func testBenchMemoryAfterSave24MPJPEG() async throws {
