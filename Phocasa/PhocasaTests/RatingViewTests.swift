@@ -63,7 +63,11 @@ final class RatingViewTests: XCTestCase {
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
             context: nil, eventNumber: 0, clickCount: clickCount, pressure: type == .leftMouseDown ? 1 : 0
         )!
-        window.sendEvent(event)
+        // Through the app's event queue, so `NSApp.currentEvent` is the click (see `PhotoGridItemViewClickTests`).
+        NSApp.postEvent(event, atStart: false)
+        while let next = NSApp.nextEvent(matching: .any, until: Date(), inMode: .default, dequeue: true) {
+            NSApp.sendEvent(next)
+        }
     }
 
     private func click(clickCount: Int = 1) {
@@ -73,7 +77,7 @@ final class RatingViewTests: XCTestCase {
 
     private func doubleClick() {
         click()
-        spin(0.05)
+        spin(0.1)
         click(clickCount: 2)
     }
 
@@ -90,13 +94,20 @@ final class RatingViewTests: XCTestCase {
         host(rating: 0)
         doubleClick()
         spin(settle)
-        XCTAssertEqual(log.ratings.last, 3, "a double-click on ★3 gives 3, not 3 then cleared")
+        XCTAssertEqual(log.ratings, [3], "a double-click on ★3 gives 3, not 3 then cleared")
+    }
+
+    func testDoubleClickOnTheCurrentStarChangesNothing() {
+        host(rating: 3)
+        doubleClick()
+        spin(settle)
+        XCTAssertEqual(log.ratings, [])
     }
 
     func testClickOnTheCurrentStarClearsIt() {
         host(rating: 3)
         click()
-        spin(0.1)
+        spin(settle)
         XCTAssertEqual(log.ratings, [0])
     }
 }
