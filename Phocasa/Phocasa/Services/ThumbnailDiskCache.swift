@@ -70,14 +70,25 @@ final class ThumbnailDiskCache: @unchecked Sendable {
     }
 
     /// Default location: Caches/<bundle id>/Thumbnails/v1
-    static let defaultDirectory: URL = {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+    static let defaultDirectory: URL = defaultDirectory(in: userCachesDirectory)
+
+    /// The user's Caches folder.
+    static var userCachesDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Caches", isDirectory: true)
-        return caches
-            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.phocasa.app", isDirectory: true)
+    }
+
+    /// `<caches>/<bundle id>/Thumbnails/v1`.
+    static func defaultDirectory(in caches: URL, bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> URL {
+        directory(in: caches.appendingPathComponent(bundleIdentifier ?? "com.phocasa.app", isDirectory: true))
+    }
+
+    /// `<folder>/Thumbnails/v1`: this version of the cache inside `folder`.
+    static func directory(in folder: URL) -> URL {
+        folder
             .appendingPathComponent("Thumbnails", isDirectory: true)
             .appendingPathComponent("v1", isDirectory: true)
-    }()
+    }
 
     static let jpegQuality = 0.8
 

@@ -1061,19 +1061,27 @@ final class ThumbnailDiskCacheTests: XCTestCase {
 
     // MARK: - Where the shared loader caches
 
+    /// `LibraryLocation.resolve` is pure, so the folders it's given are never touched.
     func testDiskCacheDirectorySelection() {
         let override = "/private/tmp/phocasa-thumbs-test"
-        XCTAssertNil(ImageLoader.diskCacheDirectory(environment: ["XCTestConfigurationFilePath": "/x"]),
+        let appSupport = URL(fileURLWithPath: "/private/tmp/phocasa-test-app-support", isDirectory: true)
+        let caches = URL(fileURLWithPath: "/private/tmp/phocasa-test-caches", isDirectory: true)
+        func cacheDirectory(_ environment: [String: String]) -> URL? {
+            LibraryLocation.resolve(environment: environment, applicationSupport: appSupport, caches: caches)
+                .thumbnailCacheDirectory
+        }
+        XCTAssertNil(cacheDirectory(["XCTestConfigurationFilePath": "/x"]),
                      "the test host never uses a disk cache unless one is configured")
         XCTAssertEqual(
-            ImageLoader.diskCacheDirectory(environment: ["XCTestConfigurationFilePath": "/x",
-                                                         "PHOCASA_THUMBNAIL_CACHE_DIR": override])?.path,
+            cacheDirectory(["XCTestConfigurationFilePath": "/x", "PHOCASA_THUMBNAIL_CACHE_DIR": override])?.path,
             override
         )
-        XCTAssertEqual(ImageLoader.diskCacheDirectory(environment: [:]), ThumbnailDiskCache.defaultDirectory,
+        XCTAssertEqual(cacheDirectory([:]), ThumbnailDiskCache.defaultDirectory(in: caches),
                        "a normal launch uses the default directory")
-        XCTAssertEqual(ImageLoader.diskCacheDirectory(environment: ["PHOCASA_THUMBNAIL_CACHE_DIR": override]),
-                       ThumbnailDiskCache.defaultDirectory, "the override is for test hosts only")
+        XCTAssertEqual(cacheDirectory(["PHOCASA_THUMBNAIL_CACHE_DIR": override]),
+                       ThumbnailDiskCache.defaultDirectory(in: caches), "the override is for test hosts only")
+        XCTAssertEqual(ThumbnailDiskCache.defaultDirectory(in: ThumbnailDiskCache.userCachesDirectory),
+                       ThumbnailDiskCache.defaultDirectory)
     }
 
     func testDefaultDirectoryIsInTheUsersCachesFolder() throws {
