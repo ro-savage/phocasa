@@ -1337,6 +1337,8 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
             let paths = try names.map { name -> String in
                 let copy = folder.appendingPathComponent(name)
                 try FileManager.default.copyItem(at: URL(fileURLWithPath: realDir).appendingPathComponent(name), to: copy)
+                // The originals may be read-only, and MetadataService leaves read-only files alone.
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copy.path)
                 return copy.path
             }
             let directory = newCacheDirectory()
@@ -1368,8 +1370,9 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
     func testLargerBucketReadAsIsOrDecodedDown() async throws {
         let paths = try makeSources(count: 100)
         let directory = newCacheDirectory()
-        await populate(directory, paths: paths, size: 512)
+        // 384 first: once the 512 files exist, a 384 request is served from them and stores nothing.
         await populate(directory, paths: paths, size: 380)
+        await populate(directory, paths: paths, size: 512)
         let disk = ThumbnailDiskCache(directory: directory)
         let variants: [(String, Int, Int?)] = [
             ("exact 384 file", 384, nil), ("512 file as is", 512, nil),
