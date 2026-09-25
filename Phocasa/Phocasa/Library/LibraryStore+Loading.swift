@@ -2,6 +2,13 @@ import SwiftData
 import Foundation
 
 extension LibraryStore {
+    /// State only the loading code uses, stored in `loading`.
+    struct LoadingState {
+        /// Set by `refreshAvailability()`, so the next `loadExistingData()` checks every photo's files. Launch and
+        /// scans don't need it: each scan works out the missing set itself, off the main thread.
+        var needsAvailabilityCheck = false
+    }
+
     // MARK: - Launch
 
     /// Launch: shows the library as stored, then rescans it. It trusts the last scan, so there is no `stat` pass
@@ -24,7 +31,7 @@ extension LibraryStore {
 
         let fetchedPhotos = sort.fetch(where: #Predicate { !$0.isDeleted }, in: context)
 
-        if needsAvailabilityCheck {
+        if loading.needsAvailabilityCheck {
             checkFileAvailability(for: fetchedPhotos)
         }
 
@@ -75,11 +82,11 @@ extension LibraryStore {
             }
         }
         missingPhotoIDs = missing
-        needsAvailabilityCheck = false
+        loading.needsAvailabilityCheck = false
     }
 
     func refreshAvailability() {
-        needsAvailabilityCheck = true
+        loading.needsAvailabilityCheck = true
         loadExistingData()
     }
 }

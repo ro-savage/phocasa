@@ -57,6 +57,14 @@ final class GridKeepAliveTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 
+    /// Runs the main run loop until `condition` holds or `timeout` passes (the tests run under load).
+    @discardableResult
+    private func spin(until condition: () -> Bool, timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline { spin(0.02) }
+        return condition()
+    }
+
     /// The grid's scroll view: the one with the tallest document (the sidebar's list is short).
     private func gridScrollView() -> NSScrollView? {
         var found: [NSScrollView] = []
@@ -79,7 +87,8 @@ final class GridKeepAliveTests: XCTestCase {
         host()
         // Scroll down, as a user would, by selecting a photo far down the grid.
         viewModel.selection.select(only: photos[240].id)
-        spin(0.6)
+        spin(until: { (gridScrollOffset() ?? 0) > 500 })
+        spin(0.4) // let the scroll animation finish
         let scrolled = try XCTUnwrap(gridScrollOffset())
         XCTAssertGreaterThan(scrolled, 500, "the grid scrolled down")
 
@@ -101,7 +110,7 @@ final class GridKeepAliveTests: XCTestCase {
         for _ in 0..<250 { viewModel.navigateDetail(direction: 1) }
         XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[250].id)
         viewModel.closeDetail()
-        spin(0.6)
+        spin(until: { (gridScrollOffset() ?? 0) > 500 })
 
         XCTAssertGreaterThan(try XCTUnwrap(gridScrollOffset()), 500, "scrolled down to the photo")
         XCTAssertEqual(viewModel.selection.selectedPhotos, [photos[250].id])
@@ -119,9 +128,11 @@ final class GridKeepAliveTests: XCTestCase {
             try? Self.writeJPEG(image, to: url)
             return url.path
         }
+        let before = PhotoGridItemView.thumbnailLoadsStarted
         host()
+        XCTAssertTrue(spin(until: { PhotoGridItemView.thumbnailLoadsStarted > before }),
+                      "the visible cells load their thumbnails")
         spin(0.5)
-        XCTAssertGreaterThan(PhotoGridItemView.thumbnailLoadsStarted, 0, "the visible cells load their thumbnails")
 
         viewModel.openDetail(for: photos[0])
         spin(0.3)
@@ -135,8 +146,8 @@ final class GridKeepAliveTests: XCTestCase {
         XCTAssertEqual(PhotoGridItemView.thumbnailLoadsStarted, whenOpened, "the hidden grid started no thumbnail loads")
 
         viewModel.closeDetail()
-        spin(0.5)
-        XCTAssertGreaterThan(PhotoGridItemView.thumbnailLoadsStarted, whenOpened, "back in the grid, cells load again")
+        XCTAssertTrue(spin(until: { PhotoGridItemView.thumbnailLoadsStarted > whenOpened }),
+                      "back in the grid, cells load again")
     }
 
     private func makeImage() throws -> CGImage {

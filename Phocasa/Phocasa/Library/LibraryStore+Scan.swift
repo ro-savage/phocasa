@@ -2,6 +2,17 @@ import SwiftData
 import Foundation
 
 extension LibraryStore {
+    /// State only the scan code uses, stored in `scanning`.
+    struct ScanState {
+        /// The scan in progress. Scans run one at a time (spec §B3).
+        var task: Task<Void, Never>?
+        /// A scan requested while one was running; it runs once that one ends. Repeated requests coalesce, and
+        /// the latest folder wins.
+        var queuedURL: URL?
+        /// Total of the metadata reads in progress, while `scanProgress` shows their count.
+        var metadataProgressTotal: Int?
+    }
+
     // MARK: - Folder Opening
 
     func handleFolderSelected(url: URL) {
@@ -43,8 +54,8 @@ extension LibraryStore {
 
     /// Returns once no scan is running or queued, the launch rescan included.
     func waitForScans() async {
-        while let scanTask {
-            await scanTask.value
+        while let task = scanning.task {
+            await task.value
         }
     }
 
@@ -72,19 +83,19 @@ extension LibraryStore {
     private func scanFolder(url: URL) {
         guard modelContext != nil else { return }
         isScanning = true
-        if scanTask != nil {
-            queuedScanURL = url
+        if scanning.task != nil {
+            scanning.queuedURL = url
             return
         }
         scanProgress = "Scanning folder..."
-        scanTask = Task { @MainActor in
+        scanning.task = Task { @MainActor in
             var next: URL? = url
             while let folder = next {
                 await self.performScan(of: folder)
-                next = self.queuedScanURL
-                self.queuedScanURL = nil
+                next = self.scanning.queuedURL
+                self.scanning.queuedURL = nil
             }
-            self.scanTask = nil
+            self.scanning.task = nil
             self.isScanning = false
         }
     }
@@ -117,13 +128,13 @@ extension LibraryStore {
         if !plan.newPhotos.isEmpty {
             sectionStart = clock.now
             let total = plan.newPhotos.count
-            metadataProgressTotal = total
+            scanning.metadataProgressTotal = total
             scanProgress = "Reading metadata for \(total) new photos..."
             report.mainActorTime += clock.now - sectionStart
             plan.newPhotos = await scanner.readMetadata(for: plan.newPhotos) { done, total in
                 Task { @MainActor in self.showMetadataProgress(done: done, total: total) }
             }
-            metadataProgressTotal = nil
+            scanning.metadataProgressTotal = nil
         }
 
         // New photos without keywords go in through a background context (see `ScanPlan.canInsertInBackground`).
@@ -181,7 +192,7 @@ extension LibraryStore {
     }
 
     private func showMetadataProgress(done: Int, total: Int) {
-        guard metadataProgressTotal == total else { return } // that phase is over
+        guard scanning.metadataProgressTotal == total else { return } // that phase is over
         scanProgress = "Reading metadata for \(total) new photos... \(done)/\(total)"
     }
 

@@ -17,7 +17,8 @@ import SwiftData
 /// - `LibrarySort`: photo order.
 ///
 /// Stored properties that the extension files write are `internal`; only `LibraryStore` and its extensions write
-/// them.
+/// them. State that only one extension file uses lives in a struct declared in that file (`LoadingState`,
+/// `ScanState`), so that file's owner can change it without touching this one.
 @Observable @MainActor
 final class LibraryStore {
     /// The photos the grid shows. Only this file writes it: it keeps `index(of:)` and the grid bookkeeping in step,
@@ -85,16 +86,10 @@ final class LibraryStore {
     /// (rather than the available set) means photos inserted or restored since the last check
     /// stay visible instead of silently disappearing.
     var missingPhotoIDs: Set<UUID> = []
-    /// Set by `refreshAvailability()`, so the next `loadExistingData()` checks every photo's files. Launch and
-    /// scans don't need it: each scan works out the missing set itself, off the main thread.
-    var needsAvailabilityCheck = false
-    /// The scan in progress. Scans run one at a time (spec §B3).
-    @ObservationIgnored var scanTask: Task<Void, Never>?
-    /// A scan requested while one was running; it runs once that one ends. Repeated requests coalesce, and
-    /// the latest folder wins.
-    @ObservationIgnored var queuedScanURL: URL?
-    /// Total of the metadata reads in progress, while `scanProgress` shows their count.
-    @ObservationIgnored var metadataProgressTotal: Int?
+    /// The loading code's own state (`LoadingState`, declared in `LibraryStore+Loading`).
+    @ObservationIgnored var loading = LoadingState()
+    /// The scan code's own state (`ScanState`, declared in `LibraryStore+Scan`).
+    @ObservationIgnored var scanning = ScanState()
     /// What the last scan did. For tests and benchmarks.
     @ObservationIgnored var lastScanReport: ScanReport?
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted
