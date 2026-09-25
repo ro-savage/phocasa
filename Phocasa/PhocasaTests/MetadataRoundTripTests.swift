@@ -17,15 +17,9 @@ final class MetadataRoundTripTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // A read-only file in a writable folder can still be deleted, so this removes everything.
         if let dir {
-            // Make everything deletable again (one test makes a file read-only).
-            let fm = FileManager.default
-            if let names = try? fm.contentsOfDirectory(atPath: dir.path) {
-                for name in names {
-                    try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dir.appendingPathComponent(name).path)
-                }
-            }
-            try? fm.removeItem(at: dir)
+            try FileManager.default.removeItem(at: dir)
         }
     }
 
