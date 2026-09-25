@@ -21,8 +21,9 @@ final class EditSessionTests: XCTestCase {
     private var sessions: [EditSession] = []
     private var viewModels: [PhotoLibraryViewModel] = []
 
-    /// Every test's folder lives in here. It is removed once the class is done: a SwiftData store can outlive its
-    /// test briefly (objects still referenced by finishing tasks), and deleting it while open makes SQLite complain.
+    /// Every test's folder lives in here. A test deletes its own folder once its SwiftData store has closed (the store
+    /// can outlive the test briefly, through objects finishing tasks still hold, and deleting an open store makes
+    /// SQLite complain). The root goes when the class is done.
     private nonisolated static let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("phocasa-22-EditSessionTests-\(UUID().uuidString)", isDirectory: true)
 
@@ -50,8 +51,13 @@ final class EditSessionTests: XCTestCase {
         viewModels = []
         // Let queued sidecar writes land before the next test.
         await MetadataWriter.shared.flush()
+        weak let store = container
         context = nil
         container = nil
+        for _ in 0..<100 where store != nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        try? FileManager.default.removeItem(at: dir)
     }
 
     // MARK: - Helpers
