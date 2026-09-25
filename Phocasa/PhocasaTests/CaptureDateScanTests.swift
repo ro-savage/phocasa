@@ -104,7 +104,7 @@ final class CaptureDateBackfillTests: CaptureDateStoreTestCase {
         vm.setModelContext(container.mainContext)
         XCTAssertEqual(names(vm.library.photos), ["undated", "a", "b", "c", "d", "missing"], "creation order at first")
         var versionWhileWriting: Int?
-        vm.library.captureDates.didApplyChunk = { _ in versionWhileWriting = vm.library.libraryVersion }
+        vm.library.captureDates.didApplyChunk = { [unowned vm] _ in versionWhileWriting = vm.library.libraryVersion }
         try await waitForScan(vm)
         await vm.library.captureDates.task?.value
 
@@ -152,6 +152,26 @@ final class CaptureDateBackfillTests: CaptureDateStoreTestCase {
         XCTAssertNil(try storedPhotos(container)["a"]?.captureDate, "and doesn't run")
     }
 
+    /// A context doesn't keep its container alive, and reading `modelContext.container` once the container is gone
+    /// traps. A library that outlives its container skips the after-launch backfill instead of crashing. (Found when
+    /// tasks 32 and 33 merged: test hooks that captured their own view model kept its library alive past tearDown.)
+    func testALibraryThatOutlivesItsContainerDoesNoBackfill() async throws {
+        let library = LibraryStore()
+        library.captureDates.startDelay = .milliseconds(50)
+        weak var released: ModelContainer?
+        do {
+            let container = try ModelContainer(for: PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self,
+                                               configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+            released = container
+            library.open(container.mainContext)
+            library.backfillCaptureDatesAfterScans()
+        }
+        XCTAssertNil(released, "only the library's context is left")
+        await library.captureDates.task?.value
+        XCTAssertNil(library.captureDates.lastReport, "the backfill gave up without touching the store")
+        XCTAssertNil(library.captureDates.task)
+    }
+
     func testRowsWhoseFilesWereEmptyAreNotRead() async throws {
         let dir = try makeTempDir("empty")
         let container = try makeContainer()
@@ -192,7 +212,7 @@ final class CaptureDateBackfillTests: CaptureDateStoreTestCase {
         let creationOrder = names(library.photos)
         XCTAssertEqual(creationOrder.first, "p00")
         let log = Log()
-        library.captureDates.didApplyChunk = { chunk in
+        library.captureDates.didApplyChunk = { [unowned library] chunk in
             log.entries.append("chunk \(chunk)")
             log.grids.append(self.names(library.photos))
             if chunk == 0 { DispatchQueue.main.async { MainActor.assumeIsolated { log.entries.append("other work") } } }
@@ -215,7 +235,7 @@ final class CaptureDateBackfillTests: CaptureDateStoreTestCase {
         let (library, container) = try openStore(count: 12, maxChunkRows: 3)
         let rated = try XCTUnwrap(library.photos.first { $0.fileName == "p03" })
         let binned = try XCTUnwrap(library.photos.first { $0.fileName == "p07" })
-        library.captureDates.didApplyChunk = { chunk in
+        library.captureDates.didApplyChunk = { [unowned library] chunk in
             if chunk == 0 { library.setRating(4, for: rated) }
             // After the last write (a later write to a binned row would take it out of the bin in the store until
             // task 31's rename), but before the re-order.

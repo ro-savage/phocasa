@@ -714,7 +714,7 @@ final class ScanTests: XCTestCase {
         var namesWhenLoaded: Set<String>?
         let vm = PhotoLibraryViewModel()
         vm.library.loading.backgroundLoadThreshold = 0
-        vm.library.loading.backgroundLoadDidApply = { namesWhenLoaded = Set(vm.library.allPhotos.map(\.fileName)) }
+        vm.library.loading.backgroundLoadDidApply = { [unowned vm] in namesWhenLoaded = Set(vm.library.allPhotos.map(\.fileName)) }
         vm.setModelContext(try makeContainer(storeURL: storeURL).mainContext)
         await vm.library.waitForScans()
 
@@ -757,7 +757,7 @@ final class ScanTests: XCTestCase {
 
         // A full load after the background load read the store.
         let vm2 = try relaunchAsBigLibrary(storeURL)
-        vm2.library.loading.backgroundLoadDidApply = { vm2.loadExistingData() }
+        vm2.library.loading.backgroundLoadDidApply = { [unowned vm2] in vm2.loadExistingData() }
         await vm2.library.waitForScans()
         XCTAssertEqual(vm2.library.lastScanReport?.usedRowsReadAhead, false)
         XCTAssertEqual(Set(vm2.library.allPhotos.map(\.fileName)), ["a", "b", "c", "pair", "d", "rawonly"])
@@ -916,7 +916,7 @@ final class ScanTests: XCTestCase {
         let (vm, photos, _) = try await openDatedLibrary()
         try makeJPEG("tagged.jpg", in: photos, keywords: ["people:cy"])
         try makeJPEG("plain.jpg", in: photos)
-        vm.library.scanWillSave = { _ in vm.library.loadExistingData() }
+        vm.library.scanWillSave = { [unowned vm] _ in vm.library.loadExistingData() }
 
         try await rescan(vm)
 

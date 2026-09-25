@@ -138,12 +138,18 @@ extension LibraryStore {
     func backfillCaptureDatesAfterScans() {
         guard captureDates.task == nil else { return }
         let delay = captureDates.startDelay
-        captureDates.task = Task { [weak self] in
+        // The container is held weakly too: a context doesn't keep its container alive, and reading
+        // `modelContext.container` after the container is gone traps. A store that outlived its container does no
+        // backfill.
+        let container = modelContext?.container
+        captureDates.task = Task { [weak self, weak container] in
             await self?.waitForScans()
             try? await Task.sleep(for: delay)
             guard let self else { return } // the window closed
+            guard let container else { self.captureDates.task = nil; return }
             await self.waitForScans()
             await self.backfillCaptureDates()
+            withExtendedLifetime(container) {}
             self.captureDates.task = nil
         }
     }
