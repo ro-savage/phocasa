@@ -37,7 +37,7 @@ Every task implicitly includes these.
   - Never search the disk for camera RAW files (no `mdfind`, no Spotlight queries). See **RAW files** under Commands.
 - **Behaviour doesn't change** beyond what your task lists. In particular, rendered edit output must stay pixel-identical (max channel difference ≤ 1) unless your task says otherwise.
 - **Zero new compiler warnings.** The full test suite must pass.
-- **Keep other files compiling.** In waves 1–2, keep every existing internal API that another task's files use source-compatible. Add new APIs freely; don't rename or remove existing ones unless your task explicitly owns every call site.
+- **Keep other files compiling.** In waves 1–3, keep every existing internal API that another task's files use source-compatible. Add new APIs freely; don't rename or remove existing ones unless your task explicitly owns every call site.
 
 ## Commands
 
@@ -52,8 +52,8 @@ DD="$TMPDIR/phocasa-dd-<task-id>"      # e.g. phocasa-dd-10
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -configuration Debug -derivedDataPath "$DD" build 2>&1 | tail -5
 
 # Full test suite (look for "** TEST SUCCEEDED **"; count warnings with: grep -c "warning:").
-# After wave 1 the baseline is "Executed 293 tests, with 11 tests skipped and 0 failures" (the skips are gated
-# benchmarks), with 0 compiler warnings on a clean build.
+# After wave 2 the baseline is "Executed 441 tests, with 20 tests skipped and 0 failures" (the skips are gated
+# benchmarks and gated real-file tests), with 0 compiler warnings on a clean build.
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -destination 'platform=macOS' -derivedDataPath "$DD" test > "$DD.test.log" 2>&1; tail -3 "$DD.test.log"
 grep -E "error:|failed \(|Executed [0-9]+ tests" "$DD.test.log" | sort -u
 
@@ -105,10 +105,17 @@ Tasks in the same wave run **in parallel** in separate worktrees. A wave starts 
 | 2 | [21](21-thumbnail-disk-cache.md) | Persistent thumbnail disk cache | 11 | M |
 | 2 | [22](22-edit-session.md) | Extract `EditSession` from the view model; sidecar I/O off main | 12, 13, 14 | L |
 | 2 | [23](23-metadata-and-rating-decisions.md) | User decisions: update sidecars in place, ratings on both files of a pair, instant star clicks | 11, 14 | M |
-| 3 | [30](30-structure-and-polish.md) | Split the remaining view model, keep grid alive, off-main trashing, dedupe, CLAUDE.md | all of waves 1–2 | L |
-| 3 | [31](31-schema-cleanup.md) | Schema cleanup: `isInBin`, drop dead fields, migration test | 30 | S |
+| 3A | [30](30-structure-and-polish.md) | Split the view model (`LibraryStore` files, `SelectionModel`, `LibrarySort`), keep grid alive, off-main trashing, quit flush, CLAUDE.md | all of waves 1–2 | L |
+| 3A | [34](34-thumbnail-cache-followups.md) | Disk cache: re-key after metadata writes, smaller-from-larger buckets, persisted byte total; remove `loadFullResolution` | 21 | S–M |
+| 3B | [31](31-schema-cleanup.md) | Schema cleanup: `isDeleted` → `isInBin`, drop dead fields, migration test | 30 | S |
+| 3B | [32](32-launch-and-bin.md) | Launch off the main actor, incremental imports, **bin survives relaunch** (user decision) | 30 | M |
+| 3B | [33](33-capture-date-sort.md) | **Sort by capture date** (user decision): read `DateTimeOriginal`, new attribute, backfill | 30 | M |
+| 3B | [35](35-edit-render-sizes.md) | Edit renders at viewport size; native resolution only on zoom | 30 | M |
 
-Tasks 30 and 31 run **one after the other**, not in parallel. Both touch the view model broadly.
+Wave 3 has two sub-waves. Task 30 splits the whole view model, so nothing else that edits view-model code can run
+beside it. In **3A**, only task 34 (services it doesn't touch) runs alongside it. In **3B**, four tasks work in
+parallel on the files task 30 lays out for them. Merge 3B in the order 31, 32, 33, 35: 31's mechanical rename goes
+first, so the others' conflicts are easy to resolve.
 
 ## File ownership
 
@@ -158,9 +165,33 @@ wave 2, task 30/31 in wave 3. Other tasks put their gated benchmarks in their ow
 | `PhocasaTests/PerformanceBenchmarks.swift` (add lines only) | **owns** | | | |
 | Tests | `FolderScannerTests`, new `ScanTests` | new `ThumbnailDiskCacheTests`; `ImageLoaderTests` | new `EditSessionTests`; the crop, preset and other editing tests in `ViewModelTests`; the saved-edit tests in `DetailViewTests` | `Metadata*Tests`; the star tests in `PhotoGridItemViewTests` |
 
-### Wave 3
+### Wave 3A
 
-Task 30 owns everything. Task 31 owns the models, the `isDeleted` call sites and the migration tests.
+| File / region | 30 | 34 |
+|---|---|---|
+| `Services/ImageLoader.swift`, `Services/ThumbnailDiskCache.swift`, `Services/MetadataWriter.swift` | | **owns** |
+| `ImageLoaderTests`, `ThumbnailDiskCacheTests`, `MetadataWriterTests`, `DetailNavigationBenchmarks` | | **owns** |
+| Everything else: view model split, views, `PhocasaApp`, `CLAUDE.md`, `PerformanceBenchmarks.swift` (keep labels) | **owns** | |
+
+### Wave 3B
+
+The file names are task 30's layout. The coordinator re-checks them against merged `main` before dispatching.
+
+| File / region | 31 | 32 | 33 | 35 |
+|---|---|---|---|---|
+| `Models/*`: rename, removals | **owns** | | | |
+| `Models/PhotoAsset.swift`: new capture-date attribute(s) | | | **owns** | |
+| Every `isDeleted` bin-flag call site (mechanical rename), `SidebarView` child rows, `MigrationTests`, migration plan in `PhocasaApp` if needed | **owns** | | | |
+| `Library/LibraryStore+Loading.swift`, `Library/LibraryStore+Scan.swift`, `Library/ScanPlan.swift`, `Services/FolderScanner.swift` | | **owns** | one line per insert site | |
+| Incremental-insert entry point in `LibraryStore` / `LibraryStore+Mutations` (additive) | | **owns** | | |
+| `Library/LibrarySort.swift` (the only definition of photo order) | | | **owns** | |
+| `MetadataService.readMetadata` / `PhotoMetadata` (capture date); new backfill file | | | **owns** | |
+| `Editing/*`; saved-edit and edit parts of `PhotoDetailView` and `Views/Detail/*` | | | | **owns** |
+| `PhocasaTests/PerformanceBenchmarks.swift` (additions, `7x` seed fix) | | **owns** | | |
+| Tests | `MigrationTests`, renamed assertions | `ScanTests`, `FolderScannerTests` | new `CaptureDateTests`, capture-date parts of `MetadataParsingTests` | `EditSessionTests`, edit parts of `DetailViewTests` |
+
+`CLAUDE.md` in wave 3B: tasks put the lines they'd add under "Needs from other tasks", and the coordinator applies
+them after the merges.
 
 ## Workflow for each task agent
 
@@ -186,12 +217,12 @@ Task 30 owns everything. Task 31 owns the models, the `isDeleted` call sites and
 
 Task files are guidelines. Agents should check their claims against the code and change the approach where they see a better one, recording deviations in the results file. What decides a merge is evidence:
 
-- **Performance tasks (10, 11, 12, 13, 20, 21):** the task's primary benchmark metrics must improve measurably, and nothing else may regress by more than 5%.
+- **Performance tasks (10, 11, 12, 13, 20, 21, 32, 34, 35):** the task's primary benchmark metrics must improve measurably, and nothing else may regress by more than 5%.
   - The coordinator **re-runs the relevant benchmarks itself** on `main` and on the task branch, with no other builds or agents running. Numbers taken while other agents are compiling are noise. The coordinator's tools and protocol (A/B harness, test runner, real-app check) are in `Tools/coordinator/README.md`.
   - If the improvement isn't there, the task is **skipped**: its branch isn't merged, and the reason goes in `results/<task-id>.md` on `main`.
   - A subagent that finds early, by measuring or prototyping, that its approach won't help should stop and report instead of finishing.
 - **Mixed tasks:** task 12 includes bug fixes (orientation, scroll hijack, wasted RAW render). If its performance changes don't pay off, keep and merge the bug fixes and drop the rest.
-- **Correctness, enabler and structure tasks (00, 14, 22, 30, 31):** these aren't judged on speed. They must:
+- **Correctness, enabler and structure tasks (00, 14, 22, 23, 30, 31, 33):** these aren't judged on speed. They must:
   - show their bug tests failing before and passing after, or meet their structural acceptance criteria;
   - not regress any benchmark by more than 5%.
 - **Dependencies:** if a task is skipped, re-check the tasks that depend on it (see the waves table). Adapt them to what actually landed, or skip them too.
@@ -199,9 +230,9 @@ Task files are guidelines. Agents should check their claims against the code and
 ## Merge protocol (coordinator)
 
 - Worktrees branch from `main`. Everything merges back into `main`.
-- After a wave's agents finish, apply the merge gate to each branch. Merge the passing ones one at a time with `git merge --no-ff perf/<task>`, running the full test suite after each merge.
+- After a wave's agents finish, apply the merge gate to each branch. Merge the passing ones one at a time with `git merge --no-ff perf/<task>`. After each merge, run the full test suite **and the benchmark set on `main`** (`Tools/coordinator/ab.sh`), and compare with the previous `main` (`Tools/coordinator/multi.py`). Fix anything that breaks at its root, on `main`; never amend or reset a merge.
 - Resolve conflicts using the ownership tables: the owning task wins inside its region, and both sides' intent is kept elsewhere. Re-run the suite after resolving.
 - Re-run the benchmarks on the merged `main`.
 - Start the next wave's worktrees only after that, so they branch from the merged `main`.
-- **Before merging task 31** (schema change), stop and ask the user to back up `~/Library/Application Support/default.store*`.
+- **Task 31 (schema change):** the user decided the coordinator merges it without pausing, and **reminds the user in the final report** to back up `~/Library/Application Support/default.store*` before running the new build normally. Never open that store.
 - Never push.

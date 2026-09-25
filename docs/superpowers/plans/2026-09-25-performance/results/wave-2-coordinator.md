@@ -250,7 +250,12 @@ Notes:
       - 18 cached thumbnails were touched on read, so they came from the disk cache.
   - `~/PhocasaBenchRAW` is unchanged: read-only, 380 files, none modified this session.
 
-## Decisions for the user
+## Decisions for the user (answered 2026-09-25)
+
+The user's answers, in order: 1 → fix it in wave 3 (task 32); 2 → keep; 3 → keep; 4 → keep the rating writes; 5 → keep
+the current behaviour; 6 → sort by capture date in wave 3 (task 33). On task 31's schema change, the coordinator
+merges without pausing and reminds the user in its final report to back up `~/Library/Application Support/default.store*`.
+
 
 1. **Move to Bin doesn't survive a relaunch (existing bug, task 20).** Every scan, including the launch rescan, takes a
    binned photo back out of the bin if its file still exists. It is kept as on `main`, and pinned by a test.

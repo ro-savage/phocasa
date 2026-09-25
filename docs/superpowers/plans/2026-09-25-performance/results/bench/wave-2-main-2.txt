@@ -1,0 +1,148 @@
+COORD|readMetadata real-jpg x190|median_ms=82.7|min_ms=82.3|max_ms=91.4|runs=3
+COORD|info|readMetadata real-jpg|rated=0|tagged=0
+COORD|readMetadata real-arw x190|median_ms=463.6|min_ms=446.7|max_ms=598.5|runs=3
+COORD|info|readMetadata real-arw|rated=0|tagged=0
+COORD|thumb real-arw single cold thumbnail 380px|median_ms=36.8|min_ms=33.7|max_ms=43.5|runs=20
+COORD|thumb real-arw fastScroll last20|median_ms=8.1|min_ms=7.6|max_ms=9.0|runs=5
+COORD|thumb real-arw fastScroll all tasks finished|median_ms=8.2|min_ms=7.6|max_ms=9.0|runs=5
+COORD|thumb real-jpg single cold thumbnail 380px|median_ms=59.1|min_ms=29.0|max_ms=74.6|runs=20
+COORD|thumb real-jpg fastScroll last20|median_ms=27.6|min_ms=26.9|max_ms=28.7|runs=5
+COORD|thumb real-jpg fastScroll all tasks finished|median_ms=27.6|min_ms=26.9|max_ms=28.7|runs=5
+COORD|info|thumb disk files=60
+COORD|thumb relaunch synth-jpg single cold thumbnail 380px|median_ms=1.5|min_ms=1.2|max_ms=2.6|runs=20
+COORD|info|thumb disk files=541
+COORD|thumb relaunch synth-jpg fastScroll last20|median_ms=0.0|min_ms=0.0|max_ms=0.0|runs=5
+COORD|thumb relaunch synth-jpg fastScroll all tasks finished|median_ms=0.1|min_ms=0.1|max_ms=0.1|runs=5
+COORD|info|thumb disk files=60
+COORD|thumb relaunch real-jpg single cold thumbnail 380px|median_ms=1.1|min_ms=0.7|max_ms=3.6|runs=20
+COORD|info|thumb disk files=517
+COORD|thumb relaunch real-jpg fastScroll last20|median_ms=0.0|min_ms=0.0|max_ms=0.0|runs=5
+COORD|thumb relaunch real-jpg fastScroll all tasks finished|median_ms=0.1|min_ms=0.1|max_ms=0.2|runs=5
+COORD|info|thumb disk files=60
+COORD|thumb relaunch real-arw single cold thumbnail 380px|median_ms=1.3|min_ms=0.8|max_ms=4.0|runs=20
+COORD|info|thumb disk files=514
+COORD|thumb relaunch real-arw fastScroll last20|median_ms=0.0|min_ms=0.0|max_ms=0.0|runs=5
+COORD|thumb relaunch real-arw fastScroll all tasks finished|median_ms=0.1|min_ms=0.1|max_ms=0.3|runs=5
+COORD|thumb synth-jpg fastScroll last20|median_ms=234.9|min_ms=219.2|max_ms=256.3|runs=5
+COORD|thumb synth-jpg fastScroll all tasks finished|median_ms=405.6|min_ms=389.1|max_ms=409.1|runs=5
+COORD|edit real-arw edit tick idle|median_ms=37.4|min_ms=35.2|max_ms=38.7|runs=10
+COORD|edit real-arw edit tick during full-res pass|median_ms=39.6|min_ms=35.9|max_ms=43.1|runs=10
+COORD|edit real-arw main-thread first draw of full-res result|median_ms=37.0|min_ms=23.7|max_ms=42.2|runs=10
+COORD|edit real-jpg edit tick idle|median_ms=36.4|min_ms=34.4|max_ms=36.9|runs=10
+COORD|edit real-jpg edit tick during full-res pass|median_ms=34.9|min_ms=34.0|max_ms=36.1|runs=10
+COORD|edit real-jpg main-thread first draw of full-res result|median_ms=43.2|min_ms=40.8|max_ms=49.6|runs=10
+COORD|edit synth-jpg-24MP edit tick idle|median_ms=34.8|min_ms=33.3|max_ms=36.3|runs=10
+COORD|edit synth-jpg-24MP edit tick during full-res pass|median_ms=35.6|min_ms=33.2|max_ms=36.8|runs=10
+COORD|edit synth-jpg-24MP main-thread first draw of full-res result|median_ms=62.9|min_ms=55.0|max_ms=69.7|runs=10
+BENCH|N=10000|seed (insert+save; harness, not app code)|ms=3491.041
+BENCH|N=10000|COLD setModelContext (fetch+stat+counts+tags)|ms=347.768|allPhotos=10000
+BENCH|N=10000|COLD fetch photos (no prefetch)|ms=219.169
+BENCH|N=10000|COLD first touch of photo.tags on all (relationship faults)|ms=45.272
+BENCH|N=10000|second touch of photo.tags on all|ms=7.160|refs=40000
+BENCH|N=10000|COLD fetch photos WITH prefetch [tags]|ms=278.598
+BENCH|N=10000|COLD touch photo.tags after prefetch|ms=7.181|refs=20000
+BENCH|N=10000|1 loadExistingData() warm|median_ms=311.425|min_ms=310.882|max_ms=311.632|runs=5
+BENCH|N=10000|1a raw fetch(!isDeleted, sorted) warm|median_ms=184.825|min_ms=184.706|max_ms=185.486|runs=5
+BENCH|N=10000|1b raw fetch(isDeleted) bin warm|median_ms=0.484|min_ms=0.469|max_ms=0.514|runs=5
+BENCH|N=10000|2 refreshAvailability() (stat all + load)|median_ms=357.238|min_ms=356.976|max_ms=362.290|runs=5
+BENCH|N=10000|2a fileExists loop only (10000 stats)|median_ms=24.287|min_ms=24.116|max_ms=25.544|runs=5
+BENCH|N=10000|3a applyFilter(.rated(3))|median_ms=0.003|min_ms=0.002|max_ms=0.005|runs=5
+BENCH|N=10000|3b applyFilter(.tag(people-0))|median_ms=0.005|min_ms=0.005|max_ms=0.007|runs=5
+BENCH|N=10000|3c applyFilter(.all)|median_ms=0.001|min_ms=0.001|max_ms=0.002|runs=5
+BENCH|N=10000|3d toggleSortOrder()|median_ms=3.895|min_ms=3.892|max_ms=3.901|runs=5
+BENCH|N=10000|3e applyFilter(.rated(3)) from no filter|median_ms=7.479|min_ms=7.458|max_ms=7.531|runs=5
+BENCH|N=10000|3f applyFilter(.tag(people-0)) from no filter|median_ms=15.386|min_ms=15.362|max_ms=15.423|runs=5
+BENCH|N=10000|3g applyFilter(.all) from .rated(3)|median_ms=1.119|min_ms=1.118|max_ms=1.131|runs=5
+BENCH|N=10000|3h applyFilter(.rated(4)) replacing .rated(3)|median_ms=7.511|min_ms=7.501|max_ms=7.544|runs=5
+BENCH|N=10000|info|rated3=1721|tagPeople0=73
+BENCH|N=10000|4 search keystroke 't' (set searchText + applyCurrentFilter)|median_ms=0.001|min_ms=0.001|max_ms=0.002|runs=5
+BENCH|N=10000|info|searchMatches=3658
+BENCH|N=10000|4b search keystroke '' -> 't' (text changes every run)|median_ms=4.997|min_ms=4.994|max_ms=5.008|runs=5
+BENCH|N=10000|5a setRating with .rated(3) filter active|median_ms=6.750|min_ms=6.657|max_ms=6.969|runs=5
+BENCH|N=10000|5b setRating no filter|median_ms=6.810|min_ms=6.755|max_ms=6.865|runs=5
+BENCH|N=10000|8a moveToBin single photo|median_ms=6.635|min_ms=6.586|max_ms=6.775|runs=5
+BENCH|N=10000|8b restoreFromBin single photo|median_ms=7.017|min_ms=6.999|max_ms=7.177|runs=5
+BENCH|N=10000|8c setRatingForSelection 50 photos|median_ms=14.248|min_ms=14.136|max_ms=14.339|runs=5
+BENCH|N=10000|6a allPhotos.filter { rating == 3 }|median_ms=9.195|min_ms=9.140|max_ms=9.224|runs=5
+BENCH|N=10000|6b one-pass rating/tag/category/type counts|median_ms=93.196|min_ms=93.065|max_ms=93.552|runs=5
+BENCH|N=10000|6c photos.map(\.id)|median_ms=9.117|min_ms=9.087|max_ms=9.145|runs=5
+BENCH|N=10000|6d photos.firstIndex(where: id == last)|median_ms=8.760|min_ms=8.680|max_ms=8.801|runs=5
+BENCH|N=10000|6e photos.firstIndex(where: id == middle)|median_ms=4.385|min_ms=4.368|max_ms=4.455|runs=5
+BENCH|N=10000|6f build [UUID: Int] index|median_ms=10.970|min_ms=10.942|max_ms=10.971|runs=5
+BENCH|N=10000|6g [UUID: Int] index lookup x1000|median_ms=0.136|min_ms=0.135|max_ms=0.136|runs=5
+BENCH|N=10000|6h Set(ids) over cached [UUID] (no model access)|median_ms=1.253|min_ms=1.249|max_ms=1.255|runs=5
+BENCH|N=10000|6i Array(allPhotos.reversed()) (sort-toggle alternative)|median_ms=1.319|min_ms=1.315|max_ms=1.351|runs=5
+BENCH|N=10000|6j search 't' in-memory over allPhotos (no refetch)|median_ms=53.354|min_ms=53.029|max_ms=53.600|runs=5
+BENCH|N=10000|6k selectedPhotosList (50 selected)|median_ms=0.055|min_ms=0.055|max_ms=0.055|runs=5
+BENCH|N=10000|7x rescanCurrentLibrary() all-existing (until !isScanning)|median_ms=635.726|min_ms=631.263|max_ms=643.540|runs=3
+BENCH|N=10000|info|scanProgress=Found 10000 photos (0 new)
+BENCH|N=10000|info|7x stored rows=20000 allPhotos=20000
+BENCH|N=10000|7x main-actor time of each rescan (scan task)|median_ms=14.410|min_ms=14.402|max_ms=15.777|runs=3
+BENCH|N=10000|7y FolderScanner.scan alone|median_ms=151.708|min_ms=150.530|max_ms=151.715|runs=3
+BENCH|N=2000|seed (insert+save; harness, not app code)|ms=663.750
+BENCH|N=2000|COLD setModelContext (fetch+stat+counts+tags)|ms=70.043|allPhotos=2000
+BENCH|N=2000|COLD fetch photos (no prefetch)|ms=44.293
+BENCH|N=2000|COLD first touch of photo.tags on all (relationship faults)|ms=8.970
+BENCH|N=2000|second touch of photo.tags on all|ms=1.436|refs=8000
+BENCH|N=2000|COLD fetch photos WITH prefetch [tags]|ms=56.219
+BENCH|N=2000|COLD touch photo.tags after prefetch|ms=1.441|refs=4000
+BENCH|N=2000|1 loadExistingData() warm|median_ms=62.510|min_ms=62.472|max_ms=62.643|runs=5
+BENCH|N=2000|1a raw fetch(!isDeleted, sorted) warm|median_ms=36.793|min_ms=36.626|max_ms=37.191|runs=5
+BENCH|N=2000|1b raw fetch(isDeleted) bin warm|median_ms=0.140|min_ms=0.135|max_ms=0.147|runs=5
+BENCH|N=2000|2 refreshAvailability() (stat all + load)|median_ms=71.860|min_ms=71.815|max_ms=72.021|runs=5
+BENCH|N=2000|2a fileExists loop only (2000 stats)|median_ms=4.333|min_ms=4.317|max_ms=4.362|runs=5
+BENCH|N=2000|3a applyFilter(.rated(3))|median_ms=0.003|min_ms=0.002|max_ms=0.004|runs=5
+BENCH|N=2000|3b applyFilter(.tag(people-0))|median_ms=0.005|min_ms=0.005|max_ms=0.006|runs=5
+BENCH|N=2000|3c applyFilter(.all)|median_ms=0.001|min_ms=0.001|max_ms=0.001|runs=5
+BENCH|N=2000|3d toggleSortOrder()|median_ms=0.783|min_ms=0.779|max_ms=0.803|runs=5
+BENCH|N=2000|3e applyFilter(.rated(3)) from no filter|median_ms=1.529|min_ms=1.529|max_ms=1.531|runs=5
+BENCH|N=2000|3f applyFilter(.tag(people-0)) from no filter|median_ms=3.087|min_ms=3.081|max_ms=3.087|runs=5
+BENCH|N=2000|3g applyFilter(.all) from .rated(3)|median_ms=0.226|min_ms=0.226|max_ms=0.228|runs=5
+BENCH|N=2000|3h applyFilter(.rated(4)) replacing .rated(3)|median_ms=1.506|min_ms=1.506|max_ms=1.514|runs=5
+BENCH|N=2000|info|rated3=365|tagPeople0=19
+BENCH|N=2000|4 search keystroke 't' (set searchText + applyCurrentFilter)|median_ms=0.001|min_ms=0.001|max_ms=0.001|runs=5
+BENCH|N=2000|info|searchMatches=734
+BENCH|N=2000|4b search keystroke '' -> 't' (text changes every run)|median_ms=1.003|min_ms=1.000|max_ms=1.039|runs=5
+BENCH|N=2000|5a setRating with .rated(3) filter active|median_ms=1.878|min_ms=1.866|max_ms=1.998|runs=5
+BENCH|N=2000|5b setRating no filter|median_ms=1.842|min_ms=1.817|max_ms=1.867|runs=5
+BENCH|N=2000|8a moveToBin single photo|median_ms=1.744|min_ms=1.732|max_ms=1.778|runs=5
+BENCH|N=2000|8b restoreFromBin single photo|median_ms=1.864|min_ms=1.851|max_ms=1.905|runs=5
+BENCH|N=2000|8c setRatingForSelection 50 photos|median_ms=9.318|min_ms=9.295|max_ms=9.476|runs=5
+BENCH|N=2000|6a allPhotos.filter { rating == 3 }|median_ms=1.834|min_ms=1.832|max_ms=1.849|runs=5
+BENCH|N=2000|6b one-pass rating/tag/category/type counts|median_ms=18.596|min_ms=18.573|max_ms=18.654|runs=5
+BENCH|N=2000|6c photos.map(\.id)|median_ms=1.821|min_ms=1.817|max_ms=1.845|runs=5
+BENCH|N=2000|6d photos.firstIndex(where: id == last)|median_ms=1.776|min_ms=1.741|max_ms=1.787|runs=5
+BENCH|N=2000|6e photos.firstIndex(where: id == middle)|median_ms=0.890|min_ms=0.869|max_ms=0.923|runs=5
+BENCH|N=2000|6f build [UUID: Int] index|median_ms=2.157|min_ms=2.152|max_ms=2.187|runs=5
+BENCH|N=2000|6g [UUID: Int] index lookup x1000|median_ms=0.136|min_ms=0.136|max_ms=0.137|runs=5
+BENCH|N=2000|6h Set(ids) over cached [UUID] (no model access)|median_ms=0.241|min_ms=0.241|max_ms=0.243|runs=5
+BENCH|N=2000|6i Array(allPhotos.reversed()) (sort-toggle alternative)|median_ms=0.265|min_ms=0.265|max_ms=0.268|runs=5
+BENCH|N=2000|6j search 't' in-memory over allPhotos (no refetch)|median_ms=10.515|min_ms=10.495|max_ms=10.576|runs=5
+BENCH|N=2000|6k selectedPhotosList (50 selected)|median_ms=0.052|min_ms=0.052|max_ms=0.052|runs=5
+BENCH|N=2000|7x rescanCurrentLibrary() all-existing (until !isScanning)|median_ms=130.177|min_ms=127.982|max_ms=131.257|runs=3
+BENCH|N=2000|info|scanProgress=Found 2000 photos (0 new)
+BENCH|N=2000|info|7x stored rows=4000 allPhotos=4000
+BENCH|N=2000|7x main-actor time of each rescan (scan task)|median_ms=3.570|min_ms=3.472|max_ms=3.589|runs=3
+BENCH|N=2000|7y FolderScanner.scan alone|median_ms=29.785|min_ms=29.636|max_ms=30.061|runs=3
+BENCH|N=10000|7v launch: setModelContext() with a library, fresh container (synchronous part)|median_ms=343.833|min_ms=343.432|max_ms=344.277|runs=3
+BENCH|N=10000|7v launch: setModelContext() until its rescan ends (!isScanning)|median_ms=672.922|min_ms=670.602|max_ms=677.246|runs=3
+BENCH|N=10000|7v launch rescan: main-actor time (scan task)|median_ms=7.836|min_ms=7.798|max_ms=7.940|runs=3
+BENCH|N=10000|7w rescanCurrentLibrary() unchanged 10k library (until !isScanning)|median_ms=328.891|min_ms=327.544|max_ms=331.834|runs=5
+BENCH|N=10000|7w main-actor time of each rescan (scan task)|median_ms=7.572|min_ms=7.466|max_ms=7.655|runs=5
+BENCH|N=10000|info|7w scanProgress=Found 10000 photos (0 new) stored rows=10000 allPhotos=10000
+BENCH|scan1k|generate 1000 jpegs (harness, not app code)|ms=875.879
+BENCH|scan1k|info|round-trip via app write→read: keywords=["cat:a", "cat:b"] rating=3
+BENCH|scan1k|FolderScanner.scan alone (1000 files)|median_ms=14.566|min_ms=14.252|max_ms=14.856|runs=5
+BENCH|scan1k|readMetadata x1000 (runs on main actor inside first scan)|median_ms=159.746|min_ms=159.208|max_ms=160.233|runs=5
+BENCH|scan1k|info|run0 scanProgress=Found 1000 photos (1000 new) allPhotos=1000 tags=2 tagged=500 rated=500
+BENCH|scan1k|info|run1 scanProgress=Found 1000 photos (1000 new) allPhotos=1000 tags=2 tagged=500 rated=500
+BENCH|scan1k|info|run2 scanProgress=Found 1000 photos (1000 new) allPhotos=1000 tags=2 tagged=500 rated=500
+BENCH|scan1k|FIRST rescanCurrentLibrary() fresh store (until !isScanning)|median_ms=310.693|min_ms=306.447|max_ms=313.925|runs=3
+BENCH|scan1k|7z first scan of 1k new photos: main-actor time|median_ms=125.656|min_ms=123.854|max_ms=126.294|runs=3
+BENCH|scan1k|SECOND rescanCurrentLibrary() all-existing (until !isScanning)|median_ms=33.190|min_ms=32.281|max_ms=34.510|runs=5
+BENCH|scan1k|SECOND main-actor time (scan task)|median_ms=1.347|min_ms=1.267|max_ms=1.392|runs=5
+BENCH|scan1k|findOrCreateTag x1000 (existing tags)|median_ms=269.870|min_ms=266.882|max_ms=277.606|runs=5
+BENCH|scan1k|dictionary tag lookup x1000 (alternative)|median_ms=0.177|min_ms=0.177|max_ms=0.180|runs=5
+BENCH|scan1k|context.save() nothing dirty|median_ms=0.001|min_ms=0.001|max_ms=0.001|runs=5
+BENCH|scan1k|same-value reassign 4 fields on 1000 rows + save|median_ms=108.895|min_ms=108.734|max_ms=109.374|runs=5
+BENCH|scan1k|info|ctx.hasChanges after same-value assignment=true

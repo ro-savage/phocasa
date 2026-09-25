@@ -5,3 +5,4 @@ DerivedData/
 .build/
 .claude/worktrees/
 *.profraw
+__pycache__/

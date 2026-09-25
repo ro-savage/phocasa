@@ -7,9 +7,12 @@ target.
 | File | What it is |
 |---|---|
 | `CoordinatorBenchmarks.swift` | A/B benchmark test class. It uses only public app APIs, so the same file runs on `main` and on a task branch. Copy it into `Phocasa/PhocasaTests/` of the checkout you're measuring, and delete it afterwards. |
-| `CoordinatorEditBenchmarks.swift`, `CoordinatorEditBenchmarks-Session.swift` | The edit A/B tests (`CoordinatorEditBenchmarks`), in two variants with the same labels. Before task 22 copy the first (view-model editing API); from task 22 on copy the second (`EditSession`). Copy exactly one. |
+| `CoordinatorEditBenchmarks.swift`, `CoordinatorEditBenchmarks-Session.swift` | The edit A/B tests (`CoordinatorEditBenchmarks`), in two variants with the same labels. Before task 22 copy the first (view-model editing API); from task 22 on copy the second (`EditSession`). Copy exactly one (`ab.sh` picks it). If task 30 changes the view-model entry points they call (`setModelContext`, `loadExistingData`, `openDetail`, `startEditing`, `editSession`, `stopEditing`), update the session variant. |
+| `ab.sh` | `ab.sh <git-ref> <label> [-only-testing:…]`: checks the ref out in the detached bench worktree `$TMPDIR/phocasa-bench` (created on first use), copies the harness in (the right edit variant automatically), runs `DataPathBenchmarks`, `CoordinatorBenchmarks` and `CoordinatorEditBenchmarks` with the real-file and disk-cache env vars, and writes the `BENCH\|`/`COORD\|` lines to `$TMPDIR/phocasa-coord-results/<label>.txt`. About 3 minutes per run. |
+| `multi.py` | `multi.py base1.txt base2.txt -- other1.txt other2.txt [--filter REGEX]`: the mean of several base runs against several other runs, per line, flagging (`<<`) a rise over 5% only when the other side's best run is still > 5% above the base's worst. Skips harness-only lines. |
 | `runtests.sh` | `runtests.sh <checkout> <label> [xcodebuild args…]`: runs `xcodebuild test` with its own DerivedData (`$TMPDIR/phocasa-dd-coord-<label>`), then prints the result, the test count, errors and source warnings. The log goes to `$TMPDIR/phocasa-coord-<label>.test.log`. |
 | `cmp.py` | `cmp.py before.txt after.txt [regex]`: compares `BENCH|`/`COORD|` lines and flags rises over 5%. |
+| `app-driver/segs.py` | Lists a JPEG's marker segments and sizes. A rating write must change only APP1/XMP (and APP13); the Exif segment keeps its size (task 23). |
 | `app-driver/*.swift` | Tiny CLIs for driving and inspecting the real app. `click x y [n]` posts real mouse clicks (screen points). `drag drag x1 y1 x2 y2 [steps]` / `drag scroll x y lines [n]` post drags and scroll-wheel events. `rating <files>` prints `xmp:Rating` via ImageIO. `orient <files>` lists files with EXIF orientation ≠ 1. Build each with `swiftc -O file.swift -o "$TMPDIR/<name>"`. |
 
 ## Quiet A/B protocol
@@ -77,3 +80,35 @@ that.** When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-m
      gestures ignore.
    - Take screenshots with `screencapture -x -R<x>,<y>,<w>,<h> out.png` and look at them.
 5. **Check write-backs on the copies:** `rating <jpg>` and `grep` in the `.xmp`. Delete the copies afterwards.
+
+### Protocol that worked in wave 2
+
+- **Per branch:** `ab.sh main r1-main`, then each branch, then `ab.sh main r1-main2`; then a second round in reverse
+  order. Compare each branch against all the `main` runs with `multi.py`. Reference numbers for merged wave-2 `main`
+  are in `docs/superpowers/plans/2026-09-25-performance/results/bench/`, but always re-measure `main` yourself.
+- **After each merge:** `ab.sh main m-<task>` and compare with the previous `main` run. At the end, interleave the
+  pre-wave commit and merged `main`: pre, post, pre, post.
+- **A line over 5% that the branch doesn't touch:** re-run just that test alternately on both sides with
+  `-only-testing:…/<test> -test-iterations 3`, in two separate worktrees so nothing rebuilds between runs. In wave 2
+  two such lines were suite-order effects, not regressions.
+- **The "single cold thumbnail" lines** run after a ≥ 300 ms idle pause (the disk-cache settle), so they read higher
+  than wave 1's numbers on every checkout. Compare them only within this harness.
+
+### Driving the app: lessons from wave 2
+
+- **Focus moves.** Another window can come to the front between commands, or the window can move. Before *every*
+  click or key, pin the window in the same shell command:
+  `osascript -e 'tell application "System Events" to tell process "Phocasa"' -e 'set frontmost to true' -e 'set position of window 1 to {40, 60}' -e 'set size of window 1 to {1400, 900}' -e 'end tell' -e 'delay 0.3'`.
+- **Coordinates.** `screencapture -R40,60,1400,900` gives a 2800×1800 image. A point in it maps to screen points as
+  `x = 40 + px/2`, `y = 60 + py/2`. The image viewer may show it scaled; convert with its stated factor.
+- **Relaunch with the disk cache.** Launch with both `XCTestConfigurationFilePath=/dev/null/in-memory` and
+  `PHOCASA_THUMBNAIL_CACHE_DIR=<temp dir>`. The in-memory store forgets the library on quit, so reopen the folder
+  after relaunching. Cache files touched after the relaunch (`find <dir> -newermt @<ts>`) prove disk hits.
+- **Useful fixtures:**
+  - a RAW-only photo (delete one JPG from the copy);
+  - rotated photos (`orient`);
+  - a Lightroom-style sidecar (`PhocasaTests/MetadataSidecarFixtures.swift`, `lightroom`);
+  - a garbage `.xmp` (it must stay byte-identical; compare `md5`).
+- **After the check:** confirm `~/PhocasaBenchRAW` is unchanged with
+  `find ~/PhocasaBenchRAW -type f -newermt "<session start>" | wc -l` (should be 0), and that
+  `~/Library/Caches/com.phocasa.app` doesn't exist.
