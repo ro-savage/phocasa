@@ -153,6 +153,12 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         return image
     }
 
+    /// Whether anything may be cached for `path`: its folder exists. One `access` call, so a photo that was never
+    /// cached costs a caller that would try several buckets one failed call rather than several.
+    func mayHaveThumbnails(forPath path: String) -> Bool {
+        access(folderURL(forPath: path).path, F_OK) == 0
+    }
+
     /// Encodes `image` as a JPEG and writes it on the utility queue. Images with transparency aren't stored, and
     /// neither is anything while the queue is backed up (the thumbnail is simply stored the next time it's decoded).
     func store(_ image: CGImage, for key: Key) {

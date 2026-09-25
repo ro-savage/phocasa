@@ -203,6 +203,10 @@ final class ImageLoader: @unchecked Sendable {
     /// bucket up to twice as large (the memory cache's rule), decoded down to this bucket's size so the memory cache
     /// holds what a fresh decode would. Nothing new is stored: the larger file keeps serving.
     private static func diskThumbnail(for key: ThumbnailDiskCache.Key, in diskCache: ThumbnailDiskCache) -> CGImage? {
+        // Never cached (the first launch): one failed call instead of one per bucket.
+        guard diskCache.mayHaveThumbnails(forPath: key.path) else {
+            return nil
+        }
         if let exact = diskCache.image(for: key) {
             return exact
         }

@@ -259,6 +259,20 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         XCTAssertNil(cache.image(for: key("/photos/b.jpg", bucket: 384)))
     }
 
+    func testMayHaveThumbnailsForPathFollowsItsFolder() throws {
+        let cache = makeCache()
+        XCTAssertFalse(cache.mayHaveThumbnails(forPath: "/photos/a.jpg"))
+
+        cache.store(try image(), for: key("/photos/a.jpg"))
+        cache.waitForPendingWork()
+        XCTAssertTrue(cache.mayHaveThumbnails(forPath: "/photos/a.jpg"))
+        XCTAssertFalse(cache.mayHaveThumbnails(forPath: "/photos/b.jpg"))
+
+        cache.removeAll(forPath: "/photos/a.jpg")
+        cache.waitForPendingWork()
+        XCTAssertFalse(cache.mayHaveThumbnails(forPath: "/photos/a.jpg"))
+    }
+
     func testANewCacheInstanceReadsWhatAnEarlierOneStored() throws {
         let k = key("/photos/a.jpg")
         let first = makeCache()
