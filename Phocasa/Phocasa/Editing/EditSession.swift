@@ -134,12 +134,15 @@ final class EditSession {
 
     private func performBegin() async {
         guard !hasEnded, let url = sourceURL else { return }
+        // The header read (for the pass's size) runs beside the cache warm-up.
+        async let native = EditRenderSize.loadNativeSize(ofImageAt: url)
         if isRAW {
             await service.prepareRAW(url: url)
         } else {
             await service.prepareStandard(url: url)
         }
-        _ = await sourceNativeSize()
+        let size = await native
+        if nativeSize == nil { nativeSize = size }
         guard !hasEnded else { return }
         scheduleRender()
     }
