@@ -109,6 +109,7 @@ final class ViewModelTests: XCTestCase {
     func testFilterAll() {
         insertPhoto(name: "a", rating: 1)
         insertPhoto(name: "b", rating: 3)
+        viewModel.loadExistingData()
 
         viewModel.applyFilter(.all)
 
@@ -119,6 +120,7 @@ final class ViewModelTests: XCTestCase {
         insertPhoto(name: "a", rating: 1)
         insertPhoto(name: "b", rating: 3)
         insertPhoto(name: "c", rating: 3)
+        viewModel.loadExistingData()
 
         viewModel.applyFilter(.rated(3))
 
@@ -129,6 +131,7 @@ final class ViewModelTests: XCTestCase {
     func testFilterUnrated() {
         insertPhoto(name: "a", rating: 0)
         insertPhoto(name: "b", rating: 3)
+        viewModel.loadExistingData()
 
         viewModel.applyFilter(.unrated)
 
@@ -140,6 +143,7 @@ final class ViewModelTests: XCTestCase {
         insertPhoto(name: "a")
         insertPhoto(name: "b", isDeleted: true)
         insertPhoto(name: "c", isDeleted: true)
+        viewModel.loadExistingData()
 
         viewModel.applyFilter(.bin)
 
@@ -150,6 +154,7 @@ final class ViewModelTests: XCTestCase {
     func testFilterBinDoesNotShowActivePhotos() {
         insertPhoto(name: "active")
         insertPhoto(name: "binned", isDeleted: true)
+        viewModel.loadExistingData()
 
         viewModel.applyFilter(.bin)
 
@@ -372,6 +377,7 @@ final class ViewModelTests: XCTestCase {
     func testRestoreSelected() {
         let a = insertPhoto(name: "a", isDeleted: true)
         let b = insertPhoto(name: "b", isDeleted: true)
+        viewModel.loadExistingData()
         viewModel.applyFilter(.bin)
         viewModel.selectedPhotos = [a.id, b.id]
 
@@ -750,7 +756,7 @@ final class ViewModelTests: XCTestCase {
     func testMultiFilterAutoCombinesDifferentCategories() {
         let a = insertPhoto(name: "a", rating: 3)
         a.rawPath = "/fake/a.cr3"
-        let b = insertPhoto(name: "b", rating: 3)
+        insertPhoto(name: "b", rating: 3)
         // b has no rawPath
         let c = insertPhoto(name: "c", rating: 5)
         c.rawPath = "/fake/c.cr3"
