@@ -46,12 +46,16 @@
   }
   ```
 
+## Things to measure before committing to a design
+
+- **JPEG decode paths (spec §C2):** requests at ≤ 750 px (long edge ÷ 8) go through a software path of about 82 ms of CPU each, which runs in parallel across cores. Requests between 751 and 1500 px use the hardware decoder, about 46 ms each but serialised because there is only one. So a bucket just above 750 px isn't automatically faster under load. Measure throughput at the buckets the grid actually requests (`conc <px>` at, e.g., 512 and 768) before choosing bucket edges or `maxConcurrent`.
+
 ## Steps
 
 - [ ] **Step 1: Baseline.**
   1. Run the full suite.
   2. Build imagebench and run `gen`, `copies`, `conc 600`. Record "last 20 done".
-  3. If a local RAW file exists, run `raw` and record the thumbnail lines.
+  3. Run `raw` only if `IMAGEBENCH_RAW` is set in your environment (README, **RAW files**). Never look for a RAW file yourself. If it isn't set, say so in your results.
 
 - [ ] **Step 2: Scheduler tests first** (`ThumbnailSchedulerTests`). Use a `ThumbnailScheduler<Int, Int>` whose work closure records start order into a lock-protected array, and blocks on semaphores where a test needs to control timing.
   - `testNeverExceedsMaxConcurrent`: 20 requests, `maxConcurrent: 3`, track the peak concurrency with an atomic counter. The peak must be ≤ 3.
@@ -120,7 +124,7 @@
 
 - The scheduler tests pass, including cancellation and de-duplication.
 - The scheduler benchmark shows "last 20" ≤ 300 ms.
-- A RAW thumbnail (if a local RAW file exists) takes ≤ 25 ms at 600 px (the spec measured 15 ms).
+- A RAW thumbnail takes ≤ 25 ms at 600 px (the spec measured 15 ms). This is measured only if the coordinator provides `IMAGEBENCH_RAW`. Otherwise show in code that RAW takes the `IfAbsent` path, with the fallback test.
 - No cell's `.task` restarts while resizing within a bucket. Show this in the code, or with a debug counter in a test.
 - The `NSString` Sendable warning is gone, and there are zero new warnings.
 - `loadThumbnail` and `loadFullResolution` signatures are unchanged.

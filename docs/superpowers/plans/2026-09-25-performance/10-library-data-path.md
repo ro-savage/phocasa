@@ -24,7 +24,9 @@
 
 **Don't touch:**
 - `scanFolder`, `rescanCurrentLibrary`, `handleFolderSelected`, `setModelContext`, `findOrCreateTag` (task 20);
-- `checkFileAvailability`, `refreshAvailability`, `missingPhotoIDs`, `needsAvailabilityCheck` (keep calling them exactly as today; task 20 owns them);
+- `checkFileAvailability`, `refreshAvailability`, `missingPhotoIDs`, `needsAvailabilityCheck` (keep calling them exactly as today; task 20 owns them). **One exception:** `refreshAvailability()` calls `applyActiveFilters()`, which you delete. Replace that single call with whatever keeps its behaviour (for example nothing, if `loadExistingData()` already ends in `refreshVisiblePhotos()`), and change nothing else there;
+- `clearRAWSidecarEdits` and `revertEditsForPhoto`, which sit inside `// MARK: - Tags` but belong to editing (task 22);
+- the editing calls inside `navigateDetail` (`saveCurrentEditParameters`) and `closeDetail` (`stopEditing`): keep them exactly as they are;
 - everything under `// MARK: - Image Editing` and below, including crop, export and presets (tasks 13 and 22);
 - `metadataWriteItem(for:)` and `writeMetadataInBackground(_:)`: call them, don't edit them (task 14);
 - `PhotoGridView`, `PhotoGridItemView`, `PhotoDetailView` (tasks 11 and 12).
@@ -92,7 +94,7 @@
 These are today's behaviour; the tests encode most of them.
 
 - **Filters:** OR within a category, AND across categories. `.all` and `.bin` are "special" and never exclude photos. Clicking a filter without Shift replaces filters of the same category; with Shift it toggles.
-- **Search:** case-insensitive `contains` over the file name, tag names and tag categories. Search also applies in the bin view.
+- **Search:** case-insensitive `contains` over the file name, tag names and tag categories. Search also applies in the bin view. (Today, *clicking* Bin doesn't apply existing search text until the next keystroke; applying it consistently is fine, but note it as a deviation.)
 - **Counts** are always computed over the non-binned, available photos (`allPhotos`) and **ignore search**.
   - No filters: plain counts.
   - With filters: faceted. Rating counts use photos matching every filter *except* rating ones; tag and category counts exclude tag filters; JPG/RAW counts exclude file-type filters.
@@ -149,7 +151,7 @@ These are today's behaviour; the tests encode most of them.
   - **Bin moves:** `moveToBin` and `restoreFromBin` move photos between `allPhotos` and `binPhotos` (and their facts) in memory, keeping creation-date order (binary insert), then call `refreshVisiblePhotos()`.
     - Test `testMoveToBinAndRestoreKeepOrder`.
     - A restored photo shows up even if it was binned before the last availability check (see the existing `testRestoringPhotoBinnedBeforeAvailabilityCheckShowsIt`).
-  - **Rare operations:** `confirmPermanentDelete`, `emptyBin` and `deleteFileTypeOnly` may still call `loadExistingData()`.
+  - **Rare operations:** `confirmPermanentDelete`, `emptyBin` and `deleteFileTypeOnly` may still call `loadExistingData()`. `emptyBin()` currently runs its own `FetchDescriptor` for bin photos; use the in-memory `binPhotos` instead.
   - Commit: `perf: apply rating, tag and bin mutations in memory`.
 
 - [ ] **Step 7: O(1) lookups.**

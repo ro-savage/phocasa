@@ -71,6 +71,8 @@
                           colorSpace: CGColorSpace(name: CGColorSpace.sRGB), deferred: false)
   ```
   Before switching, confirm that this output matches today's `createCGImage(_:from:)` (see the tests).
+- **One CIContext, one Metal command queue.** A `CIContext(mtlDevice:)` owns a single command queue, so GPU work from the two lanes can still serialise there even when the CPU side runs in parallel. Test 8 will show it. If previews still wait, give each lane its own context (`CIContext(mtlCommandQueue:options:)` with identical options), and confirm the characterisation tests still pass.
+- **Call sites you don't own must keep compiling unchanged.** `PhotoDetailView` (task 12) and the rest of the view model call `processStandard`/`processRAW` without `lane:`, and `stopEditing` calls `clearCache()` synchronously. If the actor conversion forces an edit outside your ownership, stop and report it instead.
 - **Keep:**
   - the working colour space (`CGColorSpaceCreateDeviceRGB()`) and every filter's parameters and **order**;
   - the RAW post-chain order: negative brightness → vibrance → saturation → tone curve → sharpness → clarity → vignette;
@@ -85,7 +87,7 @@
 
 - [ ] **Step 1: Baseline.**
   1. Run the full suite.
-  2. Imagebench: `gen`, then `ci`, then `raw` if a local RAW file exists (read-only). Record the preview medians and the full-pass time.
+  2. Imagebench: `gen`, then `ci`. Run `raw` only if `IMAGEBENCH_RAW` is set (README, **RAW files**); never look for a RAW file yourself. Record the preview medians and the full-pass time.
 
 - [ ] **Step 2: Characterisation tests first** (`ImageEditingServiceTests`). Write these **before** any refactor, and make sure they pass against the current code.
   1. Generate a 1200×800 JPEG with a gradient and some shapes, plus orientation 6, in a temp dir.
@@ -130,7 +132,9 @@
 
 - [ ] **Step 7: Measure** (the `cacheIntermediates` decision and the imagebench `ci`/`raw` equivalents).
   - Add a gated benchmark (`PHOCASA_BENCH=1`) in `ImageEditingServiceTests` that times the median of 30 preview renders of a generated 6000×4000 JPEG through the real service.
-  - If a local RAW file exists, you may benchmark it **read-only in a local run**, but don't commit a test that depends on it.
+  - Add a gated benchmark for spec §E2: start a `.full` render of a generated 6000×4000 JPEG, request a `.preview` render 10 ms later, and time the preview from request to completion (median of 10). Run it before your changes (on the current single queue) and after. This is the **primary metric for the merge gate** when no RAW file is available.
+  - Also measure §E3: the main-thread time to first draw the full-resolution result (draw the returned `NSImage` into a bitmap context on the main actor), with deferred output before and `deferred: false` after.
+  - Measure RAW only if `IMAGEBENCH_RAW` is set. Don't commit a test that depends on a real RAW file.
   - Record before/after in the results file.
 
 - [ ] **Step 8: Full suite, warnings, results file, commit.**
@@ -138,7 +142,9 @@
 ## Acceptance criteria
 
 - The characterisation tests pass: rendering is pixel-identical (≤ 1) to the pre-refactor code for every parameter set.
-- RAW preview ≤ 40 ms (if a RAW file was available to measure; spec: 29 ms). JPEG preview no slower than baseline (≈4.7 ms).
+- RAW preview ≤ 40 ms (only if a RAW file was provided; spec: 29 ms). JPEG preview no slower than baseline (≈4.7 ms).
+- A preview requested during a full-resolution pass completes in about the time of a standalone preview, not after the full pass (the §E2 benchmark above).
+- **Pixels:** full renders (`maxSize == nil`) and exports stay identical (≤ 1). RAW *previews* change slightly, because `scaleFactor` demosaics at a lower resolution. That's the intended exception, and it's preview-only.
 - Previews complete while a full render is in flight (test 8). Cancelled renders do no work (test 7).
 - `renderToNSImage` uses `deferred: false`.
 - `ImageEditingService` has no `@unchecked Sendable`, no `withCheckedContinuation` and no string-named filters.

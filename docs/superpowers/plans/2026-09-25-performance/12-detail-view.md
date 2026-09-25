@@ -96,11 +96,11 @@
     - never more than 8
   - `testCacheIsBoundedByBytes`: set a small byte limit through an internal init, load 3 images, and check that the oldest is evicted (least recently used first).
   - `testPrefetchPopulatesCache`: after `prefetch` finishes (poll `cachedImage` with a timeout), `cachedImage` is non-nil.
-  - `testRAWUsesEmbeddedPreviewFirst`: skip unless a RAW file is available (`XCTSkip`). Don't rely on the user's files in committed tests; see the note in step 5.
+  - `testRAWUsesEmbeddedPreviewFirst`: `XCTSkip` unless the `PHOCASA_TEST_RAW` environment variable names a file. Never search for RAW files, and don't rely on the user's files in committed tests (README, **RAW files**).
 
 - [ ] **Step 5: Implement `FullImageLoader`.**
   - **Decode:** `CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true, kCGImageSourceSubsampleFactor: f])`, where `f` is 1, 2, 4 or 8 and the key is omitted for 1. Read the orientation from `CGImageSourceCopyPropertiesAtIndex` (`kCGImagePropertyOrientation`).
-  - **RAW paths** (`FolderScanner.rawExtensions`): the first stage uses `CGImageSourceCreateThumbnailAtIndex` with `kCGImageSourceCreateThumbnailFromImageIfAbsent` + `WithTransform` + `ThumbnailMaxPixelSize` = viewport long edge. That returns the embedded preview, already oriented, so its orientation is `.up`. A full RAW decode happens only when zoom needs it. Check with imagebench `raw` if a RAW file is present locally (read-only), and note the timings in your results.
+  - **RAW paths** (`FolderScanner.rawExtensions`): the first stage uses `CGImageSourceCreateThumbnailAtIndex` with `kCGImageSourceCreateThumbnailFromImageIfAbsent` + `WithTransform` + `ThumbnailMaxPixelSize` = viewport long edge. That returns the embedded preview, already oriented, so its orientation is `.up`. A full RAW decode happens only when zoom needs it. Time it with imagebench `raw` only if `IMAGEBENCH_RAW` is set (README, **RAW files**). Otherwise note that RAW timing wasn't measured.
   - **Cache:** an LRU keyed by `(path, subsample)` with a byte limit of 512 MB, where cost = `bytesPerRow × height`, behind an `NSLock`.
   - **Decode queue:** a serial `DispatchQueue(qos: .userInitiated)` for foreground loads and another at `.utility` for prefetch. A new prefetch set cancels queued prefetches that haven't started (a generation counter checked when each item starts).
   - Make the tests pass. Commit: `perf: add FullImageLoader (hardware decode, subsampling, LRU, prefetch)`.
@@ -115,7 +115,7 @@
   - Zoom and fit maths use `orientedSize` everywhere they used `image.size`.
 
 - [ ] **Step 7: Progressive loading and prefetch** in `loadImages()`.
-  1. **Instantly:** if `ImageLoader.shared.loadThumbnail(for: path, maxSize: 512)` returns quickly from its cache, show it as a placeholder, oriented `.up`.
+  1. **Instantly:** show a thumbnail placeholder, oriented `.up`, if one is available before the fit image. `ImageLoader` has no cache-only lookup, and you don't own it, so don't wait for `loadThumbnail` before starting the fit decode. Run them concurrently and show the thumbnail only if it arrives first. List a cache-only `ImageLoader` lookup under "Needs from other tasks".
   2. **Fit image:**
      ```swift
      let f = FullImageLoader.subsampleFactor(imagePixelSize: <from properties>,
@@ -143,6 +143,10 @@
 - A scroll event outside the image viewport, or in another window, is not consumed (pure-function test).
 - With both JPG and RAW saved edits, only the JPG render runs (code inspection plus a comment).
 - No view-model or `ImageLoader` changes. The full suite passes with zero new warnings.
+
+## Notes
+
+- `loadImages()` renders saved edits with `processStandard`/`processRAW` at full resolution. After task 13 these calls default to the `.preview` lane. Don't add `lane:` (it doesn't exist on your branch). Record it as a follow-up for task 22, which should move them to `.full`.
 
 ## Out of scope and follow-ups
 

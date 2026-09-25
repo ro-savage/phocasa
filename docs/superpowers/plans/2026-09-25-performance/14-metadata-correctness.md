@@ -82,7 +82,7 @@
   ```
   - Remove the dead TIFF `"Rating"` lookup.
   - If there are no IPTC keywords, fall back to XMP `dc:subject`: `CGImageMetadataCopyTagWithPath(meta, nil, "dc:subject" as CFString)`, whose value is an array of `CGImageMetadataTag`; take each element's string value.
-  - Keep the sidecar precedence exactly as today.
+  - Keep the sidecar precedence exactly as today. Note that `readMetadata(from: "x.jpg")` also reads `x.xmp`, which for a JPG+RAW pair is the RAW's sidecar. That's today's behaviour, so keep it.
 
 - [ ] **Step 4: Fix RAW edit loss.**
   - `writeMetadata`'s RAW branch must read the existing edit parameters (`readEditParameters(forRAWAt:)`) and pass them through to `writeSidecar`.
