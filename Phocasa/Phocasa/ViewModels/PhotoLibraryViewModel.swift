@@ -1,39 +1,6 @@
 import SwiftUI
 import SwiftData
 
-enum SidebarFilter: Hashable {
-    case all
-    case unrated
-    case rated(Int)
-    case tag(UUID)
-    case tagCategory(String)
-    case bin
-    case jpgOnly
-    case rawOnly
-
-    var filterCategory: String {
-        switch self {
-        case .all, .bin: return "special"
-        case .unrated, .rated: return "rating"
-        case .jpgOnly, .rawOnly: return "fileType"
-        case .tag, .tagCategory: return "tag"
-        }
-    }
-
-    func matches(_ photo: PhotoAsset) -> Bool {
-        switch self {
-        case .all: return true
-        case .bin: return photo.isDeleted
-        case .unrated: return photo.rating == 0
-        case .rated(let stars): return photo.rating == stars
-        case .jpgOnly: return photo.jpgPath != nil
-        case .rawOnly: return photo.rawPath != nil
-        case .tag(let tagId): return photo.tags.contains { $0.id == tagId }
-        case .tagCategory(let category): return photo.tags.contains { $0.category == category }
-        }
-    }
-}
-
 @Observable @MainActor
 final class PhotoLibraryViewModel {
     var photos: [PhotoAsset] = []
@@ -64,6 +31,57 @@ final class PhotoLibraryViewModel {
     var jpgCount: Int = 0
     var rawCount: Int = 0
     var tagCounts: [UUID: Int] = [:]
+    /// Tags of each non-empty category, sorted by name (the order of `allTags`).
+    private(set) var tagsByCategory: [String: [Tag]] = [:]
+    /// Tags without a category, in `allTags` order.
+    private(set) var uncategorizedTags: [Tag] = []
+
+    // MARK: - In-Memory Library State
+    // `loadExistingData()` fetches once. Filtering, search, sort, counts and mutations then work on
+    // this state. Each facts array lines up index-for-index with its photo array, so hot paths read
+    // plain values and never model properties (each model read costs ~0.8 µs; spec §A1).
+
+    @ObservationIgnored private var allFacts: [PhotoFacts] = []
+    /// Photos in the bin, in the same creation-date order as `allPhotos`.
+    @ObservationIgnored private var binPhotos: [PhotoAsset] = []
+    @ObservationIgnored private var binFacts: [PhotoFacts] = []
+    /// Bumped whenever `allPhotos` / `binPhotos` gain, lose or reorder photos.
+    @ObservationIgnored private var libraryVersion = 0
+    @ObservationIgnored private var binVersion = 0
+    /// How `photos` was derived.
+    @ObservationIgnored private var grid = GridState()
+    /// Positions in `photos` by id. Rebuilt on first use after `photos` changes.
+    @ObservationIgnored private var photoIndexCache: [UUID: Int]?
+    /// Sidebar counts over the whole library with no filters. Every mutation keeps them current.
+    @ObservationIgnored private var libraryCounts = FacetCounts()
+    /// Faceted counts for the active filters, kept current the same way until the filters change.
+    @ObservationIgnored private var filteredCounts: (filters: Set<SidebarFilter>, counts: FacetCounts)?
+    @ObservationIgnored private var tagFacts = TagFactsCache()
+    /// Lowercased names for `searchSuggestions`, in `tagCategories` / `allTags` order.
+    private var categorySearchKeys: [(category: String, key: String)] = []
+    private var tagNameSearchKeys: [(name: String, key: String)] = []
+
+    /// What `photos` shows, so that a refresh that changes nothing costs nothing and small mutations
+    /// can patch `photos` in place instead of re-filtering the whole library.
+    private struct GridState {
+        var query = PhotoQuery()
+        var showsBin = false
+        /// `libraryVersion` / `binVersion` of the shown list when `photos` was last brought up to date.
+        var sourceVersion = -1
+        /// `photos[i].id`, without reading the models.
+        var ids: [UUID] = []
+        /// The position in the shown list of each photo in `photos`; nil when `photos` is the whole list.
+        var sourceIndices: [Int]?
+    }
+
+    /// A photo's place in the library (`allPhotos`) or the bin (`binPhotos`).
+    private struct ListPosition {
+        var inBin: Bool
+        var index: Int
+    }
+
+    /// Mutations touching more photos than this re-filter the grid instead of patching it.
+    private static let patchLimit = 8
 
     // MARK: - Image Editing State
     var isEditing: Bool = false
@@ -89,7 +107,7 @@ final class PhotoLibraryViewModel {
     }
 
     var selectedPhotosList: [PhotoAsset] {
-        photos.filter { selectedPhotos.contains($0.id) }
+        selectedPhotos.compactMap { index(of: $0) }.sorted().map { photos[$0] }
     }
 
     func isPartOfMultiSelection(_ photo: PhotoAsset) -> Bool {
@@ -133,13 +151,17 @@ final class PhotoLibraryViewModel {
     func refreshAvailability() {
         needsAvailabilityCheck = true
         loadExistingData()
-        applyActiveFilters()
     }
 
     // MARK: - Data Loading
 
+    /// The one place (besides scans) that reads photos and tags from the store. Everything else works
+    /// on the in-memory state this builds.
     func loadExistingData() {
         guard let context = modelContext else { return }
+
+        let tags = (try? context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))) ?? []
+        tagFacts = TagFactsCache(tags: tags)
 
         let sortOrder: SortOrder = sortNewestFirst ? .reverse : .forward
         let photoDescriptor = FetchDescriptor<PhotoAsset>(
@@ -152,69 +174,326 @@ final class PhotoLibraryViewModel {
             checkFileAvailability(for: fetchedPhotos)
         }
 
-        allPhotos = fetchedPhotos.filter { !missingPhotoIDs.contains($0.id) }
+        let fetchedFacts = makeFacts(for: fetchedPhotos)
+        if missingPhotoIDs.isEmpty {
+            allPhotos = fetchedPhotos
+            allFacts = fetchedFacts
+        } else {
+            let available = fetchedFacts.indices.filter { !missingPhotoIDs.contains(fetchedFacts[$0].id) }
+            allPhotos = available.map { fetchedPhotos[$0] }
+            allFacts = available.map { fetchedFacts[$0] }
+        }
 
         let binDescriptor = FetchDescriptor<PhotoAsset>(
             predicate: #Predicate { $0.isDeleted },
             sortBy: [SortDescriptor(\.creationDate, order: sortOrder)]
         )
-        let binPhotos = (try? context.fetch(binDescriptor)) ?? []
-        binCount = binPhotos.count
+        binPhotos = (try? context.fetch(binDescriptor)) ?? []
+        binFacts = makeFacts(for: binPhotos)
 
-        if viewingBin {
-            photos = binPhotos
-        } else {
-            photos = allPhotos
-        }
-
-        recomputeSidebarCounts()
-
-        let tagDescriptor = FetchDescriptor<Tag>(sortBy: [SortDescriptor(\.category), SortDescriptor(\.name)])
-        allTags = (try? context.fetch(tagDescriptor)) ?? []
-
-        let categories = Array(Set(allTags.compactMap { $0.category.isEmpty ? nil : $0.category }))
-        tagCategories = categories.sorted { a, b in
-            let countA = categoryCounts[a, default: 0]
-            let countB = categoryCounts[b, default: 0]
-            if countA != countB { return countA > countB }
-            return a < b
-        }
+        libraryVersion += 1
+        binVersion += 1
+        libraryCounts = PhotoQuery().facetCounts(over: allFacts)
+        filteredCounts = nil
+        setTagLists(tags)
+        refreshVisiblePhotos()
+        sortTagCategories()
 
         let libDescriptor = FetchDescriptor<PhotoLibrary>()
         currentLibrary = (try? context.fetch(libDescriptor))?.first
     }
 
-    private func recomputeSidebarCounts() {
-        var counts: [Int: Int] = [:]
-        var catCounts: [String: Int] = [:]
-        var tCounts: [UUID: Int] = [:]
-        var jpgC = 0
-        var rawC = 0
-        for photo in allPhotos {
-            counts[photo.rating, default: 0] += 1
-            if photo.jpgPath != nil { jpgC += 1 }
-            if photo.rawPath != nil { rawC += 1 }
-            var seenCategories = Set<String>()
-            for tag in photo.tags {
-                tCounts[tag.id, default: 0] += 1
-                if !tag.category.isEmpty && seenCategories.insert(tag.category).inserted {
-                    catCounts[tag.category, default: 0] += 1
-                }
-            }
-        }
-        ratingCounts = counts
-        categoryCounts = catCounts
-        tagCounts = tCounts
-        jpgCount = jpgC
-        rawCount = rawC
+    /// `allTags` order: by category, then name (the same descriptors sort the fetch and in-memory inserts).
+    private static var tagSortOrder: [SortDescriptor<Tag>] {
+        [SortDescriptor(\.category), SortDescriptor(\.name)]
     }
 
-    private func updateSidebarAfterChange() {
-        if !activeFilters.isEmpty && !viewingBin {
-            applyActiveFilters()
-        } else {
-            recomputeSidebarCounts()
+    private func makeFacts(for photos: [PhotoAsset]) -> [PhotoFacts] {
+        var facts: [PhotoFacts] = []
+        facts.reserveCapacity(photos.count)
+        for photo in photos {
+            facts.append(PhotoFacts(photo, tags: &tagFacts))
         }
+        return facts
+    }
+
+    // MARK: - In-Memory Library
+
+    /// Position of the photo in `photos`, in O(1) (the index is rebuilt on first use after a change).
+    func index(of id: UUID) -> Int? {
+        access(keyPath: \.photos) // the result changes whenever `photos` does
+        return photoIndex()[id]
+    }
+
+    private func photoIndex() -> [UUID: Int] {
+        if let photoIndexCache { return photoIndexCache }
+        var index = [UUID: Int](minimumCapacity: grid.ids.count)
+        for (position, id) in grid.ids.enumerated() { index[id] = position }
+        photoIndexCache = index
+        return index
+    }
+
+    private var currentQuery: PhotoQuery {
+        PhotoQuery(filters: activeFilters, searchText: searchText)
+    }
+
+    private func listVersion(inBin: Bool) -> Int {
+        inBin ? binVersion : libraryVersion
+    }
+
+    /// Whether `photos` is up to date with the current contents of that list (so it can be patched).
+    private func gridShowsCurrent(inBin: Bool) -> Bool {
+        grid.showsBin == inBin && grid.sourceVersion == listVersion(inBin: inBin)
+    }
+
+    /// Brings `photos` and the sidebar counts up to date with the filters, the search text and the
+    /// shown list (library or bin). Re-filters only when one of those changed since `photos` was
+    /// built or patched. Reads no model properties.
+    private func refreshVisiblePhotos() {
+        let query = currentQuery
+        if grid.query != query || !gridShowsCurrent(inBin: viewingBin) {
+            rebuildGrid(query: query)
+        }
+        publishCounts()
+    }
+
+    private func rebuildGrid(query: PhotoQuery) {
+        let listPhotos = viewingBin ? binPhotos : allPhotos
+        let listFacts = viewingBin ? binFacts : allFacts
+        var state = GridState(query: query, showsBin: viewingBin, sourceVersion: listVersion(inBin: viewingBin))
+        if query.matchesEverything {
+            state.ids = listFacts.map(\.id)
+            photos = listPhotos
+        } else {
+            let matching = query.matchingIndices(in: listFacts)
+            state.ids = matching.map { listFacts[$0].id }
+            state.sourceIndices = matching
+            photos = matching.map { listPhotos[$0] }
+        }
+        grid = state
+        photoIndexCache = nil
+    }
+
+    /// Publishes the counts for the active filters. Counts cover the library (never the bin) and
+    /// ignore search, so search keystrokes and the bin view reuse them.
+    private func publishCounts() {
+        let counts: FacetCounts
+        if activeFilters.allSatisfy({ $0.category == .special }) {
+            filteredCounts = nil
+            counts = libraryCounts
+        } else if let cached = filteredCounts, cached.filters == activeFilters {
+            counts = cached.counts
+        } else {
+            counts = PhotoQuery(filters: activeFilters).facetCounts(over: allFacts)
+            filteredCounts = (activeFilters, counts)
+        }
+        // Assign only on change, so the sidebar isn't invalidated for nothing.
+        if ratingCounts != counts.ratings { ratingCounts = counts.ratings }
+        if tagCounts != counts.tags { tagCounts = counts.tags }
+        if categoryCounts != counts.categories { categoryCounts = counts.categories }
+        if jpgCount != counts.jpg { jpgCount = counts.jpg }
+        if rawCount != counts.raw { rawCount = counts.raw }
+        if binCount != binPhotos.count { binCount = binPhotos.count }
+    }
+
+    /// Keeps the counts current when a library photo changes, joins (`old == nil`) or leaves
+    /// (`new == nil`) the library.
+    private func countLibraryChange(from old: PhotoFacts?, to new: PhotoFacts?) {
+        PhotoQuery().updateFacetCounts(&libraryCounts, replacing: old, with: new)
+        if let filters = filteredCounts?.filters {
+            PhotoQuery(filters: filters).updateFacetCounts(&filteredCounts!.counts, replacing: old, with: new)
+        }
+    }
+
+    /// Finds a loaded photo: O(1) through the grid when it is shown, a scan of the facts otherwise.
+    private func position(of id: UUID, useIndex: Bool) -> ListPosition? {
+        if gridShowsCurrent(inBin: grid.showsBin) {
+            let shownAt = useIndex || photoIndexCache != nil ? photoIndex()[id] : grid.ids.firstIndex(of: id)
+            if let shownAt {
+                return ListPosition(inBin: grid.showsBin, index: grid.sourceIndices?[shownAt] ?? shownAt)
+            }
+        }
+        // Scan the smaller list first: that's usually the bin.
+        let binFirst = binFacts.count <= allFacts.count
+        for inBin in [binFirst, !binFirst] {
+            if let index = Self.firstIndex(of: id, in: inBin ? binFacts : allFacts) {
+                return ListPosition(inBin: inBin, index: index)
+            }
+        }
+        return nil
+    }
+
+    /// A linear scan that reads only the `id` field of each element (no struct copies).
+    private static func firstIndex(of id: UUID, in facts: [PhotoFacts]) -> Int? {
+        facts.withUnsafeBufferPointer { buffer in
+            for i in buffer.indices where buffer[i].id == id { return i }
+            return nil
+        }
+    }
+
+    /// For code that changes a photo's rating, tags, file paths or file name directly rather than
+    /// through this view model's methods (for example, an export that gives a RAW-only photo a JPG):
+    /// updates the in-memory library, the grid and the counts to match the models.
+    func photosDidChange(_ changed: [PhotoAsset]) {
+        applyFactChanges(changed)
+        refreshVisiblePhotos()
+        sortTagCategories()
+    }
+
+    /// Re-reads the facts of photos whose rating or tags changed (a few model reads each), and
+    /// applies them to the counts and the grid.
+    private func applyFactChanges(_ changed: [PhotoAsset]) {
+        guard !changed.isEmpty else { return }
+        // Locate everything first: patching the grid below invalidates the index.
+        var located: [(facts: PhotoFacts, position: ListPosition)] = []
+        for photo in changed {
+            let new = PhotoFacts(photo, tags: &tagFacts)
+            if let position = position(of: new.id, useIndex: changed.count > 2) {
+                located.append((new, position))
+            }
+        }
+        let patching = located.count <= Self.patchLimit
+        let recount = located.count > 1_000 // cheaper than that many incremental updates
+        for (new, position) in located {
+            let old: PhotoFacts
+            if position.inBin {
+                old = binFacts[position.index]
+                binFacts[position.index] = new
+            } else {
+                old = allFacts[position.index]
+                allFacts[position.index] = new
+                if !recount { countLibraryChange(from: old, to: new) }
+            }
+            // Only a filtered grid can gain or lose photos when facts change.
+            guard patching, gridShowsCurrent(inBin: position.inBin), grid.sourceIndices != nil else { continue }
+            let matches = grid.query.matches(new)
+            if grid.query.matches(old) != matches {
+                gridDidChangeMembership(atSource: position.index, now: matches)
+            }
+        }
+        if recount {
+            libraryCounts = PhotoQuery().facetCounts(over: allFacts)
+            filteredCounts = nil
+        }
+        if !patching && grid.sourceIndices != nil { grid.sourceVersion = -1 } // re-filter in refreshVisiblePhotos
+    }
+
+    // MARK: - Grid Patching
+    // Small mutations update `photos` in place. A filtered grid maps each shown photo to its position
+    // in the shown list (`grid.sourceIndices`, ascending), so a binary search finds where it goes.
+
+    private func firstShown(atOrAfter sourceIndex: Int, in indices: [Int]) -> Int {
+        var low = 0
+        var high = indices.count
+        while low < high {
+            let mid = (low + high) / 2
+            if indices[mid] < sourceIndex { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+
+    /// A photo in the shown list started or stopped matching the grid's query.
+    private func gridDidChangeMembership(atSource sourceIndex: Int, now matches: Bool) {
+        guard var indices = grid.sourceIndices else { return }
+        let shownAt = firstShown(atOrAfter: sourceIndex, in: indices)
+        let isShown = shownAt < indices.count && indices[shownAt] == sourceIndex
+        guard isShown != matches else {
+            grid.sourceVersion = -1 // shouldn't happen; re-filter rather than patch the wrong row
+            return
+        }
+        grid.sourceIndices = nil // keep `indices` uniquely referenced while editing it
+        if matches {
+            let photo = grid.showsBin ? binPhotos[sourceIndex] : allPhotos[sourceIndex]
+            let id = grid.showsBin ? binFacts[sourceIndex].id : allFacts[sourceIndex].id
+            photos.insert(photo, at: shownAt)
+            grid.ids.insert(id, at: shownAt)
+            indices.insert(sourceIndex, at: shownAt)
+        } else {
+            photos.remove(at: shownAt)
+            grid.ids.remove(at: shownAt)
+            indices.remove(at: shownAt)
+        }
+        grid.sourceIndices = indices
+        photoIndexCache = nil
+    }
+
+    /// The shown list lost the photo at `sourceIndex`.
+    private func gridDidRemove(atSource sourceIndex: Int) {
+        guard var indices = grid.sourceIndices else {
+            photos.remove(at: sourceIndex)
+            grid.ids.remove(at: sourceIndex)
+            photoIndexCache = nil
+            return
+        }
+        grid.sourceIndices = nil
+        let shownAt = firstShown(atOrAfter: sourceIndex, in: indices)
+        if shownAt < indices.count && indices[shownAt] == sourceIndex {
+            photos.remove(at: shownAt)
+            grid.ids.remove(at: shownAt)
+            indices.remove(at: shownAt)
+            photoIndexCache = nil
+        }
+        for i in shownAt..<indices.count { indices[i] -= 1 }
+        grid.sourceIndices = indices
+    }
+
+    /// The shown list gained `photo` at `sourceIndex`.
+    private func gridDidInsert(_ photo: PhotoAsset, facts: PhotoFacts, atSource sourceIndex: Int) {
+        guard var indices = grid.sourceIndices else {
+            photos.insert(photo, at: sourceIndex)
+            grid.ids.insert(facts.id, at: sourceIndex)
+            photoIndexCache = nil
+            return
+        }
+        grid.sourceIndices = nil
+        let shownAt = firstShown(atOrAfter: sourceIndex, in: indices)
+        for i in shownAt..<indices.count { indices[i] += 1 }
+        if grid.query.matches(facts) {
+            photos.insert(photo, at: shownAt)
+            grid.ids.insert(facts.id, at: shownAt)
+            indices.insert(sourceIndex, at: shownAt)
+            photoIndexCache = nil
+        }
+        grid.sourceIndices = indices
+    }
+
+    // MARK: - Tag Lists
+
+    /// Rebuilds everything derived from the tag list. `tags` must be sorted by `tagSortOrder`.
+    /// `tagCategories` keeps its order until the next `sortTagCategories()`.
+    private func setTagLists(_ tags: [Tag]) {
+        var byCategory: [String: [Tag]] = [:]
+        var uncategorized: [Tag] = []
+        var nameKeys: [(name: String, key: String)] = []
+        nameKeys.reserveCapacity(tags.count)
+        for tag in tags {
+            let name = tag.name
+            let category = tag.category
+            if category.isEmpty {
+                uncategorized.append(tag)
+            } else {
+                byCategory[category, default: []].append(tag)
+            }
+            nameKeys.append((name, name.lowercased()))
+        }
+        allTags = tags
+        tagsByCategory = byCategory
+        uncategorizedTags = uncategorized
+        tagNameSearchKeys = nameKeys
+    }
+
+    /// Orders `tagCategories` by how many library photos have a tag in each (descending), then by
+    /// name. Called after loads and after changes to tags or to which photos are in the library.
+    private func sortTagCategories() {
+        let counts = libraryCounts.categories
+        let sorted = tagsByCategory.keys.sorted { a, b in
+            let countA = counts[a, default: 0]
+            let countB = counts[b, default: 0]
+            if countA != countB { return countA > countB }
+            return a < b
+        }
+        if sorted != tagCategories { tagCategories = sorted }
+        categorySearchKeys = sorted.map { ($0, $0.lowercased()) }
     }
 
     // MARK: - Folder Opening
@@ -336,18 +615,21 @@ final class PhotoLibraryViewModel {
         try? modelContext?.save()
 
         writeMetadataInBackground([metadataWriteItem(for: photo)])
-        updateSidebarAfterChange()
+        applyFactChanges([photo])
+        refreshVisiblePhotos()
     }
 
     func setRatingForSelection(_ rating: Int) {
         guard let context = modelContext else { return }
-        for photo in selectedPhotosList {
+        let selection = selectedPhotosList
+        for photo in selection {
             photo.rating = rating
         }
         try? context.save()
 
-        writeMetadataInBackground(selectedPhotosList.map { metadataWriteItem(for: $0) })
-        updateSidebarAfterChange()
+        writeMetadataInBackground(selection.map { metadataWriteItem(for: $0) })
+        applyFactChanges(selection)
+        refreshVisiblePhotos()
     }
 
     // MARK: - Selection
@@ -366,7 +648,7 @@ final class PhotoLibraryViewModel {
     }
 
     func selectAll() {
-        selectedPhotos = Set(photos.map(\.id))
+        selectedPhotos = Set(grid.ids)
     }
 
     func clearSelection() {
@@ -376,18 +658,25 @@ final class PhotoLibraryViewModel {
 
     func rangeSelect(to photo: PhotoAsset) {
         guard let lastId = lastSelectedId,
-              let lastIndex = photos.firstIndex(where: { $0.id == lastId }),
-              let currentIndex = photos.firstIndex(where: { $0.id == photo.id }) else {
+              let lastIndex = index(of: lastId),
+              let currentIndex = index(of: photo.id) else {
             selectedPhotos.insert(photo.id)
             lastSelectedId = photo.id
             return
         }
 
         let range = min(lastIndex, currentIndex)...max(lastIndex, currentIndex)
-        for i in range {
-            selectedPhotos.insert(photos[i].id)
-        }
+        selectedPhotos.formUnion(grid.ids[range])
         lastSelectedId = photo.id
+    }
+
+    /// The photo Space/Return should open: the last-clicked photo if it is still selected and in the
+    /// grid, otherwise the selected photo that comes first in the grid.
+    var primarySelectedPhoto: PhotoAsset? {
+        if let id = lastSelectedId, selectedPhotos.contains(id), let position = index(of: id) {
+            return photos[position]
+        }
+        return selectedPhotos.compactMap { index(of: $0) }.min().map { photos[$0] }
     }
 
     // MARK: - Deletion / Bin
@@ -441,7 +730,6 @@ final class PhotoLibraryViewModel {
         }
         try? modelContext?.save()
         loadExistingData()
-        applyActiveFilters()
     }
 
     private func trashRAWFile(for photo: PhotoAsset) {
@@ -466,21 +754,195 @@ final class PhotoLibraryViewModel {
     }
 
     private func moveToBin(_ photosToMove: [PhotoAsset]) {
+        var ids: [UUID] = []
         for photo in photosToMove {
             photo.isDeleted = true
-            selectedPhotos.remove(photo.id)
+            ids.append(photo.id)
         }
+        selectedPhotos.subtract(ids)
         try? modelContext?.save()
-        loadExistingData()
+        relocate(photosToMove, ids: ids, toBin: true)
     }
 
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) {
+        var ids: [UUID] = []
         for photo in photosToRestore {
             photo.isDeleted = false
-            selectedPhotos.remove(photo.id)
+            ids.append(photo.id)
         }
+        selectedPhotos.subtract(ids)
         try? modelContext?.save()
-        loadExistingData()
+        relocate(photosToRestore, ids: ids, toBin: false)
+    }
+
+    /// Moves photos between the library and the bin in memory, as a reload would place them: each
+    /// list stays in creation-date order, and a restored photo whose file was missing at the last
+    /// availability check stays hidden.
+    private func relocate(_ moving: [PhotoAsset], ids: [UUID], toBin: Bool) {
+        var seen = Set<UUID>()
+        let unique = zip(moving, ids).filter { seen.insert($0.1).inserted }.map { (photo: $0.0, id: $0.1) }
+        if unique.count <= Self.patchLimit {
+            relocateInPlace(unique, toBin: toBin)
+        } else {
+            relocateByMerging(unique, toBin: toBin)
+        }
+        refreshVisiblePhotos()
+        sortTagCategories()
+    }
+
+    /// A few photos: O(log n) per photo to find its place, plus array inserts and removals; the grid
+    /// and the counts are patched rather than recomputed.
+    private func relocateInPlace(_ moving: [(photo: PhotoAsset, id: UUID)], toBin: Bool) {
+        let found = moving.map { (photo: $0.photo, id: $0.id, position: position(of: $0.id, useIndex: moving.count > 2)) }
+        // Remove from the end of each list first, so the positions found stay valid.
+        var removed: [UUID: PhotoFacts] = [:]
+        for item in found.sorted(by: { ($0.position?.index ?? -1) > ($1.position?.index ?? -1) }) {
+            guard let position = item.position else { continue }
+            removed[item.id] = removeFromList(at: position)
+        }
+        for item in found {
+            if !toBin && missingPhotoIDs.contains(item.id) { continue }
+            let facts = removed[item.id] ?? PhotoFacts(item.photo, tags: &tagFacts)
+            insertIntoList(item.photo, facts: facts, inBin: toBin)
+        }
+    }
+
+    private func removeFromList(at position: ListPosition) -> PhotoFacts {
+        let patchGrid = gridShowsCurrent(inBin: position.inBin)
+        let facts: PhotoFacts
+        if position.inBin {
+            binPhotos.remove(at: position.index)
+            facts = binFacts.remove(at: position.index)
+            binVersion += 1
+        } else {
+            allPhotos.remove(at: position.index)
+            facts = allFacts.remove(at: position.index)
+            libraryVersion += 1
+            countLibraryChange(from: facts, to: nil)
+        }
+        if patchGrid {
+            gridDidRemove(atSource: position.index)
+            grid.sourceVersion = listVersion(inBin: position.inBin)
+        }
+        return facts
+    }
+
+    private func insertIntoList(_ photo: PhotoAsset, facts: PhotoFacts, inBin: Bool) {
+        let patchGrid = gridShowsCurrent(inBin: inBin)
+        let index = insertionIndex(for: photo.creationDate, in: inBin ? binPhotos : allPhotos)
+        if inBin {
+            binPhotos.insert(photo, at: index)
+            binFacts.insert(facts, at: index)
+            binVersion += 1
+        } else {
+            allPhotos.insert(photo, at: index)
+            allFacts.insert(facts, at: index)
+            libraryVersion += 1
+            countLibraryChange(from: nil, to: facts)
+        }
+        if patchGrid {
+            gridDidInsert(photo, facts: facts, atSource: index)
+            grid.sourceVersion = listVersion(inBin: inBin)
+        }
+    }
+
+    /// Where a photo goes in a list sorted by creation date the way the fetch sorts (newest first when
+    /// `sortNewestFirst`; nil dates count as oldest): after every photo that doesn't sort after it.
+    /// A binary search, so it reads O(log n) creation dates.
+    private func insertionIndex(for date: Date?, in photos: [PhotoAsset]) -> Int {
+        let date = date ?? .distantPast
+        let newestFirst = sortNewestFirst
+        var low = 0
+        var high = photos.count
+        while low < high {
+            let mid = (low + high) / 2
+            let other = photos[mid].creationDate ?? .distantPast
+            if newestFirst ? date > other : date < other { high = mid } else { low = mid + 1 }
+        }
+        return low
+    }
+
+    /// Many photos: one filtering pass and one merge per list, then the grid and counts are rebuilt.
+    private func relocateByMerging(_ moving: [(photo: PhotoAsset, id: UUID)], toBin: Bool) {
+        let ids = Set(moving.map(\.id))
+        var removed: [UUID: PhotoFacts] = [:]
+        if let kept = removing(ids, from: allPhotos, allFacts, capturingInto: &removed) {
+            (allPhotos, allFacts) = kept
+            libraryVersion += 1
+        }
+        if let kept = removing(ids, from: binPhotos, binFacts, capturingInto: &removed) {
+            (binPhotos, binFacts) = kept
+            binVersion += 1
+        }
+        var incoming: [(photo: PhotoAsset, facts: PhotoFacts)] = []
+        for item in moving {
+            if !toBin && missingPhotoIDs.contains(item.id) { continue }
+            incoming.append((item.photo, removed[item.id] ?? PhotoFacts(item.photo, tags: &tagFacts)))
+        }
+        if toBin {
+            (binPhotos, binFacts) = inserting(incoming, into: binPhotos, binFacts)
+            binVersion += 1
+        } else {
+            (allPhotos, allFacts) = inserting(incoming, into: allPhotos, allFacts)
+            libraryVersion += 1
+        }
+        libraryCounts = PhotoQuery().facetCounts(over: allFacts)
+        filteredCounts = nil
+    }
+
+    /// The photos and facts without `ids`, or nil when none of them is there.
+    private func removing(
+        _ ids: Set<UUID>, from photos: [PhotoAsset], _ facts: [PhotoFacts],
+        capturingInto captured: inout [UUID: PhotoFacts]
+    ) -> ([PhotoAsset], [PhotoFacts])? {
+        guard !ids.isEmpty, facts.contains(where: { ids.contains($0.id) }) else { return nil }
+        var keptPhotos: [PhotoAsset] = []
+        var keptFacts: [PhotoFacts] = []
+        keptPhotos.reserveCapacity(photos.count)
+        keptFacts.reserveCapacity(facts.count)
+        for i in facts.indices {
+            if ids.contains(facts[i].id) {
+                captured[facts[i].id] = facts[i]
+            } else {
+                keptPhotos.append(photos[i])
+                keptFacts.append(facts[i])
+            }
+        }
+        return (keptPhotos, keptFacts)
+    }
+
+    /// Merges photos into a creation-date-sorted list (see `insertionIndex(for:in:)`) in one pass.
+    private func inserting(
+        _ incoming: [(photo: PhotoAsset, facts: PhotoFacts)],
+        into photos: [PhotoAsset], _ facts: [PhotoFacts]
+    ) -> ([PhotoAsset], [PhotoFacts]) {
+        guard !incoming.isEmpty else { return (photos, facts) }
+        let newestFirst = sortNewestFirst
+        let dates = incoming.map { $0.photo.creationDate ?? .distantPast }
+        let positions = incoming.map { insertionIndex(for: $0.photo.creationDate, in: photos) }
+        let order = incoming.indices.sorted { a, b in
+            if positions[a] != positions[b] { return positions[a] < positions[b] }
+            if dates[a] != dates[b] { return newestFirst ? dates[a] > dates[b] : dates[a] < dates[b] }
+            return a < b
+        }
+
+        var mergedPhotos: [PhotoAsset] = []
+        var mergedFacts: [PhotoFacts] = []
+        mergedPhotos.reserveCapacity(photos.count + incoming.count)
+        mergedFacts.reserveCapacity(facts.count + incoming.count)
+        var next = 0
+        for item in order {
+            while next < positions[item] {
+                mergedPhotos.append(photos[next])
+                mergedFacts.append(facts[next])
+                next += 1
+            }
+            mergedPhotos.append(incoming[item].photo)
+            mergedFacts.append(incoming[item].facts)
+        }
+        mergedPhotos.append(contentsOf: photos[next...])
+        mergedFacts.append(contentsOf: facts[next...])
+        return (mergedPhotos, mergedFacts)
     }
 
     func restoreSelected() {
@@ -512,11 +974,7 @@ final class PhotoLibraryViewModel {
     }
 
     func emptyBin() {
-        guard let context = modelContext else { return }
-        let binDescriptor = FetchDescriptor<PhotoAsset>(
-            predicate: #Predicate { $0.isDeleted }
-        )
-        let binPhotos = (try? context.fetch(binDescriptor)) ?? []
+        guard modelContext != nil else { return }
         photosToDelete = binPhotos
         showPermanentDeleteConfirmation = true
     }
@@ -540,14 +998,18 @@ final class PhotoLibraryViewModel {
     func addTag(name: String, category: String, to photo: PhotoAsset) {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
+        var changed: [PhotoAsset] = []
         if !photo.tags.contains(where: { $0.id == tag.id }) {
             photo.tags.append(tag)
             try? context.save()
 
             writeMetadataInBackground([metadataWriteItem(for: photo)])
+            changed.append(photo)
         }
         refreshTagLists(newTag: tag)
-        updateSidebarAfterChange()
+        applyFactChanges(changed)
+        refreshVisiblePhotos()
+        sortTagCategories()
     }
 
     func addTagToSelection(name: String, category: String) {
@@ -563,7 +1025,9 @@ final class PhotoLibraryViewModel {
         }
         try? context.save()
         refreshTagLists(newTag: tag)
-        updateSidebarAfterChange()
+        applyFactChanges(changed)
+        refreshVisiblePhotos()
+        sortTagCategories()
 
         writeMetadataInBackground(changed.map { metadataWriteItem(for: $0) })
     }
@@ -573,7 +1037,9 @@ final class PhotoLibraryViewModel {
         try? modelContext?.save()
 
         writeMetadataInBackground([metadataWriteItem(for: photo)])
-        updateSidebarAfterChange()
+        applyFactChanges([photo])
+        refreshVisiblePhotos()
+        sortTagCategories()
     }
 
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
@@ -588,7 +1054,9 @@ final class PhotoLibraryViewModel {
                 }
                 try? context.save()
                 writeMetadataInBackground(selected.map { metadataWriteItem(for: $0) })
-                updateSidebarAfterChange()
+                applyFactChanges(selected)
+                refreshVisiblePhotos()
+                sortTagCategories()
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
             }
@@ -618,10 +1086,6 @@ final class PhotoLibraryViewModel {
         showGridTagEditor = true
     }
 
-    var uncategorizedTags: [Tag] {
-        allTags.filter { $0.category.isEmpty }
-    }
-
     private func clearRAWSidecarEdits(for photo: PhotoAsset) {
         photo.hasRawEdits = false
         if let rawPath = photo.rawPath {
@@ -641,21 +1105,22 @@ final class PhotoLibraryViewModel {
         try? modelContext?.save()
     }
 
+    /// Categories, then tag names, containing the search text (case-insensitive); at most 10.
     var searchSuggestions: [String] {
-        guard searchText.count >= 1 else { return [] }
+        guard !searchText.isEmpty else { return [] }
         let query = searchText.lowercased()
         var seen = Set<String>()
         var results: [String] = []
 
-        for category in tagCategories {
-            if category.lowercased().contains(query) && seen.insert(category).inserted {
-                results.append(category)
+        for entry in categorySearchKeys {
+            if entry.key.contains(query) && seen.insert(entry.category).inserted {
+                results.append(entry.category)
             }
         }
 
-        for tag in allTags {
-            if tag.name.lowercased().contains(query) && seen.insert(tag.name).inserted {
-                results.append(tag.name)
+        for entry in tagNameSearchKeys {
+            if entry.key.contains(query) && seen.insert(entry.name).inserted {
+                results.append(entry.name)
             }
         }
 
@@ -668,15 +1133,14 @@ final class PhotoLibraryViewModel {
         if filter == .all {
             activeFilters.removeAll()
             viewingBin = false
-            loadExistingData()
-            applySearch()
+            refreshVisiblePhotos()
             return
         }
 
         if filter == .bin {
             activeFilters = [.bin]
             viewingBin = true
-            loadExistingData()
+            refreshVisiblePhotos()
             return
         }
 
@@ -694,114 +1158,37 @@ final class PhotoLibraryViewModel {
             }
         } else {
             // Auto-combine: replace within same category, keep different categories
-            let newCategory = filter.filterCategory
-            activeFilters = activeFilters.filter { $0.filterCategory != newCategory }
+            let newCategory = filter.category
+            activeFilters = activeFilters.filter { $0.category != newCategory }
             activeFilters.insert(filter)
         }
 
-        loadExistingData()
-        applyActiveFilters()
+        refreshVisiblePhotos()
     }
 
-    private func applyActiveFilters() {
-        guard !viewingBin, !activeFilters.isEmpty else {
-            applySearch()
-            return
-        }
-
-        var filtered = allPhotos
-        let byCategory = Dictionary(grouping: activeFilters) { $0.filterCategory }
-
-        for (_, filters) in byCategory {
-            filtered = filtered.filter { photo in
-                filters.contains { $0.matches(photo) }
-            }
-        }
-
-        photos = filtered
-        recomputeCrossFilterCounts()
-        applySearch()
-    }
-
-    /// Recompute badge counts for each filter category based on photos matching the OTHER categories.
-    /// This gives faceted-search behavior: selecting "3 stars" updates tag badges to show
-    /// how many 3-star photos have each tag, and vice versa.
-    private func recomputeCrossFilterCounts() {
-        let filters = Array(activeFilters)
-
-        // Rating counts: base = photos filtered by everything EXCEPT ratings
-        let nonRating = filters.filter { $0.filterCategory != "rating" }
-        let ratingBase = applyFilterGroup(nonRating)
-        var newRatingCounts: [Int: Int] = [:]
-        for photo in ratingBase {
-            newRatingCounts[photo.rating, default: 0] += 1
-        }
-        ratingCounts = newRatingCounts
-
-        // Tag + category counts: base = photos filtered by everything EXCEPT tags
-        let nonTag = filters.filter { $0.filterCategory != "tag" }
-        let tagBase = applyFilterGroup(nonTag)
-        var newCatCounts: [String: Int] = [:]
-        var newTagCounts: [UUID: Int] = [:]
-        for photo in tagBase {
-            var seenCategories = Set<String>()
-            for tag in photo.tags {
-                newTagCounts[tag.id, default: 0] += 1
-                if !tag.category.isEmpty && seenCategories.insert(tag.category).inserted {
-                    newCatCounts[tag.category, default: 0] += 1
-                }
-            }
-        }
-        categoryCounts = newCatCounts
-        tagCounts = newTagCounts
-
-        // File type counts: base = photos filtered by everything EXCEPT file type
-        let nonFileType = filters.filter { $0.filterCategory != "fileType" }
-        let fileTypeBase = applyFilterGroup(nonFileType)
-        var jpgC = 0
-        var rawC = 0
-        for photo in fileTypeBase {
-            if photo.jpgPath != nil { jpgC += 1 }
-            if photo.rawPath != nil { rawC += 1 }
-        }
-        jpgCount = jpgC
-        rawCount = rawC
-    }
-
-    private func applyFilterGroup(_ filters: [SidebarFilter]) -> [PhotoAsset] {
-        guard !filters.isEmpty else { return allPhotos }
-
-        var filtered = allPhotos
-        let byCategory = Dictionary(grouping: filters) { $0.filterCategory }
-
-        for (_, categoryFilters) in byCategory {
-            filtered = filtered.filter { photo in
-                categoryFilters.contains { $0.matches(photo) }
-            }
-        }
-        return filtered
-    }
-
+    /// Re-applies the active filters and the search text to the in-memory library.
     func applyCurrentFilter() {
-        loadExistingData()
-        applyActiveFilters()
+        refreshVisiblePhotos()
     }
 
+    /// Re-applies the search text (together with the active filters) to the in-memory library.
     func applySearch() {
-        guard !searchText.isEmpty else { return }
-
-        let query = searchText.lowercased()
-        photos = photos.filter { photo in
-            photo.fileName.lowercased().contains(query) ||
-            photo.tags.contains { $0.name.lowercased().contains(query) || $0.category.lowercased().contains(query) }
-        }
+        refreshVisiblePhotos()
     }
 
     // MARK: - Sorting
 
+    /// Reverses the in-memory lists (photos with equal creation dates may swap places). Counts don't
+    /// change, so only the grid is rebuilt.
     func toggleSortOrder() {
         sortNewestFirst.toggle()
-        applyCurrentFilter()
+        allPhotos.reverse()
+        allFacts.reverse()
+        binPhotos.reverse()
+        binFacts.reverse()
+        libraryVersion += 1
+        binVersion += 1
+        refreshVisiblePhotos()
     }
 
     // MARK: - Navigation
@@ -813,7 +1200,7 @@ final class PhotoLibraryViewModel {
 
     func navigateDetail(direction: Int) {
         guard let current = selectedDetailPhoto,
-              let index = photos.firstIndex(where: { $0.id == current.id }) else { return }
+              let index = self.index(of: current.id) else { return }
 
         let newIndex = index + direction
         if newIndex >= 0 && newIndex < photos.count {
@@ -844,12 +1231,12 @@ final class PhotoLibraryViewModel {
 
         let currentIndex: Int
         if let lastId = lastSelectedId,
-           let idx = photos.firstIndex(where: { $0.id == lastId }) {
+           let idx = index(of: lastId) {
             currentIndex = idx
         } else {
-            let photo = photos[0]
-            selectedPhotos = [photo.id]
-            lastSelectedId = photo.id
+            let id = grid.ids[0]
+            selectedPhotos = [id]
+            lastSelectedId = id
             return
         }
 
@@ -867,18 +1254,16 @@ final class PhotoLibraryViewModel {
 
         guard targetIndex != currentIndex else { return }
 
-        let targetPhoto = photos[targetIndex]
+        let targetID = grid.ids[targetIndex]
 
         if extendSelection {
             let rangeStart = min(currentIndex, targetIndex)
             let rangeEnd = max(currentIndex, targetIndex)
-            for i in rangeStart...rangeEnd {
-                selectedPhotos.insert(photos[i].id)
-            }
+            selectedPhotos.formUnion(grid.ids[rangeStart...rangeEnd])
         } else {
-            selectedPhotos = [targetPhoto.id]
+            selectedPhotos = [targetID]
         }
-        lastSelectedId = targetPhoto.id
+        lastSelectedId = targetID
     }
 
     enum GridDirection {
@@ -897,14 +1282,14 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Lightweight Tag Refresh
 
+    /// Adds a tag that was just created (or found) to the in-memory tag lists, without a fetch.
+    /// The caller re-sorts `tagCategories` with `sortTagCategories()` once the counts are current.
     private func refreshTagLists(newTag: Tag) {
-        if !allTags.contains(where: { $0.id == newTag.id }) {
-            allTags.append(newTag)
-            allTags.sort { ($0.category, $0.name) < ($1.category, $1.name) }
-        }
-        if !newTag.category.isEmpty && !tagCategories.contains(newTag.category) {
-            tagCategories.append(newTag.category)
-        }
+        guard !allTags.contains(where: { $0.id == newTag.id }) else { return }
+        var tags = allTags
+        tags.append(newTag)
+        tags.sort(using: Self.tagSortOrder)
+        setTagLists(tags)
     }
 
     // MARK: - Background Metadata Write-back
