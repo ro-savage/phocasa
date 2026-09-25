@@ -247,6 +247,12 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 
 ### Metadata
 
+- **Never lose a photo's original metadata (user rule, 2026-09-26).** Phocasa never removes, rewrites or drops the
+  metadata a file came with: the camera's Exif (including MakerNote and GPS), IPTC and XMP. It only adds to it (new
+  XMP/IPTC spliced in) or writes a sidecar. A write that can't keep the original metadata must not happen: the change
+  goes to a sidecar instead. Losing original metadata is a major bug. **Known violation, being fixed:** the exports
+  and "Apply edits permanently" (`ImageEditingService.writeJPEG`) write JPEGs with no metadata
+  (`docs/superpowers/plans/2026-09-25-performance/post-wave-3-prompt.md`, task A).
 - Sidecars are updated in place, never rewritten wholesale: only Phocasa's fields change, and everything other apps
   wrote is kept. A sidecar that can't be parsed safely is skipped, left byte-identical.
 - JPEG writes splice only ImageIO's new XMP/IPTC segments into the original bytes (the camera's MakerNote and other

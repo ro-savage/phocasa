@@ -327,6 +327,17 @@ Done on 2026-09-26, 09:32–09:55, with the screen unlocked, on a build of `237a
 
 ## Decisions for the user
 
+**Answered on 2026-09-26.** The work is handed over in `../post-wave-3-prompt.md`.
+1. Real-app checks get their own on-disk library in `Application Support/Phocasa-Development` (task B there).
+2. Backup done (`~/Desktop/Phocasa-backup`).
+3. Keep the prefetch.
+4. Decide on evidence (task C).
+5. 300 ms is fine: the ≤ 150 ms target and the grid-identity follow-up are dropped.
+6. Never remove a photo's original metadata; only add to it or use sidecars. A major bug (task A, and now a rule in
+   CLAUDE.md).
+
+The decisions as asked:
+
 1. **Checking relaunch behaviour in the real app.** The in-memory store the app uses under the test flag forgets the
    library on quit. So a real-app check can't show Move to Bin surviving a relaunch, a 500+ photo library loading in
    the background, or the capture-date backfill of an existing library.
