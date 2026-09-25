@@ -59,14 +59,14 @@ struct ContentView: View {
             }
             .onKeyPress(phases: .down, action: handleKeyPress)
             .onKeyPress(.init("\\"), phases: .down) { _ in
-                if viewModel.isEditing {
-                    viewModel.showOriginal = true
+                if let session = viewModel.editSession {
+                    session.showOriginal = true
                     return .handled
                 }
                 return .ignored
             }
             .onKeyPress(.init("\\"), phases: .up) { _ in
-                viewModel.showOriginal = false
+                viewModel.editSession?.showOriginal = false
                 return .handled
             }
     }
@@ -78,9 +78,9 @@ struct ContentView: View {
                 PhotoDetailView(viewModel: viewModel, photo: photo)
                     .frame(minWidth: 600, minHeight: 600)
 
-                if viewModel.isEditing {
+                if let session = viewModel.editSession {
                     Divider()
-                    EditSidebarView(viewModel: viewModel)
+                    EditSidebarView(session: session, viewModel: viewModel)
                 }
             }
         } else {
@@ -102,8 +102,8 @@ struct ContentView: View {
 
         switch keyPress.key {
         case .escape:
-            if viewModel.isCropping {
-                viewModel.cancelCrop()
+            if let session = viewModel.editSession, session.isCropping {
+                session.cancelCrop()
             } else if viewModel.isEditing {
                 viewModel.stopEditing(save: true)
             } else if viewModel.showingDetail {

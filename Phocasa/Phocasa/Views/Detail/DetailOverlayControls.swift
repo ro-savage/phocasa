@@ -125,7 +125,7 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
     // MARK: - Edit Buttons
 
     private func editButton(isRAW: Bool) -> some View {
-        let isActive = viewModel.isEditing && viewModel.editingRAW == isRAW
+        let isActive = viewModel.editSession.map { $0.photo.id == photo.id && $0.isRAW == isRAW } ?? false
         return Button(action: {
             if isActive {
                 viewModel.stopEditing(save: true)
