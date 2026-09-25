@@ -23,6 +23,16 @@ You own everything **except task 34's files**, which task 34 changes at the same
 Leave `ImageLoader.loadFullResolution(for:)` alone; task 34 removes it. Stay within the items below, and don't
 reformat untouched code.
 
+Two exceptions and one note, from the coordinator's check against merged `main`:
+- **`MetadataWriterTests`' view-model tests** (`makeViewModel(with:)` and the tests that call it, about lines 140–500)
+  call `vm.photos`, `vm.selectAll()`, `vm.setRatingForSelection(_:)`, `vm.selectedPhotosList` and `vm.setRating`. If
+  you move any of these, update **only those call sites** in `MetadataWriterTests`, mechanically, and list them in your
+  results. Task 34 leaves those tests alone.
+- **Keep `MetadataWriter.shared.flush()` as the quit hook's call** (step 8). Task 34 keeps that API; don't edit
+  `MetadataWriter.swift`.
+- **The hidden-grid check (step 6).** If you need a debug counter for thumbnail work, put it in
+  `Services/ThumbnailScheduler.swift` or the grid views, which you own, not in `ImageLoader`.
+
 ## Target structure (wave 3B depends on it)
 
 The names are guidelines; keep them unless there's a good reason. Each type should be ≤ ~400 lines with one
@@ -165,6 +175,9 @@ ViewModels/
   - **Build settings:** objectVersion 77 synchronized folders, so new files need no `pbxproj` edits.
   - **Wave 3B changes** (schema, capture-date sort, launch) are documented by the coordinator after they merge. Don't
     anticipate them.
+  - **Task 34's changes** (disk-cache re-keying, smaller-from-larger buckets, the persisted byte total, the removal of
+    `loadFullResolution`) run in parallel with you. Describe the disk cache as it is on `main`; the coordinator adds
+    task 34's lines after both merge.
 
 - [ ] **Step 11: Final measurements.** Run everything again and finish the before/after table in `results/30.md`. The
   full suite passes with zero warnings.

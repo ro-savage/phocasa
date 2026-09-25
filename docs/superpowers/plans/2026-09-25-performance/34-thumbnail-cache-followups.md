@@ -23,6 +23,15 @@
   - `ImageLoaderTests`, `ThumbnailDiskCacheTests`, `MetadataWriterTests`, `DetailNavigationBenchmarks`.
 - **Don't touch:** everything else. Task 30 is restructuring the view model and views at the same time.
   `MetadataService` stays as it is: task 33 edits it in wave 3B.
+  - **`MetadataWriterTests`' view-model tests** (`makeViewModel(with:)` and the tests that call it, about lines
+    140–500) use view-model APIs that task 30 may move; task 30 updates those call sites. Leave those tests alone and
+    add your tests elsewhere in the file (or in `ThumbnailDiskCacheTests`).
+  - **`PhocasaApp.swift` is task 30's.** Wire the re-key seam inside your own files (for example, `MetadataWriter.shared`
+    gets its callback from `ImageLoader.shared` in one of your files), not in the app entry point.
+  - **Keep `MetadataWriter`'s public API** (`enqueue`, `enqueueEditParameters`, `flush()`), source-compatible: task 30's
+    quit hook awaits `MetadataWriter.shared.flush()`, and `RAWEditStore` relies on the other two.
+- **CLAUDE.md** is task 30's in this wave. Put the lines you'd add (the re-key rule, bucket reuse, the byte-total file)
+  under "Needs from other tasks", and the coordinator adds them after both merge.
 
 ## Design notes
 

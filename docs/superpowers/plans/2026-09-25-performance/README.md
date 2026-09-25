@@ -170,8 +170,13 @@ wave 2, task 30/31 in wave 3. Other tasks put their gated benchmarks in their ow
 | File / region | 30 | 34 |
 |---|---|---|
 | `Services/ImageLoader.swift`, `Services/ThumbnailDiskCache.swift`, `Services/MetadataWriter.swift` | | **owns** |
-| `ImageLoaderTests`, `ThumbnailDiskCacheTests`, `MetadataWriterTests`, `DetailNavigationBenchmarks` | | **owns** |
-| Everything else: view model split, views, `PhocasaApp`, `CLAUDE.md`, `PerformanceBenchmarks.swift` (keep labels) | **owns** | |
+| `ImageLoaderTests`, `ThumbnailDiskCacheTests`, `MetadataWriterTests` (except below), `DetailNavigationBenchmarks` | | **owns** |
+| `MetadataWriterTests`' view-model tests (`makeViewModel` and its callers): mechanical call-site updates only | **owns** | |
+| Everything else: view model split, views, `PhocasaApp`, `ThumbnailScheduler`, `CLAUDE.md`, `PerformanceBenchmarks.swift` (keep labels) | **owns** | |
+
+Task 34 wires its re-key seam inside its own files, not in `PhocasaApp`, and keeps `MetadataWriter`'s API
+(`enqueue`, `enqueueEditParameters`, `flush()`) source-compatible. Task 34's CLAUDE.md lines go under its "Needs", and
+the coordinator applies them after both merge.
 
 ### Wave 3B
 
