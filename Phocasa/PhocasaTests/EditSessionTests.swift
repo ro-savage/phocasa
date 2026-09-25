@@ -388,6 +388,161 @@ final class EditSessionTests: XCTestCase {
         XCTAssertNil(session.previewImage, "the session lets go of its renders")
     }
 
+    // MARK: - Render sizes (task 35)
+
+    private func pixelSize(_ image: NSImage?) -> CGSize? {
+        image.flatMap(EditTestImages.cgImage).map { CGSize(width: $0.width, height: $0.height) }
+    }
+
+    /// `image` has `expected`'s pixel size and pixels (max channel difference ≤ 1).
+    private func assertSamePixels(_ image: NSImage?, _ expected: NSImage?, _ message: String = "",
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        guard let a = image.flatMap(EditTestImages.cgImage), let b = expected.flatMap(EditTestImages.cgImage) else {
+            return XCTFail("no image \(message)", file: file, line: line)
+        }
+        XCTAssertEqual(CGSize(width: a.width, height: a.height), CGSize(width: b.width, height: b.height),
+                       "size \(message)", file: file, line: line)
+        XCTAssertLessThanOrEqual(EditTestImages.maxChannelDifference(a, b) ?? 255, 1, "pixels \(message)",
+                                 file: file, line: line)
+    }
+
+    /// At fit, the pass after a pause fills the viewport and no more: a 2400×1600 photo in a 1200×1000 px viewport
+    /// renders at 1200×800, exactly what the service renders for that size.
+    func testPassAfterAPauseAtFitIsViewportSized() async throws {
+        let url = try makeJPEG(width: 2400, height: 1600)
+        let session = makeSession(try insertPhoto(jpg: url))
+        session.viewportPixelSize = CGSize(width: 1200, height: 1000)
+
+        session.parameters.exposure = 0.4
+
+        let full = try await eventually { session.fullImage }
+        XCTAssertEqual(pixelSize(full), CGSize(width: 1200, height: 800), "viewport-sized, not native (2400×1600)")
+        XCTAssertFalse(session.fullImageIsNative)
+        let expected = await ImageEditingService.shared.processStandard(
+            url: url, parameters: exposure(0.4), maxSize: CGSize(width: 1200, height: 800), lane: .full)
+        assertSamePixels(full, expected, "against the service at 1200×800")
+    }
+
+    /// Without a viewport (a caller with no view, such as the coordinator's harness) the pass is native, as before.
+    func testPassWithoutAViewportIsNative() async throws {
+        let url = try makeJPEG(width: 2400, height: 1600)
+        let session = makeSession(try insertPhoto(jpg: url))
+
+        session.parameters.exposure = 0.4
+
+        let full = try await eventually { session.fullImage }
+        XCTAssertEqual(pixelSize(full), CGSize(width: 2400, height: 1600))
+        XCTAssertTrue(session.fullImageIsNative)
+    }
+
+    /// Zooming in past the fit pass renders the same parameters at native resolution.
+    func testRequestingNativeResolutionAfterTheFitPassRendersNative() async throws {
+        let url = try makeJPEG(width: 2400, height: 1600)
+        let session = makeSession(try insertPhoto(jpg: url))
+        session.viewportPixelSize = CGSize(width: 1200, height: 1000)
+        session.parameters.exposure = 0.4
+        let fit = try await eventually { session.fullImage }
+
+        session.requestNativeResolution()
+
+        let native = try await eventually { session.fullImageIsNative ? session.fullImage : nil }
+        XCTAssertFalse(native === fit)
+        let expected = await ImageEditingService.shared.processStandard(
+            url: url, parameters: exposure(0.4), lane: .full)
+        assertSamePixels(native, expected, "against the service's native render")
+        XCTAssertEqual(session.fullImageNativePixelSize, CGSize(width: 2400, height: 1600))
+    }
+
+    /// Asked for native before the pass has run (zoomed in while the preview shows), the pass renders native only.
+    func testNativeRequestBeforeThePassSkipsTheFitRender() async throws {
+        let session = makeSession(try insertPhoto(jpg: try makeJPEG(width: 2400, height: 1600)))
+        session.viewportPixelSize = CGSize(width: 1200, height: 1000)
+        session.parameters.exposure = 0.4
+        _ = try await eventually { session.previewImage }
+        let rendersAfterPreview = ImageEditingService.shared.renderCount
+
+        session.requestNativeResolution()
+
+        let full = try await eventually { session.fullImage }
+        XCTAssertEqual(pixelSize(full), CGSize(width: 2400, height: 1600))
+        XCTAssertEqual(ImageEditingService.shared.renderCount - rendersAfterPreview, 1, "one pass, native")
+    }
+
+    /// The request holds for the parameters it was made for: the detail view asks again while it stays zoomed in
+    /// (each new value's preview is short of pixels), so after zooming back out the passes are viewport-sized.
+    func testANewValueRendersAtFitUnlessNativeIsAskedAgain() async throws {
+        let session = makeSession(try insertPhoto(jpg: try makeJPEG(width: 2400, height: 1600)))
+        session.viewportPixelSize = CGSize(width: 1200, height: 1000)
+        session.parameters.exposure = 0.4
+        _ = try await eventually { session.fullImage }
+        session.requestNativeResolution()
+        _ = try await eventually { session.fullImageIsNative ? session.fullImage : nil }
+
+        session.parameters.exposure = 0.5
+
+        let full = try await eventually { session.fullImage }
+        XCTAssertEqual(pixelSize(full), CGSize(width: 1200, height: 800))
+    }
+
+    /// The window grew: the pass shown is too small for the new viewport, so a larger one follows.
+    func testGrowingTheViewportRendersALargerFitPass() async throws {
+        let session = makeSession(try insertPhoto(jpg: try makeJPEG(width: 2400, height: 1600)))
+        session.viewportPixelSize = CGSize(width: 1200, height: 1000)
+        session.parameters.exposure = 0.4
+        let small = try await eventually { session.fullImage }
+
+        session.viewportPixelSize = CGSize(width: 1800, height: 1500)
+
+        let larger = try await eventually { session.fullImage !== small ? session.fullImage : nil }
+        XCTAssertEqual(pixelSize(larger), CGSize(width: 1800, height: 1200))
+        XCTAssertTrue(session.fullImage === larger, "the smaller pass stays until the larger one lands")
+    }
+
+    /// A viewport that needs the photo's pixels (or more) gets the native render, not a same-size sized one.
+    func testViewportAsLargeAsThePhotoRendersNative() async throws {
+        let session = makeSession(try insertPhoto(jpg: try makeJPEG(width: 2400, height: 1600)))
+        session.viewportPixelSize = CGSize(width: 4000, height: 3000)
+
+        session.parameters.exposure = 0.4
+
+        let full = try await eventually { session.fullImage }
+        XCTAssertEqual(pixelSize(full), CGSize(width: 2400, height: 1600))
+        XCTAssertTrue(session.fullImageIsNative)
+    }
+
+    /// With a crop, the cropped output (not the whole photo) is what fills the viewport.
+    func testFitPassFitsTheCroppedOutput() async throws {
+        let url = try makeJPEG(width: 2400, height: 1600)
+        let session = makeSession(try insertPhoto(jpg: url))
+        session.viewportPixelSize = CGSize(width: 1000, height: 1000)
+
+        session.parameters.cropRect = NormalizedRect(x: 0, y: 0, width: 0.5, height: 0.5)
+
+        let full = try await eventually { session.fullImage }
+        let size = try XCTUnwrap(pixelSize(full))
+        XCTAssertEqual(size.width, 1000, accuracy: 1, "the 1200×800 crop fills 1000 px across")
+        XCTAssertEqual(size.height, 667, accuracy: 1)
+        XCTAssertFalse(session.fullImageIsNative)
+    }
+
+    /// Saving at fit hands over the viewport-sized pass, and says what size it is.
+    func testEndWithSaveHandsOverTheFitPass() async throws {
+        let session = makeSession(try insertPhoto(jpg: try makeJPEG(width: 2400, height: 1600)))
+        session.viewportPixelSize = CGSize(width: 1200, height: 1000)
+        session.parameters.exposure = 1
+        let full = try await eventually { session.fullImage }
+
+        let handoff = try XCTUnwrap(session.end(save: true))
+
+        XCTAssertTrue(handoff.image === full)
+        XCTAssertFalse(handoff.isFullResolution)
+        XCTAssertEqual(handoff.fittedMaxSize, CGSize(width: 1200, height: 800))
+        XCTAssertTrue(handoff.image(for: handoff.saved, covering: CGSize(width: 1200, height: 800)) === full)
+        XCTAssertNil(handoff.image(for: handoff.saved, covering: CGSize(width: 1800, height: 1200)), "too small")
+        XCTAssertNil(handoff.image(for: handoff.saved, covering: nil), "native wanted")
+        XCTAssertNil(handoff.fullResolutionImage(for: handoff.saved))
+    }
+
     // MARK: - Saving
 
     func testSaveJPGPersistsToModel() throws {
@@ -839,5 +994,107 @@ final class EditSessionTests: XCTestCase {
         XCTAssertTrue(photo.hasRawEdits)
         await MetadataWriter.shared.flush()
         XCTAssertEqual(MetadataService.shared.readEditParameters(forRAWAt: raw.path)?.exposure, 0.5)
+    }
+
+    /// Needs PHOCASA_TEST_RAW (only read here). A RAW pass at fit is the service's render for that size (draft mode
+    /// and `scaleFactor`, as its sized renders are), and zooming in renders the native one.
+    func testRealRAWPassesAtFitAndNative() async throws {
+        guard let rawPath = ProcessInfo.processInfo.environment["PHOCASA_TEST_RAW"], !rawPath.isEmpty else {
+            throw XCTSkip("Set PHOCASA_TEST_RAW to a copy of a camera RAW file")
+        }
+        let raw = URL(fileURLWithPath: rawPath)
+        let session = makeSession(try insertPhoto(raw: raw), isRAW: true)
+        let viewport = CGSize(width: 2894, height: 2130)
+        session.viewportPixelSize = viewport
+        await session.begin()
+
+        session.parameters.exposure = 0.5
+
+        let fit = try await eventually(10) { session.fullImage }
+        let native = try XCTUnwrap(EditRenderSize.nativeSize(ofImageAt: raw))
+        let maxSize = try XCTUnwrap(EditRenderSize.fitMaxSize(native: native, parameters: session.parameters, viewport: viewport))
+        let expectedFit = await ImageEditingService.shared.processRAW(url: raw, parameters: session.parameters,
+                                                                      maxSize: maxSize, lane: .full)
+        assertSamePixels(fit, expectedFit, "fit pass against the service at \(maxSize)")
+        let fitSize = try XCTUnwrap(pixelSize(fit))
+        XCTAssertLessThan(fitSize.width, native.width)
+        let fitted = CGSize(width: native.width * min(viewport.width / native.width, viewport.height / native.height),
+                            height: native.height * min(viewport.width / native.width, viewport.height / native.height))
+        XCTAssertGreaterThanOrEqual(fitSize.width + 1, fitted.width, "fills the viewport across")
+        XCTAssertGreaterThanOrEqual(fitSize.height + 1, fitted.height, "fills the viewport down")
+
+        session.requestNativeResolution()
+
+        let full = try await eventually(10) { session.fullImageIsNative ? session.fullImage : nil }
+        let expectedNative = await ImageEditingService.shared.processRAW(url: raw, parameters: session.parameters, lane: .full)
+        assertSamePixels(full, expectedNative, "native pass against the service")
+    }
+}
+
+/// The pure size rules behind the viewport-sized passes (task 35).
+final class EditRenderSizeTests: XCTestCase {
+    func testFitMaxSizeFillsTheViewport() {
+        // 16 MP landscape beside the edit sidebar of a 16" window: width-limited.
+        XCTAssertEqual(EditRenderSize.fitMaxSize(native: CGSize(width: 4912, height: 3264), parameters: EditParameters(),
+                                                 viewport: CGSize(width: 2894, height: 2130)),
+                       CGSize(width: 2894, height: 1924))
+        // The same photo in portrait: height-limited.
+        XCTAssertEqual(EditRenderSize.fitMaxSize(native: CGSize(width: 3264, height: 4912), parameters: EditParameters(),
+                                                 viewport: CGSize(width: 2894, height: 2130)),
+                       CGSize(width: 1416, height: 2130))
+    }
+
+    func testFitMaxSizeIsNilWhenTheViewportNeedsNativePixels() {
+        let native = CGSize(width: 2400, height: 1600)
+        XCTAssertNil(EditRenderSize.fitMaxSize(native: native, parameters: EditParameters(), viewport: CGSize(width: 2400, height: 3000)))
+        XCTAssertNil(EditRenderSize.fitMaxSize(native: native, parameters: EditParameters(), viewport: CGSize(width: 5000, height: 5000)))
+        XCTAssertNil(EditRenderSize.fitMaxSize(native: .zero, parameters: EditParameters(), viewport: CGSize(width: 100, height: 100)))
+        XCTAssertNil(EditRenderSize.fitMaxSize(native: native, parameters: EditParameters(), viewport: .zero))
+    }
+
+    func testFitMaxSizeAccountsForTheCrop() {
+        var params = EditParameters()
+        params.cropRect = NormalizedRect(x: 0.25, y: 0, width: 0.5, height: 1)
+        // Output at native scale: 1000×1000, so a 500×500 viewport is half scale.
+        XCTAssertEqual(EditRenderSize.outputSize(native: CGSize(width: 2000, height: 1000), parameters: params),
+                       CGSize(width: 1000, height: 1000))
+        XCTAssertEqual(EditRenderSize.fitMaxSize(native: CGSize(width: 2000, height: 1000), parameters: params,
+                                                 viewport: CGSize(width: 500, height: 500)),
+                       CGSize(width: 1000, height: 500))
+    }
+
+    func testFitMaxSizeAccountsForTheRotation() {
+        var params = EditParameters()
+        params.rotation = 45
+        // A rotated 1000×1000 square's bounding box is 1414×1414.
+        let output = EditRenderSize.outputSize(native: CGSize(width: 1000, height: 1000), parameters: params)
+        XCTAssertEqual(output.width, 1414.2, accuracy: 0.1)
+        XCTAssertEqual(EditRenderSize.fitMaxSize(native: CGSize(width: 1000, height: 1000), parameters: params,
+                                                 viewport: CGSize(width: 707, height: 707)),
+                       CGSize(width: 500, height: 500))
+        params.rotation = -45
+        XCTAssertEqual(EditRenderSize.outputSize(native: CGSize(width: 1000, height: 1000), parameters: params).height,
+                       1414.2, accuracy: 0.1)
+    }
+
+    func testCovers() {
+        let fit = CGSize(width: 1200, height: 800)
+        XCTAssertTrue(EditRenderSize.covers(nil, fit), "a native render covers any fit size")
+        XCTAssertTrue(EditRenderSize.covers(nil, nil))
+        XCTAssertFalse(EditRenderSize.covers(fit, nil), "a fit render doesn't cover native")
+        XCTAssertTrue(EditRenderSize.covers(fit, CGSize(width: 1200, height: 800)))
+        XCTAssertTrue(EditRenderSize.covers(fit, CGSize(width: 1000, height: 700)))
+        XCTAssertTrue(EditRenderSize.covers(fit, CGSize(width: 1201, height: 800)), "a pixel of rounding")
+        XCTAssertFalse(EditRenderSize.covers(fit, CGSize(width: 1800, height: 1200)))
+    }
+
+    func testNativeSizeIsOriented() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("phocasa-35-size-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("portrait.jpg")
+        try EditTestImages.writeJPEG(to: url, width: 60, height: 40, orientation: 6, detail: false)
+        XCTAssertEqual(EditRenderSize.nativeSize(ofImageAt: url), CGSize(width: 40, height: 60))
+        XCTAssertNil(EditRenderSize.nativeSize(ofImageAt: dir.appendingPathComponent("missing.jpg")))
     }
 }
