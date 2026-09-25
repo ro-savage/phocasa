@@ -49,6 +49,15 @@
   ```
   Keep the existing `scan(folderURL:)` as a wrapper that passes an empty `knownKeys`; the existing tests use it.
 
+## What waves 1 changed (read before step 1)
+
+- **Task 10** made `loadExistingData()` the only full reload. It still costs about 330 ms at 10k (≈185 ms fetch, ≈66 ms building `PhotoFacts`). On its own that breaks this task's 150 ms main-actor target, so **an unchanged rescan must not call `loadExistingData()` at all**. Reload only when the scan inserted rows, changed a row, or changed the missing set. After an unchanged rescan the in-memory state is already correct.
+  - For a few changed rows, `photosDidChange(_:)` (task 10) updates the in-memory library without a reload. Use it where it fits.
+  - `loadExistingData()` keeps the active filters and search, so reloading after a scan no longer resets the grid.
+- **Task 14:** `readMetadata` now returns real JPEG ratings, embedded RAW `xmp:Rating` values, and `dc:subject` keywords, and `PhotoMetadata` is `Sendable`. `MetadataWriter` owns every write; a scan never writes.
+- **Real files:** you may measure a first scan of `~/PhocasaBenchRAW` (190 JPG+ARW pairs) into a temp store. Scanning only reads files. Never rate, tag or edit anything in that store, and don't commit a test that depends on the folder.
+- **Launch:** `setModelContext` still calls `loadExistingData()` on the main actor (≈330 ms at 10k). Moving that fetch off the main actor is out of scope unless you find a simple, safe way. Record the launch main-actor time you measure either way.
+
 ## Steps
 
 - [ ] **Step 1: Baseline.** Run the full suite and the benchmarks (`N=10000` line `7x`, and `scan1k`). Record the first-scan and rescan times.

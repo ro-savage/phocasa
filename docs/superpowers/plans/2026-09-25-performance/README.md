@@ -81,7 +81,7 @@ coordinator sets these, and only to a file the user has provided. If neither is 
 say so in your results; the spec's RAW numbers stand as the reference.
 
 The user has provided a **read-only** folder of real camera files, `~/PhocasaBenchRAW` (190 JPG+ARW pairs, 16 MP,
-4912×3264). The coordinator passes its path to the tasks that need it. Treat it as read-only input: never write, rename
+4912×3264; 12 are rotated: 2 with EXIF orientation 6, 10 with orientation 8). The coordinator passes its path to the tasks that need it. Treat it as read-only input: never write, rename
 or create files in it (it is `chmod a-w`), never scan it with a view model that could write metadata back, and never
 commit a test or benchmark that depends on it. If a local check must write (for example, saving RAW edits), copy at
 most one pair into your own temp directory and delete it when you're done.

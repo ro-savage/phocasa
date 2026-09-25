@@ -75,6 +75,18 @@ This removes about 15 flags from the view model, along with the manual reset in 
   ```
   - Presets stay in the view model: `editPresets`, `presetNameInput`, `loadPresets`, `savePreset`, `deletePreset`, `applyPresetToSelection`. `savePreset` reads `editSession?.parameters`. `applyPreset(_:)` forwards to `editSession?.apply(_:)`.
 
+## What waves 1 changed (read before step 1)
+
+- **Task 14's `MetadataWriter`:** `enqueue` and `enqueueEditParameters(_:forRAWAt:)` are **synchronous and `nonisolated`**. Call them directly, with no `await` and no `Task`. `nil` clears the edits. `await MetadataWriter.shared.flush()` reliably sees every earlier enqueue, so use it in tests. `MetadataService.clearEditParameters(forRAWAt:)` exists; it replaces `clearRAWSidecarEdits`'s inline body.
+- **Task 12's detail view:**
+  - `PhotoDetailView` is a thin container. It still holds `.onChange(of: viewModel.editParameters)` and the `currentImage` precedence.
+  - `ComparisonView(left:right:)` takes `DisplayImage?`.
+  - `FullImageLoader.shared.load(path:subsample:)` / `loadFit(path:viewportPixelSize:)` return an oriented `DisplayImage`. Use one of them for the JPG comparison (it's sideways for portrait JPGs today).
+  - `loadImages` calls `MetadataService.readEditParameters(forRAWAt:)` on the main actor. Move that read off the main thread.
+- **Task 10:** after `exportRAWToJPG` sets `photo.jpgPath`, call `viewModel.photosDidChange([photo])`. Otherwise the JPG count and filter miss the new file until the next reload. `EditSession` doesn't know the view model, so either let the view model do it after the export returns, or give the session a callback.
+- **Task 13 (check what merged):** saved-edit renders in `PhotoDetailView.loadImages` and the JPG comparison render are full-resolution. If the lanes exist, run them on `.full`, so they never delay previews.
+- After this task `ImageLoader.loadFullResolution(for:)` has no app callers. Only `DetailNavigationBenchmarks` (its "old" path) uses it. Leave it; task 30 decides.
+
 ## Steps
 
 - [ ] **Step 1: Baseline.** Run the full suite. Read the merged `PhotoDetailView` and `Views/Detail/*` from task 12, and the `ImageEditingService` from task 13.
