@@ -236,6 +236,9 @@ final class MigrationTests: XCTestCase {
             XCTAssertEqual(actual.first { $0.id == expected.id }, expected, "photo \(expected.fileName)")
         }
 
+        // Attributes added after V1 come up empty (task 33's `captureDate`: the backfill fills it after launch).
+        XCTAssertEqual(photos.filter { $0.captureDate != nil }.map(\.fileName), [], "captureDate is nil after migrating")
+
         // The bin flag carried over from `isDeleted`, in the store's own evaluation too.
         let binnedNow = try context.fetch(FetchDescriptor<Phocasa.PhotoAsset>(predicate: #Predicate { $0.isInBin }))
         XCTAssertEqual(binnedNow.map(\.fileName), ["binned"])
@@ -339,5 +342,34 @@ final class MigrationTests: XCTestCase {
         XCTAssertEqual(library.binPhotos.map(\.id), [try XCTUnwrap(binnedID)])
         XCTAssertEqual(library.binPhotos.first?.rating, 5)
         XCTAssertEqual(library.allPhotos.map(\.fileName), ["kept"])
+    }
+
+    /// A migrated store takes task 33's `captureDate` (nil after the migration), keeps it across a relaunch, and the
+    /// library is then ordered by it, not by the creation date.
+    func testMigratedStoreKeepsCaptureDatesAndOrdersByThem() throws {
+        do {
+            let context = ModelContext(try makeV1Container())
+            for (name, created) in [("older-file", 1.0), ("newer-file", 2.0)] {
+                context.insert(PhocasaSchemaV1.PhotoAsset(fileName: name, jpgPath: "/p/\(name).jpg", folderPath: "/p",
+                                                          creationDate: Date(timeIntervalSince1970: created)))
+            }
+            try context.save()
+        }
+
+        do {
+            let context = ModelContext(try makeCurrentContainer())
+            let photos = try context.fetch(FetchDescriptor<Phocasa.PhotoAsset>())
+            XCTAssertEqual(photos.compactMap(\.captureDate), [], "nil after migrating")
+            // Capture dates that disagree with the file creation dates: the older file was taken later.
+            for photo in photos {
+                photo.captureDate = Date(timeIntervalSince1970: photo.fileName == "older-file" ? 2_000_000 : 1_000_000)
+            }
+            try context.save()
+        }
+
+        let library = LibraryStore()
+        library.open(ModelContext(try makeCurrentContainer()))
+        XCTAssertEqual(library.allPhotos.map(\.fileName), ["older-file", "newer-file"], "newest capture date first")
+        XCTAssertEqual(library.allPhotos.map { $0.captureDate?.timeIntervalSince1970 }, [2_000_000, 1_000_000])
     }
 }
