@@ -588,3 +588,160 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         XCTAssertNotEqual(ImageLoader.shared.diskCache?.directory, ThumbnailDiskCache.defaultDirectory)
     }
 }
+
+// MARK: - Gated benchmarks (PHOCASA_BENCH=1)
+
+/// Disk cache against decoding from the original, on generated 6000×4000 JPEGs (one encode, the rest APFS clones).
+/// Run with `TEST_RUNNER_PHOCASA_BENCH=1 … -only-testing:PhocasaTests/ThumbnailDiskCacheBenchmarks`.
+/// Everything is written under a temp directory; nothing touches ~/Library/Caches.
+final class ThumbnailDiskCacheBenchmarks: XCTestCase {
+
+    private var tempDir: URL!
+    private let clock = ContinuousClock()
+
+    override func setUpWithError() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["PHOCASA_BENCH"] == "1",
+                          "Set PHOCASA_BENCH=1 to run benchmarks")
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ThumbnailDiskCacheBenchmarks-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let tempDir {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+    }
+
+    private func ms(_ d: Duration) -> Double {
+        let c = d.components
+        return Double(c.seconds) * 1000 + Double(c.attoseconds) / 1e15
+    }
+
+    private func median(_ samples: [Double]) -> Double {
+        samples.sorted()[samples.count / 2]
+    }
+
+    private func report(_ label: String, _ samples: [Double]) {
+        let s = samples.sorted()
+        print(String(format: "BENCH|thumbDisk|%@|median_ms=%.2f|min_ms=%.2f|max_ms=%.2f|runs=%d",
+                     label, median(s), s.first!, s.last!, s.count))
+    }
+
+    private func newCacheDirectory() -> URL {
+        tempDir.appendingPathComponent("cache-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    /// `count` 6000×4000 JPEGs with photo-like entropy (a gradient under tiled noise), EXIF orientation 6.
+    private func makeSources(count: Int) throws -> [String] {
+        let width = 6000, height = 4000, tile = 512
+        var noise = [UInt8](repeating: 0, count: tile * tile * 4)
+        noise.withUnsafeMutableBytes { arc4random_buf($0.baseAddress, $0.count) }
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let noiseImage: CGImage = try noise.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(
+                data: buffer.baseAddress, width: tile, height: tile, bitsPerComponent: 8, bytesPerRow: tile * 4,
+                space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ))
+            return try XCTUnwrap(context.makeImage())
+        }
+        let base = try XCTUnwrap(DiskCacheTestImages.makeImage(width: width, height: height))
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        context.draw(base, in: CGRect(x: 0, y: 0, width: width, height: height))
+        context.setAlpha(0.3)
+        context.draw(noiseImage, in: CGRect(x: 0, y: 0, width: tile, height: tile), byTiling: true)
+        let master = tempDir.appendingPathComponent("master.jpg")
+        XCTAssertTrue(DiskCacheTestImages.writeJPEG(try XCTUnwrap(context.makeImage()), to: master, orientation: 6))
+
+        return try (0..<count).map { i in
+            let url = tempDir.appendingPathComponent(String(format: "copy_%03d.jpg", i))
+            try FileManager.default.copyItem(at: master, to: url)
+            return url.path
+        }
+    }
+
+    /// The task's primary metric: 100 thumbnails at bucket 512, one at a time. A cold decode from the original
+    /// (no disk cache) against a warm disk cache with an empty memory cache, as after a relaunch.
+    func testWarmDiskVsColdDecode() async throws {
+        let paths = try makeSources(count: 100)
+        let directory = newCacheDirectory()
+        // Populate the disk cache; this also brings the originals into the page cache for the cold runs.
+        let populate = ImageLoader(diskCache: ThumbnailDiskCache(directory: directory))
+        for path in paths {
+            _ = await populate.loadThumbnail(for: path, maxSize: 512)
+        }
+        populate.diskCache?.waitForPendingWork()
+
+        var cold: [Double] = [], warm: [Double] = []
+        let disk = ThumbnailDiskCache(directory: directory)
+        for path in paths {
+            // Alternate per image, so both see the same load. Fresh loaders: empty memory caches.
+            let plain = ImageLoader(diskCache: nil)
+            var start = clock.now
+            _ = await plain.loadThumbnail(for: path, maxSize: 512)
+            cold.append(ms(clock.now - start))
+
+            let relaunched = ImageLoader(diskCache: disk)
+            start = clock.now
+            let image = await relaunched.loadThumbnail(for: path, maxSize: 512)
+            warm.append(ms(clock.now - start))
+            XCTAssertNotNil(image)
+            XCTAssertEqual(relaunched.originalDecodeCount, 0)
+        }
+
+        report("100 x 6000x4000 JPEG @512, one at a time: cold decode from the original", cold)
+        report("100 x 6000x4000 JPEG @512, one at a time: warm disk cache, empty memory", warm)
+        let speedup = median(cold) / median(warm)
+        print(String(format: "BENCH|thumbDisk|100 x 6000x4000 JPEG @512: speedup|x=%.1f", speedup))
+        XCTAssertGreaterThanOrEqual(speedup, 10, "a warm disk load must be at least 10x faster than a decode")
+    }
+
+    /// Task 11's fast-scroll protocol (cells 2.5 ms apart, a cell more than 40 behind cancelled, 380 px) over 200
+    /// generated files, interleaved run by run: no disk cache (main's path), an empty disk cache (a miss also
+    /// encodes and writes), and a warm disk cache with an empty memory cache (a relaunch).
+    func testFastScrollColdAndRelaunch() async throws {
+        let paths = try makeSources(count: 200)
+        let warmDirectory = newCacheDirectory()
+        let populate = ImageLoader(diskCache: ThumbnailDiskCache(directory: warmDirectory))
+        await withTaskGroup(of: Void.self) { group in
+            for path in paths {
+                group.addTask { _ = await populate.loadThumbnail(for: path, maxSize: 380) }
+            }
+        }
+        populate.diskCache?.waitForPendingWork()
+
+        var last20: [[Double]] = [[], [], []], all: [[Double]] = [[], [], []]
+        for run in 0..<5 {
+            for variant in (0..<3).map({ ($0 + run) % 3 }) {
+                let cache: ThumbnailDiskCache? = switch variant {
+                case 0: nil
+                case 1: ThumbnailDiskCache(directory: newCacheDirectory())
+                default: ThumbnailDiskCache(directory: warmDirectory)
+                }
+                let loader = ImageLoader(diskCache: cache)
+                var tasks: [Task<Void, Never>] = []
+                for (i, path) in paths.enumerated() {
+                    tasks.append(Task { _ = await loader.loadThumbnail(for: path, maxSize: 380) })
+                    if i >= 40 { tasks[i - 40].cancel() }
+                    try await Task.sleep(for: .microseconds(2500))
+                }
+                let tLast = clock.now
+                for task in tasks.suffix(20) { await task.value }
+                last20[variant].append(ms(clock.now - tLast))
+                for task in tasks { await task.value }
+                all[variant].append(ms(clock.now - tLast))
+                // Don't let this run's queued writes overlap the next run.
+                cache?.waitForPendingWork()
+            }
+        }
+
+        let names = ["no disk cache", "disk cache empty (cold)", "disk warm, memory empty (relaunch)"]
+        for variant in 0..<3 {
+            report("200 x 6000x4000 JPEG fast scroll @380 last20: \(names[variant])", last20[variant])
+            report("200 x 6000x4000 JPEG fast scroll @380 all done: \(names[variant])", all[variant])
+        }
+    }
+}
