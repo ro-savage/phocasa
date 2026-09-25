@@ -118,6 +118,71 @@ final class MetadataRoundTripTests: XCTestCase {
         XCTAssertEqual(Set(service.readMetadata(from: jpg.path).keywords), ["people:ann", "beach"])
     }
 
+    // MARK: Keywords from IPTC-IIM vs XMP
+
+    /// JPEG marker segments before the image data: (marker, byte range including the FF xx header).
+    private func jpegSegments(_ data: Data) -> [(marker: UInt8, range: Range<Int>)] {
+        var segments: [(UInt8, Range<Int>)] = []
+        var i = 2
+        while i + 4 <= data.count, data[i] == 0xFF, data[i + 1] != 0xDA {
+            let length = Int(data[i + 2]) << 8 | Int(data[i + 3])
+            segments.append((data[i + 1], i..<(i + 2 + length)))
+            i += 2 + length
+        }
+        return segments
+    }
+
+    private func xmpSegment(_ data: Data) throws -> Range<Int> {
+        try XCTUnwrap(jpegSegments(data).first {
+            $0.marker == 0xE1 && data[$0.range].range(of: Data("http://ns.adobe.com/xap/1.0/".utf8)) != nil
+        }?.range)
+    }
+
+    private func iimSegment(_ data: Data) throws -> Range<Int> {
+        try XCTUnwrap(jpegSegments(data).first { $0.marker == 0xED }?.range)
+    }
+
+    /// ImageIO writes keywords as both XMP and IPTC-IIM. Returns the file's bytes.
+    private func jpegBytes(keywords: [String]) throws -> Data {
+        try Data(contentsOf: makeJPEG("kw-\(UUID().uuidString).jpg", properties: [
+            kCGImagePropertyIPTCDictionary: [kCGImagePropertyIPTCKeywords: keywords]
+        ]))
+    }
+
+    /// The keywords the pre-task read path used: IPTC Keywords from the properties dictionary.
+    private func iptcDictionaryKeywords(_ url: URL) throws -> [String] {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any]
+        let iptc = properties?[kCGImagePropertyIPTCDictionary as String] as? [String: Any]
+        return iptc?[kCGImagePropertyIPTCKeywords as String] as? [String] ?? []
+    }
+
+    func testKeywordsMatchIPTCDictionaryForIIMOnlyXMPOnlyAndConflictingFiles() throws {
+        let iim = try jpegBytes(keywords: ["iim:a", "iim-b"])
+        let xmp = try jpegBytes(keywords: ["xmp:a"])
+
+        var iimOnly = iim
+        iimOnly.removeSubrange(try xmpSegment(iim))
+        var xmpOnly = xmp
+        xmpOnly.removeSubrange(try iimSegment(xmp))
+        var conflict = iim   // IIM says iim:a, iim-b; XMP says xmp:a
+        conflict.replaceSubrange(try xmpSegment(iim), with: xmp[try xmpSegment(xmp)])
+
+        let cases: [(String, Data, Set<String>)] = [
+            ("iim-only.jpg", iimOnly, ["iim:a", "iim-b"]),
+            ("xmp-only.jpg", xmpOnly, ["xmp:a"]),
+            ("both.jpg", iim, ["iim:a", "iim-b"]),
+            ("conflict.jpg", conflict, []),
+        ]
+        for (name, bytes, expected) in cases {
+            let url = dir.appendingPathComponent(name)
+            try bytes.write(to: url)
+            let read = service.readMetadata(from: url.path).keywords
+            XCTAssertEqual(read, try iptcDictionaryKeywords(url), "\(name): must match what ImageIO's IPTC dictionary reports")
+            if !expected.isEmpty { XCTAssertEqual(Set(read), expected, name) }
+        }
+    }
+
     func testOutOfRangeXMPRatingReadsAsUnrated() throws {
         // Adobe tools write xmp:Rating="-1" for "rejected". The app only knows 0...5.
         let jpg = try makeJPEG("rejected.jpg")

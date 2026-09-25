@@ -57,17 +57,17 @@ final class MetadataService: Sendable {
 
         // Try reading from image file directly
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
-            // IPTC keywords. ImageIO fills these from XMP dc:subject too.
-            if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
-               let iptc = properties[kCGImagePropertyIPTCDictionary as String] as? [String: Any],
-               let iptcKeywords = iptc[kCGImagePropertyIPTCKeywords as String] as? [String] {
-                keywords = iptcKeywords
-            }
-
-            // The rating lives in XMP (xmp:Rating), which is where writeToImageFile puts it.
             if let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
+                // The rating lives in XMP (xmp:Rating), which is where writeToImageFile puts it.
                 if let r = Self.xmpRating(in: meta) { rating = r }
-                if keywords.isEmpty { keywords = Self.xmpSubject(in: meta) }
+                // ImageIO merges XMP and IPTC-IIM here, so dc:subject holds exactly the keywords the
+                // IPTC properties dictionary reports (XMP wins when they disagree, in both views).
+                // Reading only this is cheaper than also copying the properties dictionary.
+                keywords = Self.xmpSubject(in: meta)
+            } else if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+                      let iptc = properties[kCGImagePropertyIPTCDictionary as String] as? [String: Any],
+                      let iptcKeywords = iptc[kCGImagePropertyIPTCKeywords as String] as? [String] {
+                keywords = iptcKeywords
             }
         }
 
