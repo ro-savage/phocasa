@@ -34,6 +34,7 @@ Every task implicitly includes these.
   - Tests use temp directories and in-memory or temp-file stores.
   - The test host already uses an in-memory store (`PhocasaApp.isTestHost`). Don't undo that.
   - Never open, copy or modify anything under `~/Library/Application Support` or the user's photo folders.
+  - Never search the disk for camera RAW files (no `mdfind`, no Spotlight queries). See **RAW files** under Commands.
 - **Behaviour doesn't change** beyond what your task lists. In particular, rendered edit output must stay pixel-identical (max channel difference ≤ 1) unless your task says otherwise.
 - **Zero new compiler warnings.** The full test suite must pass.
 - **Keep other files compiling.** In waves 1–2, keep every existing internal API that another task's files use source-compatible. Add new APIs freely; don't rename or remove existing ones unless your task explicitly owns every call site.
@@ -62,11 +63,20 @@ TEST_RUNNER_PHOCASA_BENCH=1 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phoca
   -derivedDataPath "$DD" test -only-testing:PhocasaTests/DataPathBenchmarks > "$DD.bench.log" 2>&1
 grep '^BENCH|' "$DD.bench.log"
 
-# Image-path benchmarks (installed by task 00)
-cd Tools/imagebench && swiftc -O -swift-version 5 imagebench.swift -o "$TMPDIR/imagebench" \
-  && "$TMPDIR/imagebench" gen && "$TMPDIR/imagebench" copies && "$TMPDIR/imagebench" <orient|thumb|detail|conc|ci|raw>
-"$TMPDIR/imagebench" clean   # removes about 2.5 GB of generated test images
+# Image-path benchmarks (installed by task 00). Use a data dir and binary unique to your task:
+# parallel agents sharing the default $TMPDIR/phocasa-imagebench would overwrite each other's data.
+export IMAGEBENCH_DIR="$TMPDIR/phocasa-imagebench-<task-id>"
+IB="$TMPDIR/imagebench-<task-id>"
+(cd Tools/imagebench && swiftc -O -swift-version 5 imagebench.swift -o "$IB") \
+  && "$IB" gen && "$IB" copies && "$IB" <orient|thumb|detail|conc|ci>
+"$IB" clean   # removes about 2.5 GB of generated test images; always run it before you finish
 ```
+
+**RAW files:** never search for, open or copy camera RAW files on this machine: they live in the user's photo
+folders. `imagebench raw` runs only when `IMAGEBENCH_RAW` is set to an explicit file path, and a test that needs a
+real RAW must `XCTSkip` unless `PHOCASA_TEST_RAW` (set via `TEST_RUNNER_PHOCASA_TEST_RAW`) names a file. Only the
+coordinator sets these, and only to a file the user has provided. If neither is set, skip the RAW measurement and
+say so in your results; the spec's RAW numbers stand as the reference.
 
 Running the tests launches `Phocasa.app` as the test host, and a window will flash. That's expected.
 

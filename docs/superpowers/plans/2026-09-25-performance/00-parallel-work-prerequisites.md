@@ -76,7 +76,7 @@
   9. Check with `plutil -lint Phocasa/Phocasa.xcodeproj/project.pbxproj` and `$XB -list -project Phocasa/Phocasa.xcodeproj`. Both must succeed.
 
 - [ ] **Step 3: Prove the conversion works.**
-  - Build, then check that the app still has its icon and its generated `Info.plist`:
+  - Build with the full log saved (`$XB ... build > "$DD.build.log" 2>&1`), then check that the app still has its icon and its generated `Info.plist`:
     ```bash
     ls "$DD/Build/Products/Debug/Phocasa.app/Contents/Resources/"          # expect Assets.car and AppIcon.icns
     /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$DD/Build/Products/Debug/Phocasa.app/Contents/Info.plist"
@@ -104,10 +104,11 @@
      - how to build it: `swiftc -O -swift-version 5 imagebench.swift -o "$TMPDIR/imagebench"`;
      - the subcommands: `gen`, `copies`, `orient`, `thumb`, `detail`, `conc [px]`, `ci`, `raw`, `clean`;
      - that data goes to `$IMAGEBENCH_DIR`, or by default `$TMPDIR/phocasa-imagebench` (about 2.5 GB), and that `clean` removes it;
-     - that `raw` uses `mdfind` to find a local camera RAW file and opens it **read-only**.
-  3. Build it. Run `gen`, `copies` and `orient`: expect `CreateImageAtIndex` to report 6000×4000 and the transform thumbnail 4000×6000. Then run `clean`.
-  4. Delete the now-empty `assets/` folder.
-  5. Commit: `tools: add imagebench`.
+     - that `raw` opens only the file named by `$IMAGEBENCH_RAW`, **read-only**, and is skipped when it isn't set.
+  3. **Remove the Spotlight search.** The copied `findRAW()` runs `mdfind` over the whole disk, which would open the user's own photos. Replace its body with a lookup of `ProcessInfo.processInfo.environment["IMAGEBENCH_RAW"]` (return `nil` if unset or not a readable regular file), and change the skip message to say `IMAGEBENCH_RAW` isn't set. This is the only other Swift change allowed in this task.
+  4. Build it into `$TMPDIR/imagebench-00` with `IMAGEBENCH_DIR="$TMPDIR/phocasa-imagebench-00"`. Run `gen`, `copies` and `orient`: expect `CreateImageAtIndex` to report 6000×4000 and the transform thumbnail 4000×6000. Run `raw` with `IMAGEBENCH_RAW` unset and check that it skips. Then run `clean`.
+  5. Delete the now-empty `assets/` folder.
+  6. Commit: `tools: add imagebench`.
 
 - [ ] **Step 7: Add `.gitignore`** at the repo root:
   ```
@@ -127,8 +128,8 @@
 - The full suite passes with 122 tests; the 3 benchmark tests are skipped.
 - The probe files proved auto-inclusion for both targets, and they have been deleted.
 - `PHOCASA_BENCH=1` runs print `BENCH|` lines. Save them in the results file as the **baseline**.
-- `Tools/imagebench` builds and `orient` reproduces spec §D1.
+- `Tools/imagebench` builds and `orient` reproduces spec §D1. `grep -n mdfind Tools/imagebench/imagebench.swift` finds nothing.
 
 ## Out of scope
 
-- Any Swift source change other than removing the settle delay from the benchmark file.
+- Any Swift source change other than removing the settle delay from the benchmark file and replacing imagebench's `mdfind` search (step 6.3).
