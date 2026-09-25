@@ -10,14 +10,44 @@ import UniformTypeIdentifiers
 ///   path. Each photo has its own folder, so `removeAll(forPath:)` is one folder delete and a store can drop the stale
 ///   versions of its photo. There is no index file that could go out of date.
 /// - **Staleness:** the file name carries the photo's size and modification date, so a changed photo misses.
+/// - **Re-keying:** a metadata-only rewrite (a rating or keyword write) changes a JPEG's size but not its pixels or,
+///   since `MetadataService` puts it back, its date. `rekey(path:from:to:)` renames the photo's files to the new
+///   version instead of letting them miss. `ImageLoader` decides when that is safe.
 /// - **Reads** (`image(for:)`) are synchronous, on the caller's thread: the thumbnail scheduler's workers.
-/// - **Writes** (encoding, stores, removals, LRU touches, trimming) run in order on one private utility queue.
-///   Queued stores hold decoded images, so a store is dropped while more than `maxPendingBytes` are waiting.
+/// - **Writes** (encoding, stores, re-keys, removals, LRU touches, trimming) run in order on one private utility
+///   queue. Queued stores hold decoded images, so a store is dropped while more than `maxPendingBytes` are waiting.
 /// - **LRU:** a hit sets the cached file's modification date to now. Every `trimInterval` stores, and on
 ///   `trimIfNeeded()`, the oldest files are deleted once the total passes `byteLimit`, down to 90% of it.
+/// - **Byte total:** kept up to date in the `byte-total` file in `directory`, so a relaunch doesn't have to scan the
+///   whole cache before it can skip a trim. It is trusted when it is intact and a full scan confirmed it less than
+///   `byteTotalMaxAge` ago; otherwise the first trim scans, as it does for a directory without one.
 /// - **Outside deletion:** someone may empty the folder at any time (the user clearing `~/Library/Caches`). Anything
-///   missing is a miss, stores recreate folders, and trimming ignores files that are already gone.
+///   missing is a miss, stores recreate folders, and trimming ignores files that are already gone. The byte total
+///   then counts too much, which only brings the next scan forward.
+/// - One instance per directory at a time (the app's is `ImageLoader.shared`'s).
 final class ThumbnailDiskCache: @unchecked Sendable {
+    /// One version of a photo file: its size and modification date.
+    struct Version: Hashable, Sendable {
+        let fileSize: Int64
+        let modificationDate: Date
+
+        /// Reads size and mtime for `path` (one `stat`); nil if it is missing or not a regular file.
+        static func current(path: String) -> Version? {
+            var info = stat()
+            guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+            let mtime = info.st_mtimespec
+            return Version(
+                fileSize: Int64(info.st_size),
+                modificationDate: Date(timeIntervalSince1970: TimeInterval(mtime.tv_sec) + TimeInterval(mtime.tv_nsec) / 1e9)
+            )
+        }
+
+        /// `-<fileSize>-<mtime>`: identifies this version in file names. The mtime is written as its exact bit pattern.
+        fileprivate var tag: String {
+            "-\(fileSize)-\(String(modificationDate.timeIntervalSinceReferenceDate.bitPattern, radix: 16))"
+        }
+    }
+
     struct Key: Hashable, Sendable {
         let path: String
         let fileSize: Int64
@@ -26,22 +56,17 @@ final class ThumbnailDiskCache: @unchecked Sendable {
 
         /// Reads size and mtime for `path`; nil if the file is missing.
         static func current(path: String, bucket: Int) -> Key? {
-            var info = stat()
-            guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
-            let mtime = info.st_mtimespec
-            return Key(
-                path: path, fileSize: Int64(info.st_size),
-                modificationDate: Date(timeIntervalSince1970: TimeInterval(mtime.tv_sec) + TimeInterval(mtime.tv_nsec) / 1e9),
-                bucket: bucket
-            )
+            Version.current(path: path).map { Key(path: path, version: $0, bucket: bucket) }
         }
 
-        /// `-<fileSize>-<mtime>`: identifies one version of the photo. The mtime is written as its exact bit pattern.
-        fileprivate var versionTag: String {
-            "-\(fileSize)-\(String(modificationDate.timeIntervalSinceReferenceDate.bitPattern, radix: 16))"
+        var version: Version { Version(fileSize: fileSize, modificationDate: modificationDate) }
+
+        /// The same version of the same photo, in another bucket.
+        func inBucket(_ bucket: Int) -> Key {
+            Key(path: path, fileSize: fileSize, modificationDate: modificationDate, bucket: bucket)
         }
 
-        fileprivate var fileName: String { "\(bucket)\(versionTag).jpg" }
+        fileprivate var fileName: String { "\(bucket)\(version.tag).jpg" }
     }
 
     /// Default location: Caches/<bundle id>/Thumbnails/v1
@@ -55,6 +80,13 @@ final class ThumbnailDiskCache: @unchecked Sendable {
     }()
 
     static let jpegQuality = 0.8
+
+    /// How long a persisted byte total is trusted without a full scan. It bounds whatever the running total can't
+    /// see: a crash between a write and its total, or an older build adding files without updating it.
+    static let byteTotalMaxAge: TimeInterval = 7 * 24 * 3600
+
+    /// Paths whose re-keys are remembered for late stores (see `rekeyed`).
+    private static let maxRekeyedPaths = 1024
 
     let directory: URL
     let byteLimit: Int
@@ -70,11 +102,23 @@ final class ThumbnailDiskCache: @unchecked Sendable {
     private var pendingRemovals: [String: Int] = [:]
     /// Decoded bytes held by queued stores.
     private var pendingStoreBytes = 0
+    /// Full scans of the cache so far. Guarded by `lock`.
+    private var scans = 0
 
     // Only touched on `queue`.
-    /// Bytes on disk, from the last scan plus what has been written and deleted since. nil until the first scan.
+    /// Bytes on disk, from the persisted total or the last scan, plus what has been written and deleted since. nil
+    /// until one of those is known.
     private var knownBytes: Int?
+    /// When a full scan last confirmed `knownBytes` (a new, empty directory counts as confirmed).
+    private var bytesVerifiedAt = Date.distantPast
+    private var loadedByteTotal = false
+    /// The open `byte-total` file, or -1.
+    private var byteTotalFile: Int32 = -1
     private var storesSinceTrim = 0
+    /// For each recently re-keyed path, the versions it was re-keyed from and the one it is now. A store queued after
+    /// the re-key for one of the old versions (its decode read the file's size before the rewrite) has the same
+    /// pixels, so it is filed under the new version.
+    private var rekeyed: [String: (from: Set<Version>, to: Version)] = [:]
 
     init(directory: URL, byteLimit: Int = 1 << 30, trimInterval: Int = 100, maxPendingBytes: Int = 64 << 20) {
         self.directory = directory
@@ -83,10 +127,17 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         self.maxPendingBytes = maxPendingBytes
     }
 
+    deinit {
+        if byteTotalFile >= 0 { close(byteTotalFile) }
+    }
+
     // MARK: - API
 
     /// The cached thumbnail for `key`, or nil. Synchronous; call it from the scheduler's work closure.
-    func image(for key: Key) -> CGImage? {
+    ///
+    /// With `maxPixelSize`, the cached image is decoded down so its long edge is at most that: a larger bucket
+    /// serving a smaller request.
+    func image(for key: Key, maxPixelSize: Int? = nil) -> CGImage? {
         if lock.withLock({ pendingRemovals[key.path] != nil }) {
             return nil
         }
@@ -94,7 +145,7 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         guard let data = try? Data(contentsOf: url) else {
             return nil
         }
-        guard let image = Self.decode(data) else {
+        guard let image = Self.decode(data, maxPixelSize: maxPixelSize) else {
             queue.async { try? FileManager.default.removeItem(at: url) }
             return nil
         }
@@ -120,15 +171,51 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         }
     }
 
+    /// `path` was rewritten from version `old` to `new` without changing its pixels: its thumbnails stored for exactly
+    /// `old` are renamed to `new`, in every bucket. A bucket already stored for `new` is kept. Runs on the utility
+    /// queue, in order with stores and removals; stores for `old` queued after it are filed under `new`.
+    ///
+    /// The caller must know the pixels are unchanged. `ImageLoader.rewritingMetadata(ofImageAt:_:)` checks that.
+    func rekey(path: String, from old: Version, to new: Version) {
+        guard old != new else { return }
+        queue.async { [self] in
+            loadByteTotalIfNeeded()
+            let folder = folderURL(forPath: path)
+            let oldSuffix = old.tag + ".jpg"
+            var freed = 0
+            for file in cachedFiles(in: folder) {
+                let name = file.lastPathComponent
+                guard name.hasSuffix(oldSuffix), let bucket = Int(name.dropLast(oldSuffix.count)) else { continue }
+                let target = folder.appendingPathComponent("\(bucket)\(new.tag).jpg", isDirectory: false)
+                if access(target.path, F_OK) == 0 {
+                    // Decoded again since the rewrite: that copy is just as good.
+                    let bytes = Self.allocatedSize(of: file)
+                    if (try? FileManager.default.removeItem(at: file)) != nil { freed += bytes }
+                } else {
+                    _ = rename(file.path, target.path)
+                }
+            }
+            if freed > 0, let known = knownBytes {
+                knownBytes = max(0, known - freed)
+                persistByteTotal()
+            }
+            rememberRekey(of: path, from: old, to: new)
+        }
+    }
+
     /// Deletes every bucket of `path`. Reads miss from now on; the files go on the utility queue.
     func removeAll(forPath path: String) {
         lock.withLock { pendingRemovals[path, default: 0] += 1 }
         queue.async { [self] in
+            loadByteTotalIfNeeded()
             let folder = folderURL(forPath: path)
             let bytes = cachedFiles(in: folder).reduce(0) { $0 + Self.allocatedSize(of: $1) }
-            if (try? FileManager.default.removeItem(at: folder)) != nil {
-                knownBytes = knownBytes.map { max(0, $0 - bytes) }
+            if (try? FileManager.default.removeItem(at: folder)) != nil, let known = knownBytes {
+                knownBytes = max(0, known - bytes)
+                persistByteTotal()
             }
+            // The pixels changed: nothing may follow an earlier re-key any more.
+            rekeyed[path] = nil
             lock.withLock {
                 let remaining = (pendingRemovals[path] ?? 1) - 1
                 pendingRemovals[path] = remaining > 0 ? remaining : nil
@@ -151,6 +238,25 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         folderURL(forPath: key.path).appendingPathComponent(key.fileName, isDirectory: false)
     }
 
+    /// Where the running byte total is kept.
+    var byteTotalURL: URL {
+        directory.appendingPathComponent("byte-total", isDirectory: false)
+    }
+
+    /// How many times this instance has scanned the whole cache. For tests and benchmarks.
+    var fullScanCount: Int {
+        lock.withLock { scans }
+    }
+
+    /// The byte total this instance works with (after loading the persisted one), or nil if it isn't known yet. Waits
+    /// for queued work. For tests and benchmarks.
+    var knownByteTotal: Int? {
+        queue.sync {
+            loadByteTotalIfNeeded()
+            return knownBytes
+        }
+    }
+
     // MARK: - Files (on `queue`)
 
     private func folderURL(forPath path: String) -> URL {
@@ -160,7 +266,9 @@ final class ThumbnailDiskCache: @unchecked Sendable {
             .appendingPathComponent(digest, isDirectory: true)
     }
 
-    private func write(_ data: Data, for key: Key) {
+    private func write(_ data: Data, for stored: Key) {
+        loadByteTotalIfNeeded()
+        let key = currentKey(for: stored)
         let folder = folderURL(forPath: key.path)
         let url = folder.appendingPathComponent(key.fileName, isDirectory: false)
         let replaced = Self.allocatedSize(of: url)
@@ -177,13 +285,17 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         }
         var delta = Self.allocatedSize(of: url) - replaced
         // Older versions of this photo (it changed since they were stored) can never be read again.
-        for stale in cachedFiles(in: folder) where !stale.lastPathComponent.hasSuffix(key.versionTag + ".jpg") {
+        let versionSuffix = key.version.tag + ".jpg"
+        for stale in cachedFiles(in: folder) where !stale.lastPathComponent.hasSuffix(versionSuffix) {
             let bytes = Self.allocatedSize(of: stale)
             if (try? FileManager.default.removeItem(at: stale)) != nil {
                 delta -= bytes
             }
         }
-        knownBytes = knownBytes.map { max(0, $0 + delta) }
+        if delta != 0, let known = knownBytes {
+            knownBytes = max(0, known + delta)
+            persistByteTotal()
+        }
 
         storesSinceTrim += 1
         if storesSinceTrim >= trimInterval {
@@ -191,11 +303,31 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         }
     }
 
+    /// `key`, or the version a re-key moved its version to.
+    private func currentKey(for key: Key) -> Key {
+        guard let entry = rekeyed[key.path], entry.from.contains(key.version) else { return key }
+        return Key(path: key.path, version: entry.to, bucket: key.bucket)
+    }
+
+    private func rememberRekey(of path: String, from old: Version, to new: Version) {
+        var from: Set<Version> = [old]
+        if let earlier = rekeyed[path], earlier.to == old {
+            from.formUnion(earlier.from)   // a chain: a rating, then a keyword
+        } else if rekeyed.count >= Self.maxRekeyedPaths {
+            // Only stores already queued behind a rewrite need this; losing it costs one decode at most.
+            rekeyed.removeAll()
+        }
+        from.remove(new)
+        rekeyed[path] = (from, new)
+    }
+
     private func trim() {
+        loadByteTotalIfNeeded()
         storesSinceTrim = 0
         if let knownBytes, knownBytes <= byteLimit {
             return
         }
+        lock.withLock { scans += 1 }
         var files = scan()
         var total = files.reduce(0) { $0 + $1.bytes }
         if total > byteLimit {
@@ -211,6 +343,8 @@ final class ThumbnailDiskCache: @unchecked Sendable {
             }
         }
         knownBytes = total
+        bytesVerifiedAt = Date()
+        persistByteTotal()
     }
 
     private func scan() -> [(url: URL, bytes: Int, used: Date)] {
@@ -238,6 +372,79 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         return Int(info.st_blocks) * 512
     }
 
+    // MARK: - Byte total (on `queue`)
+
+    /// Once per instance, before the first change: a directory that doesn't exist yet holds nothing, and otherwise
+    /// the persisted total is used if it is plausible. If not, `knownBytes` stays nil and the next trim scans.
+    private func loadByteTotalIfNeeded() {
+        guard !loadedByteTotal else { return }
+        loadedByteTotal = true
+        guard access(directory.path, F_OK) == 0 else {
+            knownBytes = 0
+            bytesVerifiedAt = Date()
+            return
+        }
+        guard let data = try? Data(contentsOf: byteTotalURL),
+              let record = Self.parseByteTotalRecord(data, now: Date()) else { return }
+        knownBytes = record.bytes
+        bytesVerifiedAt = record.verifiedAt
+    }
+
+    /// Overwrites the `byte-total` file in place (one `pwrite` of 40 bytes on a descriptor kept open). If the file was
+    /// deleted from outside, it is recreated; if the directory is gone, nothing is written until a store recreates it.
+    private func persistByteTotal() {
+        guard let knownBytes else { return }
+        if byteTotalFile >= 0 {
+            var info = stat()
+            if fstat(byteTotalFile, &info) != 0 || info.st_nlink == 0 {
+                close(byteTotalFile)
+                byteTotalFile = -1
+            }
+        }
+        let record = Self.byteTotalRecord(bytes: knownBytes, verifiedAt: bytesVerifiedAt)
+        if byteTotalFile < 0 {
+            byteTotalFile = open(byteTotalURL.path, O_WRONLY | O_CREAT | O_CLOEXEC, 0o644)
+            guard byteTotalFile >= 0 else { return }
+            // Whatever was there before may have been longer (a foreign or damaged file).
+            _ = ftruncate(byteTotalFile, off_t(record.count))
+        }
+        record.withUnsafeBytes { buffer in
+            _ = pwrite(byteTotalFile, buffer.baseAddress, buffer.count, 0)
+        }
+    }
+
+    private static let byteTotalMagic: UInt64 = 0x4C41_544F_5442_4850   // "PHBTOTAL", little endian
+    private static let byteTotalFormat: UInt64 = 1
+
+    /// The `byte-total` file's contents: five little-endian 64-bit words (magic, format, bytes, the bit pattern of
+    /// `verifiedAt`'s seconds since 1970, and a check word over the two), so a torn or foreign file is recognised.
+    static func byteTotalRecord(bytes: Int, verifiedAt: Date) -> Data {
+        let bytesWord = UInt64(bitPattern: Int64(bytes))
+        let dateWord = verifiedAt.timeIntervalSince1970.bitPattern
+        let words = [byteTotalMagic, byteTotalFormat, bytesWord, dateWord, ~(bytesWord ^ dateWord ^ byteTotalMagic)]
+        var data = Data(capacity: words.count * 8)
+        for word in words {
+            withUnsafeBytes(of: word.littleEndian) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    /// A persisted total worth trusting: intact, not negative, and confirmed by a scan within `byteTotalMaxAge`.
+    private static func parseByteTotalRecord(_ data: Data, now: Date) -> (bytes: Int, verifiedAt: Date)? {
+        guard data.count == 40 else { return nil }
+        let words = (0..<5).map { i in
+            data.withUnsafeBytes { UInt64(littleEndian: $0.loadUnaligned(fromByteOffset: i * 8, as: UInt64.self)) }
+        }
+        guard words[0] == byteTotalMagic, words[1] == byteTotalFormat,
+              words[4] == ~(words[2] ^ words[3] ^ byteTotalMagic) else { return nil }
+        let bytes = Int64(bitPattern: words[2])
+        let verifiedAt = Date(timeIntervalSince1970: TimeInterval(bitPattern: words[3]))
+        let age = now.timeIntervalSince(verifiedAt)
+        // A date in the future (beyond clock adjustments) means the record can't be relied on either.
+        guard bytes >= 0, age.isFinite, age <= byteTotalMaxAge, age >= -3600 else { return nil }
+        return (Int(bytes), verifiedAt)
+    }
+
     // MARK: - Encoding
 
     private static let hexDigits = Array("0123456789abcdef".utf8)
@@ -263,13 +470,21 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 
-    private static func decode(_ data: Data) -> CGImage? {
+    private static func decode(_ data: Data, maxPixelSize: Int?) -> CGImage? {
         // Every file this cache writes ends with the JPEG end-of-image marker. One cut short doesn't, and ImageIO
         // would happily decode it with a grey bottom half.
         guard data.count > 4, data[data.endIndex - 2] == 0xFF, data[data.endIndex - 1] == 0xD9,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetStatus(source) == .statusComplete else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        guard let maxPixelSize else {
+            return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        }
+        // The cached file is already upright and has no embedded thumbnail, so this decodes and scales its pixels.
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+        ] as CFDictionary)
     }
 
     /// JPEG drops transparency. ImageIO gives HEIC thumbnails an alpha channel even when every pixel is opaque, so
@@ -300,5 +515,11 @@ final class ThumbnailDiskCache: @unchecked Sendable {
             }
             return true
         }
+    }
+}
+
+extension ThumbnailDiskCache.Key {
+    init(path: String, version: ThumbnailDiskCache.Version, bucket: Int) {
+        self.init(path: path, fileSize: version.fileSize, modificationDate: version.modificationDate, bucket: bucket)
     }
 }

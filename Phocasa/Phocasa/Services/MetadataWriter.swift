@@ -29,6 +29,14 @@ protocol MetadataWriting: Sendable {
 
 extension MetadataService: MetadataWriting {}
 
+/// Told about each rating and keyword write into an image file itself (a JPG or another standard image, not a RAW
+/// sidecar). Those rewrite only the file's metadata, and its pixels stay identical. `ImageLoader` uses it to keep the
+/// photo's disk-cached thumbnails, whose key includes the file's size.
+protocol MetadataRewriteObserver: Sendable {
+    /// Performs `rewrite`, the write, synchronously, so the observer can look at the file before and after.
+    func rewritingMetadata(ofImageAt path: String, _ rewrite: () -> Void)
+}
+
 /// Serialises every metadata write. Only the latest pending write per path is kept.
 ///
 /// - `enqueue` and `enqueueEditParameters` are synchronous and never block: they add to an inbox
@@ -42,8 +50,10 @@ extension MetadataService: MetadataWriting {}
 ///   they were enqueued.
 /// - The drain loop takes in new enqueues before every write, so a newer payload replaces one
 ///   that hasn't been written yet.
+/// - Rating and keyword writes into an image file itself run inside `rewriteObserver`, if there
+///   is one. `shared` reports to `ImageLoader.shared`, which keeps the thumbnails it cached on disk.
 actor MetadataWriter {
-    static let shared = MetadataWriter()
+    static let shared = MetadataWriter(service: .shared, rewriteObserver: ImageLoader.shared)
 
     private let queue = DispatchSerialQueue(label: "com.phocasa.metadata-writer", qos: .utility)
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -97,13 +107,18 @@ actor MetadataWriter {
     private var isDraining = false
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(service: MetadataService = .shared) {
+    /// Wraps each rating and keyword write into an image file itself (not RAW sidecar writes, not edit parameters).
+    nonisolated let rewriteObserver: (any MetadataRewriteObserver)?
+
+    init(service: MetadataService = .shared, rewriteObserver: (any MetadataRewriteObserver)? = nil) {
         self.service = service
+        self.rewriteObserver = rewriteObserver
     }
 
     /// For tests: writes through any `MetadataWriting`.
-    init(writer: any MetadataWriting) {
+    init(writer: any MetadataWriting, rewriteObserver: (any MetadataRewriteObserver)? = nil) {
         self.service = writer
+        self.rewriteObserver = rewriteObserver
     }
 
     // MARK: - API
@@ -210,7 +225,15 @@ actor MetadataWriter {
     private func perform(_ operation: Operation, at path: String) {
         switch operation {
         case .metadata(let rating, let keywords):
-            service.writeMetadata(rating: rating, keywords: keywords, toImageAt: path)
+            let service = self.service
+            let write = { service.writeMetadata(rating: rating, keywords: keywords, toImageAt: path) }
+            // A RAW's rating goes to its .xmp sidecar (see MetadataService.writeMetadata): the RAW itself is untouched.
+            if let rewriteObserver,
+               !FolderScanner.rawExtensions.contains((path as NSString).pathExtension.lowercased()) {
+                rewriteObserver.rewritingMetadata(ofImageAt: path, write)
+            } else {
+                write()
+            }
         case .setEditParameters(let params):
             service.writeEditParameters(params, forRAWAt: path)
         case .clearEditParameters:

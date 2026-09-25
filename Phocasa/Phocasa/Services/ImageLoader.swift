@@ -58,9 +58,6 @@ final class ImageLoader: @unchecked Sendable {
     private let thumbnailScheduler = ThumbnailScheduler<ThumbnailRequest, CGImage>(
         maxConcurrent: ProcessInfo.processInfo.activeProcessorCount, qos: .userInitiated
     )
-    /// Used by `loadFullResolution` only.
-    private let queue = DispatchQueue(label: "com.phocasa.imageloader", qos: .userInitiated, attributes: .concurrent)
-
     /// Bumped by `invalidate(path:)` (per path) and `clearCache()` (all paths), so a decode that was already
     /// running can't put a stale thumbnail back into the cache.
     private let generationLock = NSLock()
@@ -124,7 +121,7 @@ final class ImageLoader: @unchecked Sendable {
             // Read the file's size and date before decoding it: if it changes mid-decode, the thumbnail is filed under
             // the old version and simply misses next time.
             let diskKey = diskCache == nil ? nil : ThumbnailDiskCache.Key.current(path: path, bucket: bucket)
-            if let diskKey, let cached = diskCache?.image(for: diskKey) {
+            if let diskKey, let diskCache, let cached = Self.diskThumbnail(for: diskKey, in: diskCache) {
                 store(cached, for: key, generation: generation, diskKey: nil)
                 return cached
             }
@@ -191,31 +188,6 @@ final class ImageLoader: @unchecked Sendable {
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
-    // MARK: - Full resolution
-
-    func loadFullResolution(for path: String) async -> NSImage? {
-        return await withCheckedContinuation { continuation in
-            queue.async {
-                guard let imageSource = Self.makeImageSource(atPath: path) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                let options: [CFString: Any] = [
-                    kCGImageSourceShouldCacheImmediately: true,
-                    kCGImageSourceCreateThumbnailWithTransform: true
-                ]
-
-                guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                continuation.resume(returning: Self.makeImage(cgImage))
-            }
-        }
-    }
-
     // MARK: - Private
 
     private static func makeImageSource(atPath path: String) -> CGImageSource? {
@@ -225,6 +197,21 @@ final class ImageLoader: @unchecked Sendable {
     /// An NSImage whose point size equals the pixel size, as the views expect.
     private static func makeImage(_ cgImage: CGImage) -> NSImage {
         NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
+    }
+
+    /// The disk cache's thumbnail for `key`: its own bucket or, if the grid was zoomed out since it was stored, a
+    /// bucket up to twice as large (the memory cache's rule), decoded down to this bucket's size so the memory cache
+    /// holds what a fresh decode would. Nothing new is stored: the larger file keeps serving.
+    private static func diskThumbnail(for key: ThumbnailDiskCache.Key, in diskCache: ThumbnailDiskCache) -> CGImage? {
+        if let exact = diskCache.image(for: key) {
+            return exact
+        }
+        for larger in thumbnailBuckets where larger > key.bucket && larger <= key.bucket * 2 {
+            if let image = diskCache.image(for: key.inBucket(larger), maxPixelSize: key.bucket) {
+                return image
+            }
+        }
+        return nil
     }
 
     private func cachedThumbnail(for path: String, bucket: Int) -> NSImage? {
@@ -263,6 +250,39 @@ final class ImageLoader: @unchecked Sendable {
             }
             guard current == generation else { return }
             thumbnailCache.setObject(image, forKey: key, cost: cost)
+        }
+    }
+}
+
+// MARK: - Metadata-only rewrites
+
+/// `MetadataWriter.shared` reports its rating and keyword writes to `ImageLoader.shared` (wired in
+/// `MetadataWriter.swift`).
+extension ImageLoader: MetadataRewriteObserver {
+    /// How far a metadata rewrite may move the file's modification date: `restoreFileDates` rounds it to the
+    /// microsecond (measured: up to 0.62 µs). Anything else that writes the file moves it by far more.
+    static let rewriteDateTolerance: TimeInterval = 10e-6
+
+    /// Runs `rewrite`, a metadata-only rewrite of the image at `path`, then re-keys the photo's disk-cached thumbnails
+    /// to the file's new size, so the next launch doesn't decode it again: a rating or keyword write changes a JPEG's
+    /// size, not its pixels. The re-key happens only when it is safe:
+    /// - the file's modification date is unchanged (`MetadataService` puts it back, so a moved date means something
+    ///   else wrote the file meanwhile). "Unchanged" allows `rewriteDateTolerance`: `restoreFileDates` goes through
+    ///   `Date` and rounds the nanoseconds APFS keeps to microseconds;
+    /// - `invalidate(path:)` (an export: new pixels) wasn't called since the rewrite began;
+    /// - only thumbnails of exactly the version on disk before the rewrite move, queued under `generationLock` like
+    ///   this loader's stores, so it is ordered against them and against a later `invalidate(path:)`'s removal.
+    func rewritingMetadata(ofImageAt path: String, _ rewrite: () -> Void) {
+        guard let diskCache else { return rewrite() }
+        let generation = currentGeneration(for: path).path
+        let before = ThumbnailDiskCache.Version.current(path: path)
+        rewrite()
+        guard let before, let after = ThumbnailDiskCache.Version.current(path: path), after != before,
+              abs(after.modificationDate.timeIntervalSince(before.modificationDate)) < Self.rewriteDateTolerance
+        else { return }
+        generationLock.withLock {
+            guard (pathGenerations[path] ?? 0) == generation else { return }
+            diskCache.rekey(path: path, from: before, to: after)
         }
     }
 }

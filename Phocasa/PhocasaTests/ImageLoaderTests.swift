@@ -202,19 +202,6 @@ final class ImageLoaderTests: XCTestCase {
         XCTAssertNil(ImageLoader.shared.cachedThumbnail(for: path, maxSize: 300))
     }
 
-    // MARK: - Full resolution (behaviour must not change)
-
-    func testLoadFullResolutionIsUnchanged() async throws {
-        // loadFullResolution uses CGImageSourceCreateImageAtIndex, which ignores EXIF orientation (spec §D1).
-        // Task 12 fixes that in the detail view; this task must not change it.
-        let path = try writeJPEG("full.jpg", width: 1200, height: 800, orientation: 6)
-
-        let loaded = await ImageLoader.shared.loadFullResolution(for: path)
-
-        let image = try XCTUnwrap(loaded)
-        let cg = try XCTUnwrap(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
-        XCTAssertEqual(cg.width, 1200)
-        XCTAssertEqual(cg.height, 800)
-        XCTAssertEqual(image.size, NSSize(width: 1200, height: 800))
-    }
+    // Full-resolution images: `ImageLoader.loadFullResolution(for:)` is gone (task 34). The detail view and editing
+    // decode through `FullImageLoader`, which has its own tests.
 }

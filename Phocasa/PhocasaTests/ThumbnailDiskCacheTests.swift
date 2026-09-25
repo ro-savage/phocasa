@@ -122,18 +122,53 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         return url.path
     }
 
-    /// Every regular file under the cache directory, relative to it.
+    /// Every cached thumbnail (a regular `.jpg` file) under the cache directory, relative to it. The byte-total file
+    /// isn't a thumbnail.
     private func cachedFiles() -> [String] {
         guard let enumerator = FileManager.default.enumerator(atPath: cacheDir.path) else { return [] }
         var files: [String] = []
         while let relative = enumerator.nextObject() as? String {
             var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: cacheDir.appendingPathComponent(relative).path,
+            if relative.hasSuffix(".jpg"),
+               FileManager.default.fileExists(atPath: cacheDir.appendingPathComponent(relative).path,
                                               isDirectory: &isDirectory), !isDirectory.boolValue {
                 files.append(relative)
             }
         }
         return files.sorted()
+    }
+
+    /// The bytes the cached thumbnails take on disk, as a full scan counts them.
+    private func cachedBytes() throws -> Int {
+        try cachedFiles().reduce(0) { total, relative in
+            let values = try cacheDir.appendingPathComponent(relative).resourceValues(forKeys: [.totalFileAllocatedSizeKey])
+            return total + (values.totalFileAllocatedSize ?? 0)
+        }
+    }
+
+    private func version(size: Int64, date: TimeInterval = 1_700_000_000) -> ThumbnailDiskCache.Version {
+        ThumbnailDiskCache.Version(fileSize: size, modificationDate: Date(timeIntervalSince1970: date))
+    }
+
+    /// Rates `path` through the app's writer and `MetadataService`, wired to `loader` the way
+    /// `MetadataWriter.shared` is wired to `ImageLoader.shared`, and waits for the disk cache.
+    private func rate(_ path: String, _ rating: Int, keywords: [String] = [], observedBy loader: ImageLoader?) async {
+        let writer = MetadataWriter(service: .shared, rewriteObserver: loader)
+        writer.enqueue([MetadataWriteItem(path: path, rating: rating, keywords: keywords)])
+        await writer.flush()
+        loader?.diskCache?.waitForPendingWork()
+    }
+
+    /// Rewrites `path` with new pixels and puts its modification date back, as an export does
+    /// (`ImageEditingService.writeJPEG` restores the file dates).
+    private func rewritePixelsKeepingTheDate(_ path: String, hue: CGFloat) throws {
+        let dates = captureFileDates(URL(fileURLWithPath: path))
+        _ = try writeSource((path as NSString).lastPathComponent, hue: hue, square: false)
+        restoreFileDates(URL(fileURLWithPath: path), dates: dates)
+    }
+
+    private func cgImage(_ image: NSImage?) throws -> CGImage {
+        try XCTUnwrap(image?.cgImage(forProposedRect: nil, context: nil, hints: nil))
     }
 
     private func fileExists(_ url: URL) -> Bool {
@@ -469,6 +504,210 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         XCTAssertEqual(cachedFiles().count, 2)
     }
 
+    // MARK: - Re-keying after a metadata-only rewrite (task 34)
+
+    func testRekeyRenamesEveryBucketOfTheOldVersion() throws {
+        let cache = makeCache()
+        let old384 = key("/photos/a.jpg", bucket: 384, size: 1000)
+        let old512 = key("/photos/a.jpg", bucket: 512, size: 1000)
+        let other = key("/photos/b.jpg", bucket: 384, size: 1000)
+        for k in [old384, old512, other] { cache.store(try image(), for: k) }
+        cache.waitForPendingWork()
+
+        // A rating write grew the file by 4,567 bytes; its modification date was put back.
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1000), to: version(size: 5567))
+        cache.waitForPendingWork()
+
+        XCTAssertNotNil(cache.image(for: key("/photos/a.jpg", bucket: 384, size: 5567)))
+        XCTAssertNotNil(cache.image(for: key("/photos/a.jpg", bucket: 512, size: 5567)))
+        XCTAssertFalse(fileExists(cache.fileURL(for: old384)))
+        XCTAssertFalse(fileExists(cache.fileURL(for: old512)))
+        XCTAssertNotNil(cache.image(for: other), "other photos are untouched")
+        XCTAssertEqual(cachedFiles().count, 3)
+    }
+
+    func testRekeyMovesOnlyTheVersionItWasGiven() throws {
+        // The cached thumbnail is of an older version than the one that was rewritten: it stays stale.
+        let cache = makeCache()
+        let stale = key("/photos/a.jpg", size: 900)
+        cache.store(try image(), for: stale)
+        cache.waitForPendingWork()
+
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1000), to: version(size: 1200))
+        cache.waitForPendingWork()
+
+        XCTAssertNil(cache.image(for: key("/photos/a.jpg", size: 1200)))
+        XCTAssertTrue(fileExists(cache.fileURL(for: stale)))
+    }
+
+    func testRekeyKeepsAThumbnailAlreadyStoredForTheNewVersion() throws {
+        let cache = makeCache()
+        let newer = try image(hue: 0.2, square: false)
+        cache.store(try image(hue: 0.9, square: false), for: key("/photos/a.jpg", size: 1000))
+        cache.store(newer, for: key("/photos/a.jpg", size: 1200))
+        cache.waitForPendingWork()
+
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1000), to: version(size: 1200))
+        cache.waitForPendingWork()
+
+        let read = try XCTUnwrap(cache.image(for: key("/photos/a.jpg", size: 1200)))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(newer, read)), 12)
+        XCTAssertEqual(cachedFiles().count, 1)
+    }
+
+    func testStoreForTheOldVersionQueuedAfterARekeyIsFiledUnderTheNewOne() throws {
+        // A decode that read the file's size before the rewrite finishes after it: same pixels, new version.
+        let cache = makeCache()
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1000), to: version(size: 1200))
+        cache.store(try image(), for: key("/photos/a.jpg", size: 1000))
+        cache.waitForPendingWork()
+
+        XCTAssertNotNil(cache.image(for: key("/photos/a.jpg", size: 1200)))
+        XCTAssertNil(cache.image(for: key("/photos/a.jpg", size: 1000)))
+        XCTAssertEqual(cachedFiles().count, 1)
+    }
+
+    func testRekeysChain() throws {
+        let cache = makeCache()
+        cache.store(try image(), for: key("/photos/a.jpg", size: 1000))
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1000), to: version(size: 1200))
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1200), to: version(size: 1240))
+        // A late store of the first version follows both.
+        cache.store(try image(), for: key("/photos/a.jpg", bucket: 512, size: 1000))
+        cache.waitForPendingWork()
+
+        XCTAssertNotNil(cache.image(for: key("/photos/a.jpg", size: 1240)))
+        XCTAssertNotNil(cache.image(for: key("/photos/a.jpg", bucket: 512, size: 1240)))
+        XCTAssertEqual(cachedFiles().count, 2)
+    }
+
+    func testRemoveAllForgetsARekey() throws {
+        // invalidate(path:) means the pixels changed: nothing may be filed under the re-keyed version any more.
+        let cache = makeCache()
+        cache.rekey(path: "/photos/a.jpg", from: version(size: 1000), to: version(size: 1200))
+        cache.removeAll(forPath: "/photos/a.jpg")
+        cache.store(try image(), for: key("/photos/a.jpg", size: 1000))
+        cache.waitForPendingWork()
+
+        XCTAssertNil(cache.image(for: key("/photos/a.jpg", size: 1200)))
+        XCTAssertNotNil(cache.image(for: key("/photos/a.jpg", size: 1000)))
+    }
+
+    // MARK: - Byte total across launches (task 34)
+
+    func testByteTotalSurvivesARelaunch() throws {
+        let first = makeCache()
+        for name in ["a", "b", "c"] { first.store(try image(), for: key("/photos/\(name).jpg")) }
+        first.waitForPendingWork()
+        XCTAssertTrue(fileExists(first.byteTotalURL))
+
+        let relaunched = makeCache()
+        relaunched.trimIfNeeded()
+        relaunched.waitForPendingWork()
+
+        XCTAssertEqual(relaunched.fullScanCount, 0, "a trusted total needs no scan")
+        XCTAssertEqual(relaunched.knownByteTotal, try cachedBytes())
+    }
+
+    func testTheFirstAutomaticTrimOfASessionDoesNotRescan() throws {
+        let first = makeCache(trimInterval: 2)
+        for name in ["a", "b", "c", "d"] { first.store(try image(), for: key("/photos/\(name).jpg")) }
+        first.waitForPendingWork()
+
+        let relaunched = makeCache(trimInterval: 2)
+        relaunched.store(try image(), for: key("/photos/e.jpg"))
+        relaunched.store(try image(), for: key("/photos/f.jpg"))
+        relaunched.waitForPendingWork()
+
+        XCTAssertEqual(first.fullScanCount, 0, "a new cache starts with a known total of zero")
+        XCTAssertEqual(relaunched.fullScanCount, 0)
+        XCTAssertEqual(relaunched.knownByteTotal, try cachedBytes())
+    }
+
+    func testCorruptByteTotalTriggersARescan() throws {
+        let first = makeCache()
+        for name in ["a", "b", "c"] { first.store(try image(), for: key("/photos/\(name).jpg")) }
+        first.waitForPendingWork()
+        try Data("garbage".utf8).write(to: first.byteTotalURL)
+
+        let relaunched = makeCache()
+        XCTAssertNil(relaunched.knownByteTotal, "an unreadable total isn't trusted")
+        relaunched.trimIfNeeded()
+        relaunched.waitForPendingWork()
+        XCTAssertEqual(relaunched.fullScanCount, 1)
+        XCTAssertEqual(relaunched.knownByteTotal, try cachedBytes())
+
+        // The scan wrote a good total back.
+        let again = makeCache()
+        again.trimIfNeeded()
+        again.waitForPendingWork()
+        XCTAssertEqual(again.fullScanCount, 0)
+    }
+
+    func testMissingOrImplausibleByteTotalTriggersARescan() throws {
+        let first = makeCache()
+        first.store(try image(), for: key("/photos/a.jpg"))
+        first.waitForPendingWork()
+        let url = first.byteTotalURL
+        let now = Date()
+        let cases: [(String, Data?)] = [
+            ("missing", nil),
+            ("negative", ThumbnailDiskCache.byteTotalRecord(bytes: -5, verifiedAt: now)),
+            ("last verified too long ago", ThumbnailDiskCache.byteTotalRecord(
+                bytes: 10, verifiedAt: now.addingTimeInterval(-ThumbnailDiskCache.byteTotalMaxAge - 60))),
+            ("verified in the future", ThumbnailDiskCache.byteTotalRecord(
+                bytes: 10, verifiedAt: now.addingTimeInterval(86_400))),
+            ("truncated", ThumbnailDiskCache.byteTotalRecord(bytes: 10, verifiedAt: now).prefix(20)),
+        ]
+        for (name, record) in cases {
+            try? FileManager.default.removeItem(at: url)
+            if let record { try record.write(to: url) }
+            let relaunched = makeCache()
+            XCTAssertNil(relaunched.knownByteTotal, name)
+            relaunched.trimIfNeeded()
+            relaunched.waitForPendingWork()
+            XCTAssertEqual(relaunched.fullScanCount, 1, name)
+            XCTAssertEqual(relaunched.knownByteTotal, try cachedBytes(), name)
+        }
+        // And a good record is trusted as it is.
+        try ThumbnailDiskCache.byteTotalRecord(bytes: 12_345, verifiedAt: now).write(to: url)
+        XCTAssertEqual(makeCache().knownByteTotal, 12_345)
+    }
+
+    func testByteTotalFollowsStoresRemovalsTrimsAndRekeys() throws {
+        let thumbnail = try image()
+        let fileBytes = try cachedFileBytes(for: thumbnail)
+        let first = makeCache(byteLimit: fileBytes * 4, trimInterval: 1000)
+        for i in 0..<6 { first.store(thumbnail, for: key("/photos/\(i).jpg")) }
+        first.store(try image(300, 200), for: key("/photos/0.jpg", bucket: 512))
+        first.removeAll(forPath: "/photos/1.jpg")
+        first.store(try image(200, 150), for: key("/photos/2.jpg", size: 2000))   // replaces a stale version
+        first.store(thumbnail, for: key("/photos/3.jpg", size: 3000))
+        first.rekey(path: "/photos/3.jpg", from: version(size: 1000), to: version(size: 3000))  // drops a duplicate
+        first.trimIfNeeded()   // over the limit: scans and deletes the oldest
+        first.store(thumbnail, for: key("/photos/7.jpg"))
+        first.waitForPendingWork()
+        XCTAssertEqual(first.knownByteTotal, try cachedBytes())
+
+        let relaunched = makeCache(byteLimit: fileBytes * 4)
+        XCTAssertEqual(relaunched.knownByteTotal, try cachedBytes())
+    }
+
+    func testByteTotalFileIsNotCountedAsAThumbnail() throws {
+        let cache = makeCache()
+        cache.store(try image(), for: key("/photos/a.jpg"))
+        cache.waitForPendingWork()
+        let bytes = try cachedBytes()
+
+        let relaunched = makeCache(byteLimit: 1 << 30)
+        try? FileManager.default.removeItem(at: relaunched.byteTotalURL)
+        relaunched.trimIfNeeded()
+        relaunched.waitForPendingWork()
+
+        XCTAssertEqual(relaunched.fullScanCount, 1)
+        XCTAssertEqual(relaunched.knownByteTotal, bytes)
+    }
+
     // MARK: - ImageLoader integration
 
     private func loader(_ cache: ThumbnailDiskCache?) -> ImageLoader {
@@ -585,6 +824,202 @@ final class ThumbnailDiskCacheTests: XCTestCase {
 
         XCTAssertEqual(cachedFiles().count, 1)
         XCTAssertNil(cached.cachedThumbnail(for: path, maxSize: 300), "the memory cache still drops it")
+    }
+
+    // MARK: - Rating writes keep the disk cache (task 34)
+
+    func testRatingWritesKeepTheThumbnailOnDiskAcrossARelaunch() async throws {
+        let path = try writeSource("rated.jpg", orientation: 6, square: false)
+        let session = loader(makeCache())
+        let shown = try cgImage(await session.loadThumbnail(for: path, maxSize: 300))
+        session.diskCache?.waitForPendingWork()
+        let unrated = try XCTUnwrap(ThumbnailDiskCache.Key.current(path: path, bucket: 384))
+
+        // The first rating adds an XMP segment; a keyword grows it again. Both change the size, not the date.
+        await rate(path, 3, observedBy: session)
+        let rated = try XCTUnwrap(ThumbnailDiskCache.Key.current(path: path, bucket: 384))
+        XCTAssertNotEqual(rated.fileSize, unrated.fileSize, "precondition: the write changes the file's size")
+        XCTAssertEqual(rated.modificationDate.timeIntervalSince1970, unrated.modificationDate.timeIntervalSince1970,
+                       accuracy: 1e-6, "precondition: and puts its date back")
+        await rate(path, 4, keywords: ["people:ann"], observedBy: session)
+        XCTAssertNotEqual(ThumbnailDiskCache.Key.current(path: path, bucket: 384), rated)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: path).rating, 4)
+
+        let relaunched = loader(makeCache())
+        let loaded = try cgImage(await relaunched.loadThumbnail(for: path, maxSize: 300))
+
+        XCTAssertEqual(relaunched.originalDecodeCount, 0, "a metadata-only rewrite must not cost a decode")
+        XCTAssertEqual(session.originalDecodeCount, 1)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(shown, loaded)), 12)
+        XCTAssertEqual(cachedFiles().count, 1, "renamed, not stored twice")
+    }
+
+    func testRewriteThatRoundsTheDateToTheMicrosecondIsRekeyed() async throws {
+        // APFS keeps nanoseconds; restoreFileDates goes through Date and puts back microseconds.
+        let path = try writeSource("rated.jpg")
+        var times = [timespec(tv_sec: 1_700_000_000, tv_nsec: 123_456_789),
+                     timespec(tv_sec: 1_700_000_000, tv_nsec: 123_456_789)]
+        XCTAssertEqual(utimensat(AT_FDCWD, path, &times, 0), 0)
+        let session = loader(makeCache())
+        _ = await session.loadThumbnail(for: path, maxSize: 300)
+        session.diskCache?.waitForPendingWork()
+        let before = try XCTUnwrap(ThumbnailDiskCache.Version.current(path: path))
+
+        await rate(path, 3, observedBy: session)
+        let after = try XCTUnwrap(ThumbnailDiskCache.Version.current(path: path))
+        XCTAssertNotEqual(after.modificationDate, before.modificationDate, "precondition: the date was rounded")
+        let relaunched = loader(makeCache())
+        _ = await relaunched.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertEqual(relaunched.originalDecodeCount, 0)
+    }
+
+    func testRatingWriteWithoutTheObserverStillMisses() async throws {
+        // Why the hook is needed: the key follows the file's size.
+        let path = try writeSource("rated.jpg")
+        let session = loader(makeCache())
+        _ = await session.loadThumbnail(for: path, maxSize: 300)
+        session.diskCache?.waitForPendingWork()
+
+        await rate(path, 3, observedBy: nil)
+        let relaunched = loader(makeCache())
+        _ = await relaunched.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertEqual(relaunched.originalDecodeCount, 1)
+    }
+
+    func testRatingWriteToARAWFileLeavesItsThumbnailAlone() async throws {
+        // A RAW's rating goes to its .xmp sidecar; the RAW itself, and so its key, doesn't change.
+        let path = try writeSource("photo.dng")
+        let session = loader(makeCache())
+        _ = await session.loadThumbnail(for: path, maxSize: 300)
+        session.diskCache?.waitForPendingWork()
+        let before = cachedFiles()
+
+        await rate(path, 5, observedBy: session)
+        let relaunched = loader(makeCache())
+        _ = await relaunched.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertEqual(cachedFiles(), before)
+        XCTAssertEqual(relaunched.originalDecodeCount, 0)
+    }
+
+    func testExportAfterARatingDecodesAgain() async throws {
+        let path = try writeSource("photo.jpg", hue: 0.9, square: false)
+        let session = loader(makeCache())
+        _ = await session.loadThumbnail(for: path, maxSize: 300)
+        session.diskCache?.waitForPendingWork()
+        await rate(path, 3, observedBy: session)
+
+        // "Apply edits permanently": new pixels, the old date, then invalidate(path:).
+        try rewritePixelsKeepingTheDate(path, hue: 0.2)
+        session.invalidate(path: path)
+        session.diskCache?.waitForPendingWork()
+
+        let relaunched = loader(makeCache())
+        let loaded = try cgImage(await relaunched.loadThumbnail(for: path, maxSize: 300))
+        XCTAssertEqual(relaunched.originalDecodeCount, 1)
+        let fresh = try XCTUnwrap(ImageLoader.decodeThumbnail(at: path, maxPixels: 384, preferEmbedded: false))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(fresh, loaded)), 12)
+    }
+
+    func testRewriteThatAlsoChangesTheDateIsNotRekeyed() async throws {
+        // Another app saved new pixels while the rating was written: the date moved, so the pixels may have too.
+        let path = try writeSource("photo.jpg", hue: 0.9, square: false)
+        let session = loader(makeCache())
+        _ = await session.loadThumbnail(for: path, maxSize: 300)
+        session.diskCache?.waitForPendingWork()
+
+        session.rewritingMetadata(ofImageAt: path) {
+            _ = try? writeSource("photo.jpg", hue: 0.2, square: false)
+            try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: path)
+        }
+        session.diskCache?.waitForPendingWork()
+
+        let relaunched = loader(makeCache())
+        let loaded = try cgImage(await relaunched.loadThumbnail(for: path, maxSize: 300))
+        XCTAssertEqual(relaunched.originalDecodeCount, 1)
+        let fresh = try XCTUnwrap(ImageLoader.decodeThumbnail(at: path, maxPixels: 384, preferEmbedded: false))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(fresh, loaded)), 12)
+    }
+
+    func testRewriteDuringWhichThePathIsInvalidatedIsNotRekeyed() async throws {
+        // An export that keeps the date overlaps the rating write, and its invalidate(path:) lands during it. A
+        // thumbnail of the old pixels, decoded between the invalidation and the new pixels, is stored under the old
+        // key: the re-key must not make it current.
+        let path = try writeSource("photo.jpg", hue: 0.9, square: false)
+        let session = loader(makeCache())
+        let oldPixels = try cgImage(await session.loadThumbnail(for: path, maxSize: 300))
+        session.diskCache?.waitForPendingWork()
+        let unrated = try XCTUnwrap(ThumbnailDiskCache.Key.current(path: path, bucket: 384))
+
+        session.rewritingMetadata(ofImageAt: path) {
+            session.invalidate(path: path)
+            session.diskCache?.store(oldPixels, for: unrated)
+            try? rewritePixelsKeepingTheDate(path, hue: 0.2)
+        }
+        session.diskCache?.waitForPendingWork()
+
+        let relaunched = loader(makeCache())
+        let loaded = try cgImage(await relaunched.loadThumbnail(for: path, maxSize: 300))
+        XCTAssertEqual(relaunched.originalDecodeCount, 1, "no thumbnail of the old pixels may be current")
+        let fresh = try XCTUnwrap(ImageLoader.decodeThumbnail(at: path, maxPixels: 384, preferEmbedded: false))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(fresh, loaded)), 12)
+    }
+
+    func testDecodeRunningDuringARatingWriteIsKeptUnderTheNewKey() async throws {
+        // The decode reads the file's size before the write and stores after the re-key.
+        let path = try writeSource("big.jpg", width: 4000, height: 3000)
+        let session = loader(makeCache())
+        let load = Task { await session.loadThumbnail(for: path, maxSize: 300) }
+        try await waitFor("the decode to start") { session.originalDecodeCount == 1 }
+        await rate(path, 2, observedBy: session)
+        _ = await load.value
+        session.diskCache?.waitForPendingWork()
+
+        let relaunched = loader(makeCache())
+        _ = await relaunched.loadThumbnail(for: path, maxSize: 300)
+        XCTAssertEqual(relaunched.originalDecodeCount, 0)
+    }
+
+    // MARK: - Smaller buckets from larger ones on disk (task 34)
+
+    func testSmallerBucketIsServedFromALargerOneOnDisk() async throws {
+        // 4:3, so every bucket scales to whole pixels. (Otherwise ImageIO darkens the partly covered last column of
+        // every thumbnail, and a larger bucket's darker column shows up in the smaller one.)
+        let path = try writeSource("photo.jpg", width: 1200, height: 900, orientation: 6, square: false)
+        let previous = loader(makeCache())
+        _ = await previous.loadThumbnail(for: path, maxSize: 1000)   // bucket 1024
+        previous.diskCache?.waitForPendingWork()
+
+        let relaunched = loader(makeCache())
+        // Smallest first: the memory cache would serve the 768 image for a 512 request as it is.
+        let loaded512 = await relaunched.loadThumbnail(for: path, maxSize: 400)
+        let loaded768 = await relaunched.loadThumbnail(for: path, maxSize: 700)
+        let at768 = try XCTUnwrap(loaded768), at512 = try XCTUnwrap(loaded512)
+
+        XCTAssertEqual(relaunched.originalDecodeCount, 0, "zoomed out since the last launch: served from disk")
+        let cg768 = try cgImage(at768), cg512 = try cgImage(at512)
+        XCTAssertEqual(max(cg768.width, cg768.height), 768, "the requested bucket's size, like a fresh decode")
+        XCTAssertEqual(max(cg512.width, cg512.height), 512)
+        XCTAssertGreaterThan(cg768.height, cg768.width, "EXIF orientation 6 stays applied")
+        let fresh = try XCTUnwrap(ImageLoader.decodeThumbnail(at: path, maxPixels: 768, preferEmbedded: false))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(fresh, cg768)), 12)
+        XCTAssertTrue(relaunched.cachedThumbnail(for: path, maxSize: 700) === at768, "and it fills the memory cache")
+        XCTAssertEqual(cachedFiles().count, 1, "nothing new is stored: the larger file serves it")
+    }
+
+    func testDiskBucketsMoreThanTwiceAsLargeOrSmallerAreNotUsed() async throws {
+        let path = try writeSource("photo.jpg", width: 2000, height: 1500)
+        let previous = loader(makeCache())
+        _ = await previous.loadThumbnail(for: path, maxSize: 1000)   // bucket 1024
+        previous.diskCache?.waitForPendingWork()
+
+        let relaunched = loader(makeCache())
+        _ = await relaunched.loadThumbnail(for: path, maxSize: 250)    // bucket 256: 1024 is 4× larger
+        XCTAssertEqual(relaunched.originalDecodeCount, 1)
+        _ = await relaunched.loadThumbnail(for: path, maxSize: 1400)   // bucket 1536: 1024 is smaller
+        XCTAssertEqual(relaunched.originalDecodeCount, 2)
     }
 
     // MARK: - Where the shared loader caches
@@ -815,19 +1250,26 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
         return samples
     }
 
-    /// The writer the app would use, for a session whose thumbnails `loader` holds.
-    private func makeRatingWriter(observing loader: ImageLoader) -> MetadataWriter {
-        MetadataWriter()
+    /// The writer the app would use for a session whose thumbnails `loader` holds (as `MetadataWriter.shared` reports
+    /// to `ImageLoader.shared`), or, with `rekey: false`, one without the hook: main's path before task 34.
+    private func makeRatingWriter(observing loader: ImageLoader, rekey: Bool = true) -> MetadataWriter {
+        MetadataWriter(service: .shared, rewriteObserver: rekey ? loader : nil)
     }
 
     /// Task 34's primary metric. 100 photos whose thumbnails are cached get a first rating through the app's writer
     /// and `MetadataService` (it adds an XMP segment, so every file's size changes), then the app relaunches: a fresh
-    /// loader on the same cache. Counts the decodes from the original and times each load. Three runs, each on
-    /// fresh copies.
+    /// loader on the same cache. Counts the decodes from the original and times each load. Three runs with the
+    /// re-key hook, then three without it (main's path before task 34), each on fresh copies.
     func testRatedJPEGsAfterRelaunch() async throws {
+        for rekey in [true, false] {
+            try await ratedJPEGsAfterRelaunch(rekey: rekey)
+        }
+    }
+
+    private func ratedJPEGsAfterRelaunch(rekey: Bool) async throws {
         var loads: [Double] = [], decodes: [Int] = [], changed: [Int] = []
         for run in 0..<3 {
-            let paths = try makeSources(count: 100, folder: "rated-\(run)")
+            let paths = try makeSources(count: 100, folder: "rated-\(rekey)-\(run)")
             let directory = newCacheDirectory()
             await populate(directory, paths: paths, size: 380)
             let before = paths.map { ThumbnailDiskCache.Key.current(path: $0, bucket: 384) }
@@ -836,7 +1278,7 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
             let session = ImageLoader(diskCache: ThumbnailDiskCache(directory: directory))
             _ = await loadEach(paths, size: 380, with: session)
             XCTAssertEqual(session.originalDecodeCount, 0)
-            let writer = makeRatingWriter(observing: session)
+            let writer = makeRatingWriter(observing: session, rekey: rekey)
             writer.enqueue(paths.map { MetadataWriteItem(path: $0, rating: 3, keywords: []) })
             await writer.flush()
             session.diskCache?.waitForPendingWork()
@@ -851,8 +1293,37 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
             // Each rated copy is a full 12 MB file now (no longer a clone of the master).
             try? FileManager.default.removeItem(atPath: (paths[0] as NSString).deletingLastPathComponent)
         }
-        report("100 x 6000x4000 JPEG rated, then relaunch @380: load", loads)
-        info("100 x 6000x4000 JPEG rated, then relaunch @380: decodes from the original|per_run=\(decodes)|keys_changed=\(changed)")
+        let label = rekey ? "100 x 6000x4000 JPEG rated" : "100 x 6000x4000 JPEG rated without the re-key hook (main's path)"
+        report("\(label), then relaunch @380: load", loads)
+        info("\(label), then relaunch @380: decodes from the original|per_run=\(decodes)|keys_changed=\(changed)")
+    }
+
+    /// What a larger bucket costs to serve: the 512 file read as is, or decoded down to 384 or 256, against the exact
+    /// 384 file. One read of each per photo (order rotated), fresh from the page cache. `KB` is the decoded image.
+    func testLargerBucketReadAsIsOrDecodedDown() async throws {
+        let paths = try makeSources(count: 100)
+        let directory = newCacheDirectory()
+        await populate(directory, paths: paths, size: 512)
+        await populate(directory, paths: paths, size: 380)
+        let disk = ThumbnailDiskCache(directory: directory)
+        let variants: [(String, Int, Int?)] = [
+            ("exact 384 file", 384, nil), ("512 file as is", 512, nil),
+            ("512 file decoded down to 384", 512, 384), ("512 file decoded down to 256", 512, 256),
+        ]
+        var samples = Array(repeating: [Double](), count: variants.count), kilobytes = Array(repeating: 0, count: variants.count)
+        for (index, path) in paths.enumerated() {
+            for v in (0..<variants.count).map({ ($0 + index) % variants.count }) {
+                let key = try XCTUnwrap(ThumbnailDiskCache.Key.current(path: path, bucket: variants[v].1))
+                let start = clock.now
+                let image = try XCTUnwrap(disk.image(for: key, maxPixelSize: variants[v].2))
+                samples[v].append(ms(clock.now - start))
+                kilobytes[v] = image.bytesPerRow * image.height / 1024
+            }
+        }
+        disk.waitForPendingWork()
+        for (v, variant) in variants.enumerated() {
+            report("100 x disk read: \(variant.0) (decoded KB=\(kilobytes[v]))", samples[v])
+        }
     }
 
     /// Deletes every cached file that isn't in `bucket`, so each run starts from the same cache.
@@ -944,18 +1415,22 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
         let session = ImageLoader(diskCache: ThumbnailDiskCache(directory: directory))
         _ = await loadEach(paths, size: 380, with: session)
 
-        var perWrite: [Double] = []
-        for round in 0..<8 {
-            let writer = makeRatingWriter(observing: session)
+        // Alternate: with the re-key hook (every write re-keys), and without it (main's path).
+        var perWrite: [Bool: [Double]] = [:]
+        for round in 0..<12 {
+            let rekey = (round / 2) % 2 == 0
+            let writer = makeRatingWriter(observing: session, rekey: rekey)
             let items = paths.map {
                 MetadataWriteItem(path: $0, rating: round % 5 + 1, keywords: round % 2 == 0 ? ["k\(round)"] : [])
             }
             let start = clock.now
             writer.enqueue(items)
             await writer.flush()
-            perWrite.append(ms(clock.now - start) / Double(paths.count))
+            perWrite[rekey, default: []].append(ms(clock.now - start) / Double(paths.count))
             session.diskCache?.waitForPendingWork()
         }
-        report("MetadataWriter 200 x 1024x1024 JPEG rating writes, per write", perWrite)
+        report("MetadataWriter 200 x 1024x1024 JPEG rating writes, per write", perWrite[true]!)
+        report("MetadataWriter 200 x 1024x1024 JPEG rating writes, per write, without the re-key hook (main's path)",
+               perWrite[false]!)
     }
 }
