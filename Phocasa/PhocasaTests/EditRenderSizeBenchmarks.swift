@@ -217,10 +217,9 @@ final class EditRenderSizeBenchmarks: XCTestCase {
 
     // MARK: - Navigating to photos with saved edits
 
-    /// What `PhotoDetailView` does for a photo with a saved edit after its fit image: `SavedEdit.render`, alternating
-    /// between two photos as arrow-key navigation does (so the RAW filter is never the cached one). Reports the time
-    /// until the edit can be shown and the bytes each render holds.
-    private func savedEditNavigation(_ label: String, urls: [URL], isRAW: Bool, rounds: Int = 12) async throws {
+    /// Photos with a saved edit each, at least two (one file becomes two names), so alternating between them never
+    /// finds the cached RAW filter.
+    private func savedEditPhotos(_ urls: [URL], isRAW: Bool) async throws -> [PhotoAsset] {
         var photos: [PhotoAsset] = []
         for (i, url) in urls.enumerated() {
             let photo = try insertPhoto(url, isRAW: isRAW)
@@ -249,7 +248,14 @@ final class EditRenderSizeBenchmarks: XCTestCase {
             await MetadataWriter.shared.flush()
             photos.append(photo)
         }
+        return photos
+    }
 
+    /// The render `PhotoDetailView` asks for, for a photo with a saved edit, after its fit image: `SavedEdit.render`,
+    /// alternating between two photos (so the RAW filter is never the cached one). Reports the time until the edit
+    /// can be shown and the bytes each render holds.
+    private func savedEditNavigation(_ label: String, urls: [URL], isRAW: Bool, rounds: Int = 12) async throws {
+        let photos = try await savedEditPhotos(urls, isRAW: isRAW)
         let viewport = Self.browsingViewport
         var shown: [Double] = [], held: [Int] = []
         var sizes: Set<String> = []
@@ -273,6 +279,47 @@ final class EditRenderSizeBenchmarks: XCTestCase {
 
     func testBenchSavedRAWEditNavigation() async throws {
         try await savedEditNavigation("real-raw", urls: try realRAWs(), isRAW: true)
+    }
+
+    /// What the detail view does per photo: resolve its saved edit, then (task 35) prefetch the next photo's.
+    /// Before task 35: `SavedEdit.render` at native size, nothing ahead.
+    private func makeBrowser() -> @MainActor (PhotoAsset, PhotoAsset, CGSize) async -> SavedEditRender? {
+        let state = SavedEditState()   // NEW-API
+        return { photo, next, viewport in
+            state.invalidate()   // NEW-API
+            state.clear()   // NEW-API
+            await state.resolve(for: photo, fitting: viewport, reusing: nil)   // NEW-API
+            state.prefetch([next], fitting: viewport)   // NEW-API
+            return state.render   // NEW-API
+            // BASE-API await SavedEdit.render(for: photo, reusing: nil)
+        }
+    }
+
+    /// Arrow-key browsing through photos with saved RAW edits, `dwell` on each: the time until each photo's edit can
+    /// be shown after arriving on it.
+    private func savedEditBrowsing(_ label: String, urls: [URL], isRAW: Bool, dwell: Duration,
+                                   rounds: Int = 12) async throws {
+        let photos = try await savedEditPhotos(urls, isRAW: isRAW)
+        let viewport = Self.browsingViewport
+        let show = makeBrowser()
+        var shown: [Double] = []
+        for i in 0..<(rounds + 2) {   // the first two warm up
+            let photo = photos[i % photos.count], next = photos[(i + 1) % photos.count]
+            let start = clock.now
+            let render = await show(photo, next, viewport)
+            let elapsed = ms(clock.now - start)
+            XCTAssertNotNil(render)
+            if i >= 2 { shown.append(elapsed) }
+            try await Task.sleep(for: dwell)
+        }
+        let dwellMs = Int(ms(dwell))
+        report("\(label) saved edit while browsing (\(dwellMs) ms per photo): until shown", shown)
+    }
+
+    func testBenchSavedRAWEditBrowsing() async throws {
+        let raws = try realRAWs()
+        try await savedEditBrowsing("real-raw", urls: raws, isRAW: true, dwell: .milliseconds(250))
+        try await savedEditBrowsing("real-raw", urls: raws, isRAW: true, dwell: .milliseconds(60))
     }
 
     func testBenchSavedJPGEditNavigation() async throws {
