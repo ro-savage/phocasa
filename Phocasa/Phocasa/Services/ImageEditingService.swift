@@ -27,19 +27,22 @@ actor ImageEditingService {
         self.caches = caches
         // One context per lane: a Metal-backed CIContext owns a single command queue, so a shared context would
         // serialise the preview's GPU work behind a full-resolution render.
+        // The preview lane caches intermediates: slider ticks re-render the same graph with one value changed, and
+        // Core Image reuses the unchanged part (the scaled JPEG source, the RAW decode). Measured: a RAW preview
+        // ~22 ms -> ~5 ms, JPEG ~4.7 -> ~3.5 ms, with no measurable memory cost (results/13.md).
         previewLane = RenderLane(label: "com.phocasa.editing.preview", qos: .userInteractive,
-                                 context: Self.makeContext(), caches: caches)
+                                 context: Self.makeContext(cacheIntermediates: true), caches: caches)
         fullLane = RenderLane(label: "com.phocasa.editing.full", qos: .userInitiated,
-                              context: Self.makeContext(), caches: caches)
+                              context: Self.makeContext(cacheIntermediates: false), caches: caches)
     }
 
-    /// Both lanes use identical options, so they produce identical pixels.
-    private static func makeContext() -> CIContext {
+    /// The two contexts differ only in `cacheIntermediates`, which doesn't change pixels.
+    private static func makeContext(cacheIntermediates: Bool) -> CIContext {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device, options: [
                 .workingColorSpace: CGColorSpaceCreateDeviceRGB(),
                 .highQualityDownsample: true,
-                .cacheIntermediates: false
+                .cacheIntermediates: cacheIntermediates
             ])
         } else {
             return CIContext(options: [
