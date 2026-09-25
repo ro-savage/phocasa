@@ -31,8 +31,12 @@ final class ScanTests: XCTestCase {
     }
 
     private func makeContainer() throws -> ModelContainer {
-        let storeDir = try makeTempDir("store")
-        let config = ModelConfiguration(url: storeDir.appendingPathComponent("scan.store"), cloudKitDatabase: .none)
+        try makeContainer(storeURL: try makeTempDir("store").appendingPathComponent("scan.store"))
+    }
+
+    /// A container on the store at `storeURL`. A second one on the same file is what the app sees after a relaunch.
+    private func makeContainer(storeURL: URL) throws -> ModelContainer {
+        let config = ModelConfiguration(url: storeURL, cloudKitDatabase: .none)
         let container = try ModelContainer(
             for: PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self,
             configurations: config
@@ -101,6 +105,13 @@ final class ScanTests: XCTestCase {
 
     private func storedTags(_ container: ModelContainer) throws -> [Tag] {
         try ModelContext(container).fetch(FetchDescriptor<Tag>())
+    }
+
+    /// File names of the photos in the bin, as the store has them (a predicate, not the model property; see
+    /// `StoredPhoto.fetchAllNow`).
+    private func storedBinNames(_ container: ModelContainer) throws -> [String] {
+        try ModelContext(container).fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isDeleted }))
+            .map(\.fileName).sorted()
     }
 
     // MARK: - Import
@@ -367,20 +378,76 @@ final class ScanTests: XCTestCase {
         XCTAssertTrue(vm.library.photos.isEmpty)
     }
 
-    /// Existing behaviour, kept: a scan puts photos whose files it finds back into the library, bin
-    /// included. (Listed under "Decisions for the user" in results/20.md.)
-    func testScanRestoresBinnedPhotoWhoseFileExists() async throws {
+    /// User decision (wave 2, #1): a scan leaves photos in the bin, even when it finds their files. (It used to put
+    /// them back in the library, so "Move to Bin" didn't survive the launch rescan.)
+    func testScanLeavesBinnedPhotoWhoseFileExistsInTheBin() async throws {
         let photos = try makeTempDir("photos")
         try makeJPEG("binned.jpg", in: photos)
-        let (vm, _, _) = try await openLibrary(at: photos)
-        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first))
-        XCTAssertTrue(vm.library.allPhotos.isEmpty)
+        try makeJPEG("kept.jpg", in: photos)
+        let (vm, _, container) = try await openLibrary(at: photos)
+        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "binned" }))
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["kept"])
         XCTAssertEqual(vm.library.binCount, 1)
 
         try await rescan(vm)
 
-        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["binned"])
-        XCTAssertEqual(vm.library.binCount, 0)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["kept"])
+        XCTAssertEqual(vm.library.binCount, 1)
+        XCTAssertEqual(vm.library.binPhotos.map(\.fileName), ["binned"])
+        XCTAssertEqual(try storedBinNames(container), ["binned"])
+        XCTAssertEqual(vm.library.lastScanReport?.updated, 0, "nothing about the binned photo changed")
+    }
+
+    /// A binned photo's files are still tracked: the scan updates its paths and size, and it stays in the bin.
+    func testBinnedPhotoWhoseFilesChangedStaysInTheBinWithNewPaths() async throws {
+        let photos = try makeTempDir("photos")
+        let jpg = try makeJPEG("pair.jpg", in: photos)
+        let raw = photos.appendingPathComponent("pair.arw")
+        try Data("not a real raw".utf8).write(to: raw)
+        let (vm, _, container) = try await openLibrary(at: photos)
+        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first))
+        XCTAssertEqual(vm.library.binCount, 1)
+
+        try FileManager.default.removeItem(at: jpg)
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.lastScanReport?.updated, 1)
+        XCTAssertTrue(vm.library.allPhotos.isEmpty)
+        XCTAssertEqual(vm.library.binCount, 1)
+        XCTAssertEqual(try storedBinNames(container), ["pair"], "still in the bin in the store")
+        let stored = try XCTUnwrap(try storedPhotos(container).first)
+        XCTAssertNil(stored.jpgPath)
+        XCTAssertEqual(stored.rawPath, raw.path)
+        XCTAssertEqual(stored.fileSize, Int64(Data("not a real raw".utf8).count))
+        vm.library.applyFilter(.bin)
+        XCTAssertEqual(vm.library.photos.map(\.fileName), ["pair"])
+        XCTAssertNil(vm.library.photos.first?.jpgPath)
+    }
+
+    /// User decision (wave 2, #1): "Move to Bin" survives a relaunch, which opens the store again and rescans.
+    func testMoveToBinSurvivesRelaunch() async throws {
+        let photos = try makeTempDir("photos")
+        try makeJPEG("binned.jpg", in: photos)
+        try makeJPEG("kept.jpg", in: photos)
+        let storeURL = try makeTempDir("store").appendingPathComponent("scan.store")
+        let first = try makeContainer(storeURL: storeURL).mainContext
+        first.insert(PhotoLibrary(rootFolderPath: photos.path))
+        try first.save()
+        let vm = PhotoLibraryViewModel()
+        vm.setModelContext(first)
+        try await waitForScan(vm)
+        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "binned" }))
+
+        // Relaunch: a new container on the same store, and a new view model with its launch rescan.
+        let relaunched = try makeContainer(storeURL: storeURL)
+        let vm2 = PhotoLibraryViewModel()
+        vm2.setModelContext(relaunched.mainContext)
+        await vm2.library.waitForScans()
+
+        XCTAssertEqual(vm2.library.allPhotos.map(\.fileName), ["kept"])
+        XCTAssertEqual(vm2.library.binCount, 1)
+        XCTAssertEqual(vm2.library.binPhotos.map(\.fileName), ["binned"])
+        XCTAssertEqual(try storedBinNames(relaunched), ["binned"])
     }
 
     func testPhotoOutsideScannedFolderStaysVisibleWhileItsFileExists() async throws {
@@ -485,18 +552,23 @@ final class ScanTests: XCTestCase {
             discovered: [found("same"), found("size", size: 99), found("pair", jpg: false, raw: true)]
         )
         XCTAssertEqual(plan.updates, [
-            .init(id: changedSize.id, jpgPath: "/f/size.jpg", rawPath: nil, fileSize: 99, restoresFromBin: false),
-            .init(id: lostJPG.id, jpgPath: nil, rawPath: "/f/pair.arw", fileSize: 10, restoresFromBin: false),
+            .init(id: changedSize.id, jpgPath: "/f/size.jpg", rawPath: nil, fileSize: 99),
+            .init(id: lostJPG.id, jpgPath: nil, rawPath: "/f/pair.arw", fileSize: 10),
         ])
     }
 
-    func testPlanRestoresBinnedRowsItFindsAndLeavesOthersInTheBin() {
+    /// User decision (wave 2, #1): binned rows stay in the bin. A found one is updated only if its files changed.
+    func testPlanLeavesBinnedRowsInTheBin() {
         let binnedFound = stored("found", inBin: true)
+        let binnedChanged = stored("changed", inBin: true)
         let binnedGone = stored("gone", inBin: true)
-        let plan = ScanPlan(stored: [binnedFound, binnedGone], discovered: [found("found")],
+        let plan = ScanPlan(stored: [binnedFound, binnedChanged, binnedGone],
+                            discovered: [found("found"), found("changed", size: 99)],
                             fileExists: { _ in false })
-        XCTAssertEqual(plan.updates.map(\.id), [binnedFound.id])
-        XCTAssertEqual(plan.updates.first?.restoresFromBin, true)
+        XCTAssertEqual(plan.updates, [
+            .init(id: binnedChanged.id, jpgPath: "/f/changed.jpg", rawPath: nil, fileSize: 99),
+        ])
+        XCTAssertTrue(plan.newPhotos.isEmpty, "a binned photo's files are known, not new")
         XCTAssertTrue(plan.missingIDs.isEmpty, "the bin isn't checked for missing files, as before")
     }
 

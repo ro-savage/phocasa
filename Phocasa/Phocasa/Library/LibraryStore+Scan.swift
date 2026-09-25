@@ -65,7 +65,7 @@ extension LibraryStore {
     struct ScanReport {
         var discovered = 0
         var inserted = 0
-        /// Existing rows whose paths, size or bin state the scan changed.
+        /// Existing rows (in the library or the bin) whose paths or size the scan changed.
         var updated = 0
         var missing = 0
         /// Whether the scan ended in a full `loadExistingData()`.
@@ -149,7 +149,7 @@ extension LibraryStore {
 
         sectionStart = clock.now
         let changed = applyScanUpdates(plan.updates, in: context)
-        report.updated = changed.photos.count
+        report.updated = changed.count
 
         if !withKeywords.isEmpty {
             scanProgress = "Adding \(plan.newPhotos.count) new photos..."
@@ -179,11 +179,11 @@ extension LibraryStore {
         if context.hasChanges { try? context.save() }
 
         // The in-memory library is already right after an unchanged rescan, so skip the reload (~300 ms at 10k).
-        if report.inserted > 0 || changed.restoredFromBin || missingChanged {
+        if report.inserted > 0 || missingChanged {
             loadExistingData()
             report.reloaded = true
-        } else if !changed.photos.isEmpty {
-            photosDidChange(changed.photos)
+        } else if !changed.isEmpty {
+            photosDidChange(changed)
         }
 
         scanProgress = "Found \(plan.discoveredCount) photos (\(report.inserted) new)"
@@ -197,29 +197,23 @@ extension LibraryStore {
     }
 
     /// Writes the scan's new values into the rows that differ, assigning only fields whose value changes, so
-    /// SwiftData doesn't mark unchanged rows dirty. Rows deleted since the scan read the store are skipped.
-    private func applyScanUpdates(_ updates: [ScanPlan.Update], in context: ModelContext)
-        -> (photos: [PhotoAsset], restoredFromBin: Bool)
-    {
-        guard !updates.isEmpty else { return ([], false) }
+    /// SwiftData doesn't mark unchanged rows dirty. Rows deleted since the scan read the store are skipped. A row in
+    /// the bin stays there (user decision, wave 2 #1); the store keeps its bin flag through this write, since the row
+    /// is fetched just before it (`ScanTests.testBinnedPhotoWhoseFilesChangedStaysInTheBinWithNewPaths`).
+    private func applyScanUpdates(_ updates: [ScanPlan.Update], in context: ModelContext) -> [PhotoAsset] {
+        guard !updates.isEmpty else { return [] }
         let ids = updates.map(\.id)
         let rows = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
         let rowsByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var changed: [PhotoAsset] = []
-        var restoredFromBin = false
         for update in updates {
             guard let photo = rowsByID[update.id] else { continue }
             if photo.jpgPath != update.jpgPath { photo.jpgPath = update.jpgPath }
             if photo.rawPath != update.rawPath { photo.rawPath = update.rawPath }
             if photo.fileSize != update.fileSize { photo.fileSize = update.fileSize }
-            if update.restoresFromBin {
-                // Not compared first: reading `isDeleted` can be stale (see `StoredPhoto.fetchAllNow`).
-                photo.isDeleted = false
-                restoredFromBin = true
-            }
             changed.append(photo)
         }
-        return (changed, restoredFromBin)
+        return changed
     }
 
     private struct TagKey: Hashable {

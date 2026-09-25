@@ -58,13 +58,11 @@ struct ScanPlan: Sendable {
         let jpgPath: String?
         let rawPath: String?
         let fileSize: Int64
-        /// The row is in the bin and its files were found, so the scan puts it back in the library
-        /// (the scan's existing behaviour).
-        let restoresFromBin: Bool
     }
 
-    /// Stored rows whose paths, size or bin state differ from what the scan found. Every row with a found key
-    /// is compared, so duplicate rows for one file (left by older versions) are all kept up to date.
+    /// Stored rows (in the library or the bin) whose paths or size differ from what the scan found. Every row with a
+    /// found key is compared, so duplicate rows for one file (left by older versions) are all kept up to date. A row in
+    /// the bin stays there: a scan never takes a photo out of the bin (user decision, wave 2 #1).
     var updates: [Update] = []
     /// Found photos with no stored row, in discovery order. Their metadata hasn't been read yet.
     var newPhotos: [DiscoveredPhoto] = []
@@ -84,10 +82,9 @@ struct ScanPlan: Sendable {
         for row in stored {
             if let found = foundByKey[row.key] {
                 knownKeys.insert(row.key)
-                if row.jpgPath != found.jpgPath || row.rawPath != found.rawPath
-                    || row.fileSize != found.fileSize || row.isInBin {
+                if row.jpgPath != found.jpgPath || row.rawPath != found.rawPath || row.fileSize != found.fileSize {
                     updates.append(Update(id: row.id, jpgPath: found.jpgPath, rawPath: found.rawPath,
-                                          fileSize: found.fileSize, restoresFromBin: row.isInBin))
+                                          fileSize: found.fileSize))
                 }
             } else if !row.isInBin {
                 let jpgExists = row.jpgPath.map(fileExists) ?? false
