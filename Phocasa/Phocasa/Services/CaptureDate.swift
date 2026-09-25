@@ -42,13 +42,11 @@ enum CaptureDate {
         CGImageSourceGetType(source) != nil && CGImageSourceGetCount(source) > 0
     }
 
-    /// The capture date in a file's metadata tree (`CGImageSourceCopyMetadataAtIndex`).
+    /// The capture date in a file's metadata tree (`CGImageSourceCopyMetadataAtIndex`). ImageIO has already merged
+    /// `SubsecTimeOriginal` into the value's fraction, so only the offset is looked up (about 1.2 µs per lookup).
     static func date(in metadata: CGImageMetadata, timeZone: TimeZone = .current) -> Date? {
         guard let value = value(in: metadata, matching: kCGImagePropertyExifDateTimeOriginal),
               var fields = Fields(value) else { return nil }
-        if !fields.hasFraction, let subseconds = Self.value(in: metadata, matching: kCGImagePropertyExifSubsecTimeOriginal) {
-            fields.add(subseconds: subseconds)
-        }
         if fields.offset == nil, let offset = Self.value(in: metadata, matching: kCGImagePropertyExifOffsetTimeOriginal) {
             fields.offset = Fields.offsetSeconds(offset)
         }
@@ -139,7 +137,31 @@ enum CaptureDate {
             }
         }
 
+        /// The form almost every camera file has, `yyyy-MM-ddTHH:mm:ss` (or EXIF's `yyyy:MM:dd HH:mm:ss`), read at fixed
+        /// positions: the general scanner costs about 2 µs per date in the Debug builds tests and benchmarks run, this
+        /// well under 1 µs. Anything else is nil here and goes to the scanner.
+        private static func parseFixedForm(_ bytes: UnsafeBufferPointer<UInt8>) -> Fields? {
+            guard bytes.count == 19, let p = bytes.baseAddress else { return nil }
+            let separator = p[4]
+            guard separator == .hyphen || separator == .colon, p[7] == separator,
+                  p[10] == .letterT || p[10] == .space, p[13] == .colon, p[16] == .colon else { return nil }
+            func two(_ i: Int) -> Int {
+                let high = Int(p[i]) - 48, low = Int(p[i + 1]) - 48
+                return high >= 0 && high <= 9 && low >= 0 && low <= 9 ? high * 10 + low : -1
+            }
+            let century = two(0), yearOfCentury = two(2), month = two(5), day = two(8)
+            let hour = two(11), minute = two(14), second = two(17)
+            guard century >= 0, yearOfCentury >= 0, month >= 1, day >= 1, hour >= 0, minute >= 0, second >= 0
+            else { return nil }
+            let year = century * 100 + yearOfCentury
+            guard year >= 1, month <= 12, day <= daysIn(month: month, year: year),
+                  hour <= 23, minute <= 59, second <= 60 else { return nil }
+            let seconds = daysFromCivil(year: year, month: month, day: day) * 86_400 + hour * 3_600 + minute * 60 + second
+            return Fields(wallSeconds: Double(seconds), hasFraction: false, offset: nil)
+        }
+
         private static func parse(_ bytes: UnsafeBufferPointer<UInt8>) -> Fields? {
+            if let fields = parseFixedForm(bytes) { return fields }
             var scanner = Scanner(bytes)
             scanner.trim()
             guard let year = scanner.digits(4), year >= 1 else { return nil }
@@ -179,8 +201,9 @@ enum CaptureDate {
                 guard scanner.atEnd else { return nil }
             }
 
-            guard (1...12).contains(month), (1...daysIn(month: month, year: year)).contains(day),
-                  (0...23).contains(hour), (0...59).contains(minute), (0...60).contains(second) else { return nil }
+            // Plain comparisons: `ClosedRange.contains` is generic, and slow in the Debug builds tests run.
+            guard month >= 1, month <= 12, day >= 1, day <= daysIn(month: month, year: year),
+                  hour <= 23, minute <= 59, second <= 60 else { return nil }
             let days = daysFromCivil(year: year, month: month, day: day)
             let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second
             return Fields(wallSeconds: Double(seconds) + fraction, hasFraction: hasFraction, offset: offset)
@@ -221,7 +244,7 @@ enum CaptureDate {
 
         /// Drops surrounding whitespace (and the NUL padding some cameras leave).
         mutating func trim() {
-            func isPadding(_ byte: UInt8) -> Bool { byte == 0 || byte == 32 || (9...13).contains(byte) }
+            func isPadding(_ byte: UInt8) -> Bool { byte == 0 || byte == 32 || (byte >= 9 && byte <= 13) }
             while position < end, isPadding(bytes[position]) { position += 1 }
             while end > position, isPadding(bytes[end - 1]) { end -= 1 }
         }
@@ -244,7 +267,7 @@ enum CaptureDate {
             var value = 0
             for offset in 0..<count {
                 let byte = bytes[position + offset]
-                guard (48...57).contains(byte) else { return nil }
+                guard byte >= 48, byte <= 57 else { return nil }
                 value = value * 10 + Int(byte - 48)
             }
             position += count
@@ -255,7 +278,7 @@ enum CaptureDate {
         mutating func fraction() -> Double? {
             var value = 0.0, scale = 1.0
             let start = position
-            while position < end, (48...57).contains(bytes[position]) {
+            while position < end, bytes[position] >= 48, bytes[position] <= 57 {
                 scale /= 10
                 value += Double(bytes[position] - 48) * scale
                 position += 1

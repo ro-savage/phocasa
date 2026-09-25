@@ -160,6 +160,25 @@ final class CaptureDateParsingTests: XCTestCase {
             .contains(parsed), "\(parsed)")
     }
 
+    /// The fixed-position fast path (`yyyy-MM-ddTHH:mm:ss`, 19 bytes) and the general scanner (the same value with a
+    /// zero fraction, or in EXIF form with a trailing space) agree with `Calendar` on random dates. (From 1600: before
+    /// October 1582 Foundation's Gregorian calendar is Julian, while EXIF and ISO 8601 dates are proleptic Gregorian.)
+    func testFastPathAndScannerAgreeWithCalendar() {
+        var rng = SystemRandomNumberGenerator()
+        let utc = TimeZone(identifier: "UTC")!
+        for _ in 0..<2_000 {
+            let year = Int.random(in: 1600...9999, using: &rng), month = Int.random(in: 1...12, using: &rng)
+            let day = Int.random(in: 1...28, using: &rng), hour = Int.random(in: 0...23, using: &rng)
+            let minute = Int.random(in: 0...59, using: &rng), second = Int.random(in: 0...59, using: &rng)
+            let xmp = String(format: "%04d-%02d-%02dT%02d:%02d:%02d", year, month, day, hour, minute, second)
+            let exif = String(format: "%04d:%02d:%02d %02d:%02d:%02d ", year, month, day, hour, minute, second)
+            let expected = CaptureDateFixtures.date(year, month, day, hour, minute, second, in: utc)
+            XCTAssertEqual(CaptureDate.parse(xmp, timeZone: utc), expected, xmp)
+            XCTAssertEqual(CaptureDate.parse(xmp + ".0", timeZone: utc), expected, xmp + ".0")
+            XCTAssertEqual(CaptureDate.parse(exif, timeZone: utc), expected, exif)
+        }
+    }
+
     // MARK: Malformed
 
     func testMalformedDatesAreNil() {
