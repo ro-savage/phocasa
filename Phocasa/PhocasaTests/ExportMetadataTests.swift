@@ -392,7 +392,9 @@ final class ExportMetadataTests: XCTestCase {
             try await waitForExport(viewModel, from: version)
             viewModel.stopEditing(save: false)
 
-            let before = KeptMetadata.properties(try Data(contentsOf: raw))
+            // By URL: ImageIO needs the file name to tell a camera RAW from its bytes.
+            let before = CGImageSourceCreateWithURL(raw as CFURL, nil)
+                .flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [String: Any] } ?? [:]
             let after = KeptMetadata.properties(try Data(contentsOf: export))
             for dictionary in KeptMetadata.comparedDictionaries(before) {
                 let a = before[dictionary] as? [String: Any] ?? [:], b = after[dictionary] as? [String: Any] ?? [:]
@@ -409,8 +411,9 @@ final class ExportMetadataTests: XCTestCase {
             XCTAssertEqual(Set(readBack(export).keywords), Set(Self.keywords))
             let exif = try XCTUnwrap(before["{Exif}"] as? [String: Any]).keys
             let kept = (after["{Exif}"] as? [String: Any] ?? [:]).keys
-            XCTAssertTrue(Set(exif).subtracting(kept).isSubset(of: ["CFAPattern", "PixelXDimension", "PixelYDimension",
-                                                                    "ColorSpace"]), "\(stem): Exif carried over")
+            // The RAW's own pixel encoding (its sensor pattern and compression) doesn't apply to the JPEG.
+            XCTAssertTrue(Set(exif).subtracting(kept).isSubset(of: ["CFAPattern", "CompressedBitsPerPixel"]),
+                          "\(stem): Exif carried over, lost \(Set(exif).subtracting(kept).sorted())")
         }
     }
 }
