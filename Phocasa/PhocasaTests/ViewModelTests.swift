@@ -218,7 +218,7 @@ final class ViewModelTests: XCTestCase {
 
     // MARK: - Smart Delete (File Type)
 
-    func testDeleteInRAWOnlyModeRemovesOnlyRAW() {
+    func testDeleteInRAWOnlyModeRemovesOnlyRAW() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
         context.insert(paired)
@@ -228,7 +228,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         // RAW path should be cleared, JPG should remain
         XCTAssertNil(paired.rawPath)
@@ -237,7 +237,7 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(paired.hasRawEdits, "RAW edits should be cleared")
     }
 
-    func testDeleteInJPGOnlyModeRemovesOnlyJPG() {
+    func testDeleteInJPGOnlyModeRemovesOnlyJPG() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
         context.insert(paired)
@@ -247,7 +247,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.jpgOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         // JPG path should be cleared, RAW should remain
         XCTAssertNil(paired.jpgPath)
@@ -255,7 +255,7 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(paired.isDeleted, "Photo should NOT be in bin")
     }
 
-    func testDeleteNonPairedInRAWOnlyModeSoftDeletes() {
+    func testDeleteNonPairedInRAWOnlyModeSoftDeletes() async {
         let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
                                  folderPath: "/fake", creationDate: Date(), fileSize: 1000)
         context.insert(rawOnly)
@@ -265,7 +265,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [rawOnly.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         // Non-paired RAW should go to bin — check via binCount since the photo
         // gets refetched by loadExistingData after delete
@@ -273,7 +273,7 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.library.allPhotos.count, 0, "No active photos should remain")
     }
 
-    func testDeleteClearsSelectionAfterFileTypeDelete() {
+    func testDeleteClearsSelectionAfterFileTypeDelete() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
         context.insert(paired)
@@ -283,7 +283,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         XCTAssertTrue(viewModel.selection.selectedPhotos.isEmpty)
     }
@@ -383,13 +383,13 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(Set(ids(viewModel.photosToDelete)), [a.id, b.id])
     }
 
-    func testConfirmPermanentDeleteEmptiesBin() {
+    func testConfirmPermanentDeleteEmptiesBin() async {
         insertPhoto(name: "a", isDeleted: true)
         insertPhoto(name: "b")
         viewModel.loadExistingData()
         viewModel.emptyBin()
 
-        viewModel.confirmPermanentDelete()
+        await viewModel.confirmPermanentDelete()?.value
 
         XCTAssertEqual(viewModel.library.binCount, 0)
         XCTAssertEqual(viewModel.library.allPhotos.count, 1)
@@ -504,7 +504,7 @@ final class ViewModelTests: XCTestCase {
                        viewModel.library.photos.indices.map { $0 }, "index(of:) after \(step)", line: line)
     }
 
-    func testInMemoryStateMatchesFreshLoad() {
+    func testInMemoryStateMatchesFreshLoad() async {
         let oracle = makeOracle()
         let people = Tag(name: "alice", category: "people")
         let places = Tag(name: "paris", category: "places")
@@ -579,7 +579,7 @@ final class ViewModelTests: XCTestCase {
 
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [viewModel.library.photos[0].id]
-        viewModel.deleteSelected(); check("deleteFileTypeOnly", #line)
+        await viewModel.deleteSelected()?.value; check("deleteFileTypeOnly", #line)
     }
 
     /// Random sequences of every interaction, checked against a fresh load after each step.

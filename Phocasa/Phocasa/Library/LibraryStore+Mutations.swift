@@ -135,40 +135,63 @@ extension LibraryStore {
     }
 
     // MARK: - Deleting Files
+    // The files are moved to the Trash on `fileTrasher`, off the main actor (spec §G5); the store changes once they
+    // are there. A photo whose delete is still running can't be deleted again meanwhile.
 
     /// Deletes one file type of each photo (with the RAW or JPG filter active): a pair loses that file, moved to the
     /// Trash; a photo with only one file, or both filters active, goes to the bin instead.
-    func deleteFileType(of photosToRemove: [PhotoAsset], raw deleteRAW: Bool, jpg deleteJPG: Bool) {
-        for photo in photosToRemove {
+    func deleteFileType(of photosToRemove: [PhotoAsset], raw deleteRAW: Bool, jpg deleteJPG: Bool) async {
+        enum Change { case toBin, dropRAW, dropJPG }
+        var changes: [(photo: PhotoAsset, change: Change)] = []
+        var files: [URL] = []
+        for photo in photosToRemove where photosBeingDeleted.insert(photo.id).inserted {
             if deleteRAW && deleteJPG {
                 // Both file type filters active — normal soft delete
-                photo.isDeleted = true
+                changes.append((photo, .toBin))
             } else if deleteRAW && photo.hasRawPair {
-                Self.moveToTrash(Self.files(of: photo, jpg: false, raw: true))
-                photo.rawPath = nil
-                photo.hasRawEdits = false
+                files += Self.files(of: photo, jpg: false, raw: true)
+                changes.append((photo, .dropRAW))
             } else if deleteJPG && photo.hasRawPair {
-                Self.moveToTrash(Self.files(of: photo, jpg: true, raw: false))
-                photo.jpgPath = nil
-                photo.jpgEditParametersData = nil
+                files += Self.files(of: photo, jpg: true, raw: false)
+                changes.append((photo, .dropJPG))
             } else {
                 // Non-paired photo: normal soft delete
-                photo.isDeleted = true
+                changes.append((photo, .toBin))
             }
+        }
+        guard !changes.isEmpty else { return }
+
+        await moveToTrash(files)
+
+        for (photo, change) in changes {
+            switch change {
+            case .toBin:
+                photo.isDeleted = true
+            case .dropRAW:
+                photo.rawPath = nil
+                photo.hasRawEdits = false
+            case .dropJPG:
+                photo.jpgPath = nil
+                photo.jpgEditParametersData = nil
+            }
+            photosBeingDeleted.remove(photo.id)
         }
         try? modelContext?.save()
         loadExistingData()
     }
 
-    /// Moves the photos' files (and RAW sidecars) to the Trash and deletes the photos from the store.
-    func deletePermanently(_ photosToDelete: [PhotoAsset]) {
+    /// Moves the photos' files (and RAW sidecars) to the Trash, then deletes the photos from the store.
+    func deletePermanently(_ photosToDelete: [PhotoAsset]) async {
         guard let context = modelContext else { return }
+        let photos = photosToDelete.filter { photosBeingDeleted.insert($0.id).inserted }
+        guard !photos.isEmpty else { return }
 
-        for photo in photosToDelete {
-            Self.moveToTrash(Self.files(of: photo, jpg: true, raw: true))
+        await moveToTrash(photos.flatMap { Self.files(of: $0, jpg: true, raw: true) })
+
+        for photo in photos {
+            photosBeingDeleted.remove(photo.id)
             context.delete(photo)
         }
-
         try? context.save()
         loadExistingData()
     }
@@ -188,12 +211,34 @@ extension LibraryStore {
         return urls
     }
 
-    /// Moves each of `urls` that exists to the Trash, in order. Failures are ignored, as before.
-    private static func moveToTrash(_ urls: [URL]) {
-        let fm = FileManager.default
-        for url in urls where fm.fileExists(atPath: url.path) {
-            try? fm.trashItem(at: url, resultingItemURL: nil)
+    /// Batches of more than this many files show their progress in the status bar.
+    static let trashProgressMinimum = 20
+    /// Files trashed per trip to `fileTrasher`, so the progress can update in between.
+    private static let trashChunkSize = 10
+
+    /// Moves each of `files` that exists to the Trash, a few at a time, keeping `trashProgress` current.
+    private func moveToTrash(_ files: [URL]) async {
+        guard !files.isEmpty else { return }
+        trashPending.total += files.count
+        publishTrashProgress()
+        var start = 0
+        while start < files.count {
+            let end = min(start + Self.trashChunkSize, files.count)
+            let chunk = Array(files[start..<end])
+            await fileTrasher.trash(chunk)
+            trashPending.done += chunk.count
+            publishTrashProgress()
+            start = end
         }
+        if trashPending.done == trashPending.total {
+            trashPending = TrashProgress(done: 0, total: 0) // every running delete has trashed its files
+            publishTrashProgress()
+        }
+    }
+
+    private func publishTrashProgress() {
+        let shown = trashPending.total > Self.trashProgressMinimum ? trashPending : nil
+        if trashProgress != shown { trashProgress = shown }
     }
 
     // MARK: - Background Metadata Write-back

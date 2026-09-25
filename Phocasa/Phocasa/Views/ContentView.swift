@@ -248,7 +248,12 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack {
-            if viewModel.library.isScanning {
+            if let trash = viewModel.library.trashProgress {
+                ProgressView(value: Double(trash.done), total: Double(trash.total))
+                    .frame(width: 60)
+                Text("Moving \(trash.total) files to the Trash... \(trash.done)/\(trash.total)")
+                    .font(.caption)
+            } else if viewModel.library.isScanning {
                 ProgressView()
                     .scaleEffect(0.6)
                 Text(viewModel.library.scanProgress)

@@ -126,37 +126,43 @@ final class PhotoLibraryViewModel {
     }
 
     // MARK: - Deletion / Bin
+    // Moving to the bin is immediate. Deletes that trash files return their task: the files go to the Trash off the
+    // main actor, then the store changes (spec §G5).
 
-    func deleteSelected() {
+    @discardableResult
+    func deleteSelected() -> Task<Void, Never>? {
         let toDelete = selection.selectedPhotosList
-        guard !toDelete.isEmpty else { return }
+        guard !toDelete.isEmpty else { return nil }
 
         if library.viewingBin {
             photosToDelete = toDelete
             showPermanentDeleteConfirmation = true
         } else if library.hasFileTypeFilter {
-            deleteFileTypeOnly(toDelete)
+            return deleteFileTypeOnly(toDelete)
         } else {
             moveToBin(toDelete)
         }
+        return nil
     }
 
-    func deletePhoto(_ photo: PhotoAsset) {
+    @discardableResult
+    func deletePhoto(_ photo: PhotoAsset) -> Task<Void, Never>? {
         if library.viewingBin {
             photosToDelete = [photo]
             showPermanentDeleteConfirmation = true
         } else if library.hasFileTypeFilter && photo.hasRawPair {
-            deleteFileTypeOnly([photo])
+            return deleteFileTypeOnly([photo])
         } else {
             moveToBin([photo])
         }
+        return nil
     }
 
-    private func deleteFileTypeOnly(_ photosToRemove: [PhotoAsset]) {
+    private func deleteFileTypeOnly(_ photosToRemove: [PhotoAsset]) -> Task<Void, Never> {
         selection.deselect(photosToRemove.map(\.id))
-        library.deleteFileType(of: photosToRemove,
-                               raw: library.activeFilters.contains(.rawOnly),
-                               jpg: library.activeFilters.contains(.jpgOnly))
+        let raw = library.activeFilters.contains(.rawOnly)
+        let jpg = library.activeFilters.contains(.jpgOnly)
+        return Task { await library.deleteFileType(of: photosToRemove, raw: raw, jpg: jpg) }
     }
 
     private func moveToBin(_ photosToMove: [PhotoAsset]) {
@@ -171,11 +177,13 @@ final class PhotoLibraryViewModel {
         restoreFromBin(selection.selectedPhotosList)
     }
 
-    func confirmPermanentDelete() {
-        guard library.modelContext != nil else { return }
-        selection.deselect(photosToDelete.map(\.id))
-        library.deletePermanently(photosToDelete)
+    @discardableResult
+    func confirmPermanentDelete() -> Task<Void, Never>? {
+        guard library.modelContext != nil else { return nil }
+        let photos = photosToDelete
         photosToDelete = []
+        selection.deselect(photos.map(\.id))
+        return Task { await library.deletePermanently(photos) }
     }
 
     func emptyBin() {

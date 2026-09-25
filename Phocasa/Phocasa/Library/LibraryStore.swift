@@ -41,6 +41,9 @@ final class LibraryStore {
     var currentLibrary: PhotoLibrary?
     var isScanning: Bool = false
     var scanProgress: String = ""
+    /// Files being moved to the Trash by deletes still running, when there are more than
+    /// `trashProgressMinimum` (the status bar shows it).
+    var trashProgress: TrashProgress?
 
     // Sidebar counts, for the active filters (published by `publishCounts()`).
     private(set) var ratingCounts: [Int: Int] = [:]
@@ -97,6 +100,17 @@ final class LibraryStore {
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted
     /// its new ones, just before it sets `lastScanDate` and saves.
     @ObservationIgnored var scanWillSave: ((ModelContext) -> Void)?
+    /// Where deletes move files to the Trash, off the main actor. Tests put in one that never touches the real Trash.
+    @ObservationIgnored var fileTrasher = FileTrasher.shared
+    /// Every file of the deletes still running, and how many are in the Trash already.
+    @ObservationIgnored var trashPending = TrashProgress(done: 0, total: 0)
+    /// Photos with a delete still running. Another delete of them does nothing (it would delete them twice).
+    @ObservationIgnored var photosBeingDeleted: Set<UUID> = []
+
+    struct TrashProgress: Equatable {
+        var done: Int
+        var total: Int
+    }
 
     /// What `photos` shows, so that a refresh that changes nothing costs nothing and small mutations
     /// can patch `photos` in place instead of re-filtering the whole library.
