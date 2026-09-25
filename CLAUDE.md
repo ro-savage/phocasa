@@ -101,6 +101,9 @@ Phocasa/
 │   └── Services/
 │       ├── FolderScanner           — walks a folder, pairs JPG+RAW, reads new photos' metadata concurrently
 │       ├── MetadataService         — stateless, thread-safe metadata reads and writes (JPEG splice, sidecars)
+│       ├── JPEGStructure, ExifPatch, PhotoshopIRB, XMPProperties — JPEG segments, the in-place Exif patch, APP13
+│       │                             resources and IPTC datasets, XMP value comparison (for the two below)
+│       ├── ExportMetadata          — carries a photo's original metadata into an export's JPEG
 │       ├── CaptureDate             — parses and reads EXIF DateTimeOriginal (subseconds, offset) by hand
 │       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through (re-keys cached
 │       │                             thumbnails after JPEG metadata rewrites)
@@ -131,8 +134,8 @@ Tools/
   `LibraryLocation.resolve` decides the store and the cache for `PhocasaApp` and `ImageLoader.shared` together.
 - **JPG+RAW pairing:** Files with the same stem name are combined into one PhotoAsset entry
 - **Dual metadata:** the SwiftData DB is the primary store. Ratings and tags are also written back to the files:
-  XMP (`xmp:Rating`, `dc:subject`) and IPTC keywords inside JPGs, the `.xmp` sidecar for RAW files, and both files
-  of a JPG+RAW pair.
+  XMP (`xmp:Rating`, `dc:subject`) and IPTC keywords inside JPGs, the `.xmp` sidecar for RAW files (and for files
+  that can't take them without losing metadata; see "Metadata"), and both files of a JPG+RAW pair.
 - **Tags stored as `category:name`** in keywords to preserve hierarchy in flat keyword lists (`Tag.fullName` /
   `Tag.parse(keyword:)`)
 - **Folder access:** Uses SwiftUI `.fileImporter` for folder selection, security-scoped bookmarks for persistent access
@@ -257,14 +260,36 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - **Never lose a photo's original metadata (user rule, 2026-09-26).** Phocasa never removes, rewrites or drops the
   metadata a file came with: the camera's Exif (including MakerNote and GPS), IPTC and XMP. It only adds to it (new
   XMP/IPTC spliced in) or writes a sidecar. A write that can't keep the original metadata must not happen: the change
-  goes to a sidecar instead. Losing original metadata is a major bug. **Known violation, being fixed:** the exports
-  and "Apply edits permanently" (`ImageEditingService.writeJPEG`) write JPEGs with no metadata
-  (`docs/superpowers/plans/2026-09-25-performance/post-wave-3-prompt.md`, task A).
+  goes to a sidecar instead. Losing original metadata is a major bug.
+- **Rating and keyword writes** (`MetadataService.writeMetadata`, via `MetadataWriter`):
+  - a JPEG gets its own XMP packet with just `xmp:Rating` and `dc:subject` changed (`xmpPacket`; never ImageIO's
+    merged rewrite, which overwrites XMP values that disagree with the Exif) and its IPTC keywords patched into its
+    APP13 (`PhotoshopIRB`: only the 2:25 datasets change, every other resource and dataset stays byte for byte, the
+    digest is updated), both spliced into the original bytes. Everything else, MakerNote and MPF included, is
+    byte-identical. Writes go through a temp file and `replaceItemAt`;
+  - a JPEG the splice can't handle (odd layout, several XMP/APP13 segments, extended XMP, an XMP packet ImageIO can't
+    parse or re-serialise without changing a value, IPTC text of unknown encoding), and every PNG, TIFF and HEIC
+    (whose only writer is ImageIO's lossy rewrite), keeps its bytes: the values go to its `.xmp` sidecar with
+    `phocasa:OverridesEmbedded`, and `readMetadata` then takes that sidecar's rating and keywords as they are (0 and
+    none included), for the file and for a pair's RAW. A file whose sidecar has the flag stays in the sidecar.
 - Sidecars are updated in place, never rewritten wholesale: only Phocasa's fields change, and everything other apps
-  wrote is kept. A sidecar that can't be parsed safely is skipped, left byte-identical.
-- JPEG writes splice only ImageIO's new XMP/IPTC segments into the original bytes (the camera's MakerNote and other
-  segments survive), falling back to ImageIO's full rewrite for files the splice can't handle. Writes go through a
-  temp file and `replaceItemAt`.
+  wrote is kept (an update that would lose or change another value is refused). A sidecar that can't be parsed safely
+  is skipped, left byte-identical.
+- **Exports and baked edits** ("Apply edits permanently", "Replace existing JPG", "Create new file (-raw-edit)") carry
+  the original metadata into the new JPEG (`ExportMetadata`), then get Phocasa's rating and keywords like any rating
+  write. The source: the JPG being overwritten, read before it's replaced; for a new `-raw-edit` file, the pair's
+  camera JPG, else the RAW. From a JPEG every APPn and COM segment is carried over byte for byte, in order, around the
+  new image data; from a RAW, ImageIO's metadata tree (it has no MakerNote to write). **The exceptions**, which
+  describe the old pixels and change to match the new ones: orientation (1), pixel dimensions, `ColorSpace` and an
+  Adobe RGB `InteropIndex`, the same properties in the XMP (plus `photoshop:ICCProfile`, `xmp:Thumbnails` and the
+  XMP describing data appended after the image, a motion photo's video or an Ultra HDR gain map, removed); the Exif
+  IFD1 thumbnail (unlinked, its bytes zeroed unless they overlap the MakerNote), MPF preview images,
+  the ICC profile and Adobe APP14 segment (the encoder's describe the new pixels), JFIF and JFXX thumbnails and
+  Photoshop thumbnail resources (0x0409, 0x040C). From a RAW, also the tags of its own pixel encoding
+  (`Compression`, `CFAPattern`, …). The MakerNote is never changed. If the metadata can't be carried over whole,
+  nothing is written (`ExportResult.metadataNotKept`, shown in an alert; a new `-raw-edit` file falls back to the
+  RAW's metadata). Exports replace the file on `MetadataWriter`'s queue (`runExclusively`), so no rating write can
+  interleave.
 - Capture dates come from the metadata tree `readMetadata` already copies: ImageIO shows `DateTimeOriginal` as
   `photoshop:DateCreated` (ISO 8601, subseconds merged in) and the offset as `exif:OffsetTimeOriginal`. No offset means
   local time, in the time zone current when the file is read. Parse by hand (`CaptureDate`), never with
