@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
+import SwiftData
 @testable import Phocasa
 
 /// Detail-view logic that can be checked without UI automation.
@@ -128,9 +129,23 @@ final class DetailViewTests: XCTestCase {
             try writeJPEG(makeQuadrantBitmap(width: 2400, height: 1600), to: url)
             return url.path
         }
+        // The library is read from the store by loadExistingData(), so seed it there. Newest first, so the grid
+        // order is photo0, photo1, photo2.
+        let container = try ModelContainer(
+            for: PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let base = Date()
+        for (i, path) in paths.enumerated() {
+            context.insert(PhotoAsset(fileName: (path as NSString).lastPathComponent, jpgPath: path, folderPath: dir.path,
+                                      creationDate: base.addingTimeInterval(Double(-i) * 60)))
+        }
+        try context.save()
         let viewModel = PhotoLibraryViewModel()
-        let photos = paths.map { PhotoAsset(fileName: ($0 as NSString).lastPathComponent, jpgPath: $0, folderPath: dir.path) }
-        viewModel.photos = photos
+        viewModel.setModelContext(context)
+        let photos = viewModel.photos
+        XCTAssertEqual(photos.map(\.jpgPath), paths)
         viewModel.openDetail(for: photos[0])
 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),

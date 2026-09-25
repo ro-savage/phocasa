@@ -3,7 +3,9 @@ import SwiftData
 
 @Observable @MainActor
 final class PhotoLibraryViewModel {
-    var photos: [PhotoAsset] = []
+    /// The photos the grid shows. Only the in-memory library code below writes it: it keeps `index(of:)` and the
+    /// grid bookkeeping in step, so an outside assignment would silently desync them.
+    private(set) var photos: [PhotoAsset] = []
     var allPhotos: [PhotoAsset] = []
     var selectedPhotos: Set<UUID> = []
     var lastSelectedId: UUID?
