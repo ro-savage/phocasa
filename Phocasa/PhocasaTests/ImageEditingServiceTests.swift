@@ -440,6 +440,77 @@ final class ImageEditingServiceTests: XCTestCase {
     }
 }
 
+// MARK: - Scheduling: lanes and stale-skip
+
+final class ImageEditingServiceSchedulingTests: XCTestCase {
+    private var tempDir: URL!
+
+    override func setUpWithError() throws {
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("phocasa-edit-lanes-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let tempDir { try? FileManager.default.removeItem(at: tempDir) }
+    }
+
+    func testCancelledRenderReturnsNilWithoutRendering() async throws {
+        let url = tempDir.appendingPathComponent("source.jpg")
+        try EditTestImages.writeJPEG(to: url, width: 1200, height: 800, orientation: 6)
+        let service = ImageEditingService()
+        await service.prepareStandard(url: url)
+        let before = service.renderCount
+
+        let task = Task { () -> Bool in
+            try? await Task.sleep(for: .seconds(30))   // returns early once cancelled, like the view model's debounce
+            let image = await service.processStandard(url: url, parameters: EditParameters(),
+                                                      maxSize: CGSize(width: 600, height: 600), lane: .preview)
+            return image == nil
+        }
+        task.cancel()
+        let returnedNil = await task.value
+
+        XCTAssertTrue(returnedNil, "a cancelled render returns nil")
+        XCTAssertEqual(service.renderCount, before, "a cancelled render does no work")
+
+        // Control: the same render, not cancelled, does work.
+        let image = await service.processStandard(url: url, parameters: EditParameters(),
+                                                  maxSize: CGSize(width: 600, height: 600), lane: .preview)
+        XCTAssertNotNil(image)
+        XCTAssertEqual(service.renderCount, before + 1)
+    }
+
+    func testPreviewNotBlockedByFullLane() async throws {
+        let url = tempDir.appendingPathComponent("large.jpg")
+        try EditTestImages.writeJPEG(to: url, width: 6000, height: 4000, orientation: 1)
+        let service = ImageEditingService()
+        let previewBox = CGSize(width: 1600, height: 1100)
+        var params = EditParameters()
+        params.exposure = 0.5
+        params.clarity = 30
+        // Warm both lanes (source decode, kernels) so the race below measures steady-state renders.
+        await service.prepareStandard(url: url)
+        _ = await service.processStandard(url: url, parameters: params, maxSize: previewBox, lane: .preview)
+        _ = await service.processStandard(url: url, parameters: params, maxSize: nil, lane: .full)
+
+        params.exposure = 0.6
+        let fullParams = params
+        let full = Task.detached { () -> ContinuousClock.Instant in
+            _ = await service.processStandard(url: url, parameters: fullParams, maxSize: nil, lane: .full)
+            return .now
+        }
+        try await Task.sleep(for: .milliseconds(5))
+        params.exposure = 0.7
+        let preview = await service.processStandard(url: url, parameters: params, maxSize: previewBox, lane: .preview)
+        let previewDone = ContinuousClock.now
+        let fullDone = await full.value
+
+        XCTAssertNotNil(preview)
+        XCTAssertLessThan(previewDone, fullDone, "the preview completes while the full-resolution render is in flight")
+    }
+}
+
 // MARK: - Gated benchmarks (PHOCASA_BENCH=1)
 
 final class ImageEditingServiceBenchmarks: XCTestCase {

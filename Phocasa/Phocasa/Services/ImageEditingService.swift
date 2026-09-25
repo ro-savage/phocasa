@@ -1,201 +1,322 @@
 import CoreImage
 import AppKit
 import ImageIO
+import os
 
-final class ImageEditingService: @unchecked Sendable {
+/// Renders photo edits with Core Image.
+///
+/// Work runs on two lanes. Each lane is an actor on its own serial dispatch queue, so a preview never queues behind a
+/// full-resolution render or an export. A render that is cancelled before its lane reaches it returns `nil` without
+/// doing any work, so stale slider ticks are skipped. The service holds no mutable state of its own.
+actor ImageEditingService {
     static let shared = ImageEditingService()
 
-    private let ciContext: CIContext
-    // Serial queue — prevents concurrent RAW decodes competing for resources
-    private let renderQueue = DispatchQueue(label: "com.phocasa.editing", qos: .userInteractive)
+    /// Priority lane for renders. Preview renders never queue behind full-resolution ones.
+    enum Lane: Sendable { case preview, full }
 
-    // Cached sources — the expensive part is loading from disk, so we do it once
-    private var cachedRAWFilter: CIRAWFilter?
-    private var cachedRAWURL: URL?
-    private var cachedStandardImage: CIImage?
-    private var cachedStandardURL: URL?
+    private let caches: SharedEditCaches
+    private let previewLane: RenderLane
+    private let fullLane: RenderLane
 
-    private init() {
+    /// App code uses `shared`; tests may create their own instance.
+    init() {
+        let caches = SharedEditCaches()
+        self.caches = caches
+        let context = Self.makeContext()
+        previewLane = RenderLane(label: "com.phocasa.editing.preview", qos: .userInteractive, context: context, caches: caches)
+        fullLane = RenderLane(label: "com.phocasa.editing.full", qos: .userInitiated, context: context, caches: caches)
+    }
+
+    private static func makeContext() -> CIContext {
         if let device = MTLCreateSystemDefaultDevice() {
-            ciContext = CIContext(mtlDevice: device, options: [
+            return CIContext(mtlDevice: device, options: [
                 .workingColorSpace: CGColorSpaceCreateDeviceRGB(),
                 .highQualityDownsample: true,
                 .cacheIntermediates: false
             ])
         } else {
-            ciContext = CIContext(options: [
+            return CIContext(options: [
                 .workingColorSpace: CGColorSpaceCreateDeviceRGB()
             ])
         }
     }
 
+    /// `nil` picks the lane from the render size: sized renders are previews, full-resolution renders go to `.full`.
+    private nonisolated func lane(_ lane: Lane?, maxSize: CGSize?) -> RenderLane {
+        switch lane ?? (maxSize == nil ? .full : .preview) {
+        case .preview: previewLane
+        case .full: fullLane
+        }
+    }
+
+    /// Number of renders that got past the cancellation check and did work. For tests.
+    nonisolated var renderCount: Int { caches.renderCount }
+
     // MARK: - Cache Management
 
-    /// Pre-load a RAW file into cache so the first slider interaction is instant.
-    func prepareRAW(url: URL) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            renderQueue.async { [self] in
-                if cachedRAWURL != url {
-                    cachedRAWFilter = CIRAWFilter(imageURL: url)
-                    cachedRAWURL = url
-                }
-                continuation.resume()
-            }
+    /// Pre-load a RAW file into both lanes' caches so the first slider interaction is instant.
+    nonisolated func prepareRAW(url: URL) async {
+        async let preview: Void = previewLane.prepareRAW(url: url)
+        async let full: Void = fullLane.prepareRAW(url: url)
+        _ = await (preview, full)
+    }
+
+    /// Pre-load a standard image. Both lanes render the same cached source.
+    nonisolated func prepareStandard(url: URL) async {
+        await previewLane.prepareStandard(url: url)
+    }
+
+    /// Drops the cached sources. Callable synchronously; renders that start after this returns reload their source.
+    nonisolated func clearCache() {
+        caches.invalidate()
+        let lanes = [previewLane, fullLane]
+        Task {
+            for lane in lanes { await lane.dropStaleCaches() }
         }
     }
 
-    /// Pre-load a standard image into cache.
-    func prepareStandard(url: URL) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            renderQueue.async { [self] in
-                if cachedStandardURL != url {
-                    if let img = CIImage(contentsOf: url) {
-                        cachedStandardImage = orientedImage(img)
-                    }
-                    cachedStandardURL = url
-                }
-                continuation.resume()
-            }
+    // MARK: - Rendering
+
+    /// Renders a RAW file with `parameters`. `maxSize` renders a preview that fits inside it; `nil` renders at full
+    /// resolution. `lane` defaults to `.preview` for sized renders and `.full` otherwise.
+    nonisolated func processRAW(url: URL, parameters: EditParameters, maxSize: CGSize? = nil, lane: Lane? = nil) async -> NSImage? {
+        await self.lane(lane, maxSize: maxSize).renderRAW(url: url, parameters: parameters, maxSize: maxSize)?.nsImage
+    }
+
+    /// Renders a JPEG/PNG/… file with `parameters`. See `processRAW` for `maxSize` and `lane`.
+    nonisolated func processStandard(url: URL, parameters: EditParameters, maxSize: CGSize? = nil, lane: Lane? = nil) async -> NSImage? {
+        await self.lane(lane, maxSize: maxSize).renderStandard(url: url, parameters: parameters, maxSize: maxSize)?.nsImage
+    }
+
+    // MARK: - Export (full quality, on the full lane)
+
+    /// RAW → JPEG at full quality: a fresh filter with draft mode off. Exports are never skipped.
+    nonisolated func exportRAWToJPEG(rawURL: URL, parameters: EditParameters, outputURL: URL, quality: Double = 0.95) async -> Bool {
+        await fullLane.exportRAW(rawURL: rawURL, parameters: parameters, outputURL: outputURL, quality: quality)
+    }
+
+    /// Bakes `parameters` into a JPEG, reading the source fresh from disk. Exports are never skipped.
+    nonisolated func exportStandardToJPEG(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double = 0.95) async -> Bool {
+        await fullLane.exportStandard(sourceURL: sourceURL, parameters: parameters, outputURL: outputURL, quality: quality)
+    }
+}
+
+// MARK: - Render result
+
+/// A rendered frame. `size` is the image extent, which can be fractional (rotation), as the `NSImage` size.
+private struct RenderedImage: Sendable {
+    let cgImage: CGImage
+    let size: CGSize
+
+    var nsImage: NSImage { NSImage(cgImage: cgImage, size: NSSize(width: size.width, height: size.height)) }
+}
+
+// MARK: - Shared caches
+
+/// State both lanes share, behind a lock.
+/// - The standard-image source is an immutable `CIImage`, so both lanes render the same decoded source.
+/// - `generation` is bumped by `clearCache()`. A lane drops its own caches (its `CIRAWFilter`) when it sees a new
+///   value, so a render that starts after `clearCache()` returns never uses a cleared source.
+private final class SharedEditCaches: Sendable {
+    private struct State {
+        var generation = 0
+        var standardURL: URL?
+        var standardImage: CIImage?
+        var renders = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var generation: Int { state.withLock { $0.generation } }
+    var renderCount: Int { state.withLock { $0.renders } }
+
+    func invalidate() {
+        state.withLock {
+            $0.generation += 1
+            $0.standardURL = nil
+            $0.standardImage = nil
         }
     }
 
-    func clearCache() {
-        renderQueue.async { [self] in
-            cachedRAWFilter = nil
-            cachedRAWURL = nil
-            cachedStandardImage = nil
-            cachedStandardURL = nil
+    func standardImage(for url: URL) -> CIImage? {
+        state.withLock { $0.standardURL == url ? $0.standardImage : nil }
+    }
+
+    /// Stores `image` unless the caches were cleared after `generation` was read.
+    func storeStandardImage(_ image: CIImage, for url: URL, generation: Int) {
+        state.withLock {
+            guard $0.generation == generation else { return }
+            $0.standardURL = url
+            $0.standardImage = image
         }
     }
 
-    // MARK: - RAW Processing (uses cache)
+    func countRender() {
+        state.withLock { $0.renders += 1 }
+    }
+}
 
-    func processRAW(url: URL, parameters: EditParameters, maxSize: CGSize? = nil) async -> NSImage? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<NSImage?, Never>) in
-            renderQueue.async { [self] in
-                // Reuse cached filter — avoids re-reading the RAW file from disk
-                let rawFilter: CIRAWFilter
-                if let cached = cachedRAWFilter, cachedRAWURL == url {
-                    rawFilter = cached
-                } else {
-                    guard let newFilter = CIRAWFilter(imageURL: url) else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    rawFilter = newFilter
-                    cachedRAWFilter = newFilter
-                    cachedRAWURL = url
-                }
+// MARK: - Render lane
 
-                // Draft mode for preview renders (much faster, slightly lower quality)
-                rawFilter.isDraftModeEnabled = (maxSize != nil)
+/// One serial render lane. Runs on its own dispatch queue and keeps its own `CIRAWFilter`, which isn't thread-safe.
+private actor RenderLane {
+    private let queue: DispatchSerialQueue
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
-                applyRAWParameters(rawFilter, parameters: parameters)
+    private let ciContext: CIContext
+    private let caches: SharedEditCaches
+    private var generation: Int
 
-                guard var output = rawFilter.outputImage else {
-                    continuation.resume(returning: nil)
-                    return
-                }
+    // Cached RAW source. The expensive part is loading from disk, so we do it once.
+    private var cachedRAWFilter: CIRAWFilter?
+    private var cachedRAWURL: URL?
 
-                // Scale BEFORE post-filters — smaller image = faster filter chain
-                if let maxSize {
-                    output = scaleToFit(output, maxSize: maxSize)
-                }
-
-                output = applyPostRAWFilters(to: output, parameters: parameters)
-                output = applyTransform(to: output, parameters: parameters)
-
-                continuation.resume(returning: renderToNSImage(output))
-            }
-        }
+    init(label: String, qos: DispatchQoS, context: CIContext, caches: SharedEditCaches) {
+        queue = DispatchSerialQueue(label: label, qos: qos, autoreleaseFrequency: .workItem)
+        ciContext = context
+        self.caches = caches
+        generation = caches.generation
     }
 
-    // MARK: - Standard Processing (uses cache)
+    // MARK: Caches
 
-    func processStandard(url: URL, parameters: EditParameters, maxSize: CGSize? = nil) async -> NSImage? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<NSImage?, Never>) in
-            renderQueue.async { [self] in
-                // Reuse cached image — avoids re-reading from disk
-                let sourceImage: CIImage
-                if let cached = cachedStandardImage, cachedStandardURL == url {
-                    sourceImage = cached
-                } else {
-                    guard let img = CIImage(contentsOf: url) else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    let oriented = orientedImage(img)
-                    cachedStandardImage = oriented
-                    cachedStandardURL = url
-                    sourceImage = oriented
-                }
-
-                var ciImage = sourceImage
-
-                // Scale BEFORE filters — smaller image = faster filter chain
-                if let maxSize {
-                    ciImage = scaleToFit(ciImage, maxSize: maxSize)
-                }
-
-                ciImage = applyStandardFilters(to: ciImage, parameters: parameters)
-                ciImage = applyTransform(to: ciImage, parameters: parameters)
-
-                continuation.resume(returning: renderToNSImage(ciImage))
-            }
-        }
+    func prepareRAW(url: URL) {
+        dropStaleCaches()
+        _ = rawFilter(for: url)
     }
 
-    // MARK: - Export RAW → JPEG (full quality, no draft, no cache needed)
-
-    func exportRAWToJPEG(rawURL: URL, parameters: EditParameters, outputURL: URL, quality: Double = 0.95) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            renderQueue.async { [self] in
-                // For export, create a fresh filter with draft OFF for max quality
-                guard let rawFilter = CIRAWFilter(imageURL: rawURL) else {
-                    continuation.resume(returning: false)
-                    return
-                }
-                rawFilter.isDraftModeEnabled = false
-
-                applyRAWParameters(rawFilter, parameters: parameters)
-
-                guard var output = rawFilter.outputImage else {
-                    continuation.resume(returning: false)
-                    return
-                }
-
-                output = applyPostRAWFilters(to: output, parameters: parameters)
-                output = applyTransform(to: output, parameters: parameters)
-
-                let success = writeJPEG(output, to: outputURL, quality: quality)
-                continuation.resume(returning: success)
-            }
-        }
+    func prepareStandard(url: URL) {
+        dropStaleCaches()
+        _ = standardSource(for: url)
     }
 
-    // MARK: - Export JPG overwrite
-
-    func exportStandardToJPEG(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double = 0.95) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            renderQueue.async { [self] in
-                guard let rawImage = CIImage(contentsOf: sourceURL) else {
-                    continuation.resume(returning: false)
-                    return
-                }
-
-                var ciImage = orientedImage(rawImage)
-                ciImage = applyStandardFilters(to: ciImage, parameters: parameters)
-                ciImage = applyTransform(to: ciImage, parameters: parameters)
-
-                let success = writeJPEG(ciImage, to: outputURL, quality: quality)
-                continuation.resume(returning: success)
-            }
-        }
+    func dropStaleCaches() {
+        let current = caches.generation
+        guard current != generation else { return }
+        generation = current
+        cachedRAWFilter = nil
+        cachedRAWURL = nil
     }
 
-    // MARK: - RAW Filter Configuration
+    private func rawFilter(for url: URL) -> CIRAWFilter? {
+        if let cached = cachedRAWFilter, cachedRAWURL == url { return cached }
+        guard let filter = CIRAWFilter(imageURL: url) else { return nil }
+        cachedRAWFilter = filter
+        cachedRAWURL = url
+        return filter
+    }
 
-    private func applyRAWParameters(_ filter: CIRAWFilter, parameters: EditParameters) {
+    private func standardSource(for url: URL) -> CIImage? {
+        if let cached = caches.standardImage(for: url) { return cached }
+        guard let image = CIImage(contentsOf: url) else { return nil }
+        let oriented = EditPipeline.orientedImage(image)
+        caches.storeStandardImage(oriented, for: url, generation: generation)
+        return oriented
+    }
+
+    /// The stale-skip check: a render whose task was cancelled while it waited for this lane does no work.
+    private func beginRender() -> Bool {
+        guard !Task.isCancelled else { return false }
+        dropStaleCaches()
+        caches.countRender()
+        return true
+    }
+
+    // MARK: Renders
+
+    func renderRAW(url: URL, parameters: EditParameters, maxSize: CGSize?) -> RenderedImage? {
+        guard beginRender(), let rawFilter = rawFilter(for: url) else { return nil }
+
+        // Draft mode for preview renders (much faster, slightly lower quality)
+        rawFilter.isDraftModeEnabled = (maxSize != nil)
+
+        EditPipeline.applyRAWParameters(rawFilter, parameters: parameters)
+
+        guard var output = rawFilter.outputImage else { return nil }
+
+        // Scale BEFORE post-filters — smaller image = faster filter chain
+        if let maxSize {
+            output = EditPipeline.scaleToFit(output, maxSize: maxSize)
+        }
+
+        output = EditPipeline.applyPostRAWFilters(to: output, parameters: parameters)
+        output = EditPipeline.applyTransform(to: output, parameters: parameters)
+
+        return render(output)
+    }
+
+    func renderStandard(url: URL, parameters: EditParameters, maxSize: CGSize?) -> RenderedImage? {
+        guard beginRender(), let sourceImage = standardSource(for: url) else { return nil }
+
+        var ciImage = sourceImage
+
+        // Scale BEFORE filters — smaller image = faster filter chain
+        if let maxSize {
+            ciImage = EditPipeline.scaleToFit(ciImage, maxSize: maxSize)
+        }
+
+        ciImage = EditPipeline.applyStandardFilters(to: ciImage, parameters: parameters)
+        ciImage = EditPipeline.applyTransform(to: ciImage, parameters: parameters)
+
+        return render(ciImage)
+    }
+
+    func exportRAW(rawURL: URL, parameters: EditParameters, outputURL: URL, quality: Double) -> Bool {
+        // For export, create a fresh filter with draft OFF for max quality
+        guard let rawFilter = CIRAWFilter(imageURL: rawURL) else { return false }
+        rawFilter.isDraftModeEnabled = false
+
+        EditPipeline.applyRAWParameters(rawFilter, parameters: parameters)
+
+        guard var output = rawFilter.outputImage else { return false }
+
+        output = EditPipeline.applyPostRAWFilters(to: output, parameters: parameters)
+        output = EditPipeline.applyTransform(to: output, parameters: parameters)
+
+        return writeJPEG(output, to: outputURL, quality: quality)
+    }
+
+    func exportStandard(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double) -> Bool {
+        guard let rawImage = CIImage(contentsOf: sourceURL) else { return false }
+
+        var ciImage = EditPipeline.orientedImage(rawImage)
+        ciImage = EditPipeline.applyStandardFilters(to: ciImage, parameters: parameters)
+        ciImage = EditPipeline.applyTransform(to: ciImage, parameters: parameters)
+
+        return writeJPEG(ciImage, to: outputURL, quality: quality)
+    }
+
+    // MARK: Output
+
+    private func render(_ ciImage: CIImage) -> RenderedImage? {
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else { return nil }
+        return RenderedImage(cgImage: cgImage, size: extent.size)
+    }
+
+    private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
+        let originalDates = Phocasa.captureFileDates(url)
+
+        let extent = image.extent
+        guard let cgImage = ciContext.createCGImage(image, from: extent) else { return false }
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(destination, cgImage, [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ] as CFDictionary)
+        let success = CGImageDestinationFinalize(destination)
+
+        if success { Phocasa.restoreFileDates(url, dates: originalDates) }
+        return success
+    }
+}
+
+// MARK: - Filter chains (pure)
+
+private enum EditPipeline {
+    // MARK: RAW Filter Configuration
+
+    static func applyRAWParameters(_ filter: CIRAWFilter, parameters: EditParameters) {
         filter.exposure = Float(parameters.exposure)
         // shadowBias: negative darkens shadows, positive lifts them
         filter.shadowBias = Float(parameters.shadows / 100.0)
@@ -220,9 +341,9 @@ final class ImageEditingService: @unchecked Sendable {
         filter.neutralTint = Float(parameters.tint * 1.5)
     }
 
-    // MARK: - Post-RAW Filters (supplements for things CIRAWFilter can't do)
+    // MARK: Post-RAW Filters (supplements for things CIRAWFilter can't do)
 
-    private func applyPostRAWFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
+    static func applyPostRAWFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
         var result = image
 
         // Negative brightness — boostAmount can't go below 0
@@ -288,9 +409,9 @@ final class ImageEditingService: @unchecked Sendable {
         return result
     }
 
-    // MARK: - Standard Filter Chain (JPG/PNG)
+    // MARK: Standard Filter Chain (JPG/PNG)
 
-    private func applyStandardFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
+    static func applyStandardFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
         var result = image
 
         // Exposure — direct EV mapping, works well
@@ -377,9 +498,9 @@ final class ImageEditingService: @unchecked Sendable {
         return result
     }
 
-    // MARK: - Transform
+    // MARK: Transform
 
-    private func applyTransform(to image: CIImage, parameters: EditParameters) -> CIImage {
+    static func applyTransform(to image: CIImage, parameters: EditParameters) -> CIImage {
         var result = image
 
         if parameters.rotation != 0 {
@@ -415,9 +536,9 @@ final class ImageEditingService: @unchecked Sendable {
         return result
     }
 
-    // MARK: - Helpers
+    // MARK: Helpers
 
-    private func orientedImage(_ image: CIImage) -> CIImage {
+    static func orientedImage(_ image: CIImage) -> CIImage {
         let o = image.properties[kCGImagePropertyOrientation as String] as? UInt32 ?? 1
         return image.oriented(CGImagePropertyOrientation(rawValue: o) ?? .up)
     }
@@ -425,7 +546,7 @@ final class ImageEditingService: @unchecked Sendable {
     /// Tone curve for highlight recovery and shadow lifting.
     /// h: -100 to +100 (positive = recover/darken highlights, negative = brighten)
     /// s: -100 to +100 (positive = lift/brighten shadows, negative = crush)
-    private func applyToneCurve(to image: CIImage, highlights h: Double, shadows s: Double) -> CIImage {
+    static func applyToneCurve(to image: CIImage, highlights h: Double, shadows s: Double) -> CIImage {
         let hNorm = h / 100.0  // -1 to 1
         let sNorm = s / 100.0  // -1 to 1
 
@@ -448,7 +569,7 @@ final class ImageEditingService: @unchecked Sendable {
         ])
     }
 
-    private func applyFilter(_ name: String, to image: CIImage, params: [String: Any]) -> CIImage {
+    static func applyFilter(_ name: String, to image: CIImage, params: [String: Any]) -> CIImage {
         guard let filter = CIFilter(name: name) else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)
         for (key, value) in params {
@@ -457,31 +578,9 @@ final class ImageEditingService: @unchecked Sendable {
         return filter.outputImage ?? image
     }
 
-    private func scaleToFit(_ image: CIImage, maxSize: CGSize) -> CIImage {
+    static func scaleToFit(_ image: CIImage, maxSize: CGSize) -> CIImage {
         let scale = min(maxSize.width / image.extent.width, maxSize.height / image.extent.height)
         guard scale < 1.0 else { return image }
         return image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-    }
-
-    private func renderToNSImage(_ ciImage: CIImage) -> NSImage? {
-        let extent = ciImage.extent
-        guard extent.width > 0, extent.height > 0 else { return nil }
-        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: extent.width, height: extent.height))
-    }
-
-    private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
-        let originalDates = Phocasa.captureFileDates(url)
-
-        let extent = image.extent
-        guard let cgImage = ciContext.createCGImage(image, from: extent) else { return false }
-        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return false }
-        CGImageDestinationAddImage(destination, cgImage, [
-            kCGImageDestinationLossyCompressionQuality: quality
-        ] as CFDictionary)
-        let success = CGImageDestinationFinalize(destination)
-
-        if success { Phocasa.restoreFileDates(url, dates: originalDates) }
-        return success
     }
 }
