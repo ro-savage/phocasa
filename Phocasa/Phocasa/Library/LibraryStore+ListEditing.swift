@@ -102,6 +102,54 @@ extension LibraryStore {
         filteredCounts = nil
     }
 
+    // MARK: - Photos Joining or Leaving the Library
+
+    /// Scans: `adding` photos that aren't in memory yet join the library (new rows, or photos whose files are back),
+    /// each where a reload would put it; `facts[i]` are `adding[i]`'s. Photos with ids in `removing` leave the library
+    /// and the bin (their files went missing). Few photos patch the lists, the grid and the counts; many are merged
+    /// and recounted. O(k log n) for k photos in the patch case, one pass in the merge case: no fetch, no reload.
+    func updateLibrary(adding photos: [PhotoAsset], facts: [PhotoFacts], removing ids: Set<UUID>) {
+        precondition(photos.count == facts.count)
+        if ids.count <= Self.patchLimit {
+            let found = ids.compactMap { position(of: $0, useIndex: ids.count > 2) }
+            // From the end of each list first, so the positions found stay valid.
+            for position in found.sorted(by: { $0.index > $1.index }) {
+                _ = removeFromList(at: position)
+            }
+        } else {
+            var removed: [UUID: PhotoFacts] = [:]
+            if let kept = removing(ids, from: allPhotos, allFacts, capturingInto: &removed) {
+                (allPhotos, allFacts) = kept
+                libraryVersion += 1
+            }
+            if let kept = removing(ids, from: binPhotos, binFacts, capturingInto: &removed) {
+                (binPhotos, binFacts) = kept
+                binVersion += 1
+            }
+        }
+        if photos.count <= Self.patchLimit {
+            for (photo, photoFacts) in zip(photos, facts) {
+                insertIntoList(photo, facts: photoFacts, inBin: false)
+            }
+        } else {
+            (allPhotos, allFacts) = sort.merge(zip(photos, facts).map { (photo: $0, facts: $1) }, into: allPhotos, allFacts)
+            libraryVersion += 1
+        }
+        if ids.count > Self.patchLimit || photos.count > Self.patchLimit {
+            libraryCounts = PhotoQuery().facetCounts(over: allFacts)
+            filteredCounts = nil
+        }
+        refreshVisiblePhotos()
+        sortTagCategories()
+    }
+
+    /// A file-type delete is done (`deleteFileType`): `binned` photos went to the bin, and each of `changed` lost its
+    /// JPG or its RAW, which changes its facts (and so perhaps whether a filtered grid shows it). No reload.
+    func fileTypeDeleteDidFinish(binned: [PhotoAsset], changed: [PhotoAsset]) {
+        applyFactChanges(changed)
+        relocate(binned, ids: binned.map(\.id), toBin: true)
+    }
+
     /// The photos and facts without `ids`, or nil when none of them is there.
     private func removing(
         _ ids: Set<UUID>, from photos: [PhotoAsset], _ facts: [PhotoFacts],

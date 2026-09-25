@@ -28,8 +28,6 @@ extension StoredPhoto {
     /// Synchronous `fetchAll(in:)`, for the calling thread. Don't call it on the main thread.
     static func fetchAllNow(in container: ModelContainer) -> [StoredPhoto] {
         let context = ModelContext(container)
-        // Bin membership comes from a predicate the store evaluates. Reading `isDeleted` through a model can
-        // disagree with the store (it collides with Core Data's own `isDeleted`; results/10.md, deviation 12).
         let binned = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))) ?? []
         let binnedIDs = Set(binned.map(\.id))
         let photos = (try? context.fetch(FetchDescriptor<PhotoAsset>())) ?? []
@@ -58,13 +56,11 @@ struct ScanPlan: Sendable {
         let jpgPath: String?
         let rawPath: String?
         let fileSize: Int64
-        /// The row is in the bin and its files were found, so the scan puts it back in the library
-        /// (the scan's existing behaviour).
-        let restoresFromBin: Bool
     }
 
-    /// Stored rows whose paths, size or bin state differ from what the scan found. Every row with a found key
-    /// is compared, so duplicate rows for one file (left by older versions) are all kept up to date.
+    /// Stored rows (in the library or the bin) whose paths or size differ from what the scan found. Every row with a
+    /// found key is compared, so duplicate rows for one file (left by older versions) are all kept up to date. A row in
+    /// the bin stays there: a scan never takes a photo out of the bin (user decision, wave 2 #1).
     var updates: [Update] = []
     /// Found photos with no stored row, in discovery order. Their metadata hasn't been read yet.
     var newPhotos: [DiscoveredPhoto] = []
@@ -72,11 +68,14 @@ struct ScanPlan: Sendable {
     /// found is available. A photo it didn't find whose file still exists (for example under an earlier library
     /// root) stays visible, as with a full availability check.
     var missingIDs: Set<UUID> = []
+    /// Library photos in `previouslyMissing` that aren't missing any more: the library shows them again.
+    var foundAgainIDs: Set<UUID> = []
     /// How many photos the scan found.
     var discoveredCount = 0
 
-    /// `fileExists` is called only for rows the scan didn't find; after an unchanged rescan, never.
-    init(stored: [StoredPhoto], discovered: [DiscoveredPhoto],
+    /// `previouslyMissing` is the missing set the library shows now (`LibraryStore.missingPhotoIDs`). `fileExists` is
+    /// called only for rows the scan didn't find; after an unchanged rescan, never.
+    init(stored: [StoredPhoto], discovered: [DiscoveredPhoto], previouslyMissing: Set<UUID> = [],
          fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
         discoveredCount = discovered.count
         let foundByKey = Dictionary(discovered.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
@@ -84,25 +83,29 @@ struct ScanPlan: Sendable {
         for row in stored {
             if let found = foundByKey[row.key] {
                 knownKeys.insert(row.key)
-                if row.jpgPath != found.jpgPath || row.rawPath != found.rawPath
-                    || row.fileSize != found.fileSize || row.isInBin {
+                if row.jpgPath != found.jpgPath || row.rawPath != found.rawPath || row.fileSize != found.fileSize {
                     updates.append(Update(id: row.id, jpgPath: found.jpgPath, rawPath: found.rawPath,
-                                          fileSize: found.fileSize, restoresFromBin: row.isInBin))
+                                          fileSize: found.fileSize))
                 }
             } else if !row.isInBin {
                 let jpgExists = row.jpgPath.map(fileExists) ?? false
                 let rawExists = row.rawPath.map(fileExists) ?? false
                 if !jpgExists && !rawExists { missingIDs.insert(row.id) }
             }
+            if !row.isInBin && previouslyMissing.contains(row.id) && !missingIDs.contains(row.id) {
+                foundAgainIDs.insert(row.id)
+            }
         }
         newPhotos = discovered.filter { !knownKeys.contains($0.key) }
     }
 
     /// Computes the plan off the main thread.
-    static func make(stored: [StoredPhoto], discovered: [DiscoveredPhoto]) async -> ScanPlan {
+    static func make(stored: [StoredPhoto], discovered: [DiscoveredPhoto],
+                     previouslyMissing: Set<UUID> = []) async -> ScanPlan {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: ScanPlan(stored: stored, discovered: discovered))
+                continuation.resume(returning: ScanPlan(stored: stored, discovered: discovered,
+                                                        previouslyMissing: previouslyMissing))
             }
         }
     }
@@ -122,16 +125,17 @@ struct ScanPlan: Sendable {
     private static let backgroundSaveChunkSize = 500
 
     /// Inserts the new photos that pass `canInsertInBackground` (and skips the others) through a new context on
-    /// `container`, off the main thread, saving every few hundred rows. Returns how many rows were saved.
-    static func insertInBackground(_ photos: [DiscoveredPhoto], into container: ModelContainer) async -> Int {
+    /// `container`, off the main thread, saving every few hundred rows. Returns the ids of the rows saved.
+    static func insertInBackground(_ photos: [DiscoveredPhoto], into container: ModelContainer) async -> [UUID] {
         let photos = photos.filter(canInsertInBackground)
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let context = ModelContext(container)
-                var saved = 0
+                var saved: [UUID] = []
                 var start = 0
                 while start < photos.count {
                     let end = min(start + backgroundSaveChunkSize, photos.count)
+                    var chunk: [UUID] = []
                     for found in photos[start..<end] {
                         let asset = PhotoAsset(
                             fileName: found.fileName,
@@ -143,10 +147,11 @@ struct ScanPlan: Sendable {
                         )
                         asset.rating = found.metadata?.rating ?? 0
                         context.insert(asset)
+                        chunk.append(asset.id)
                     }
                     do {
                         try context.save()
-                        saved += end - start
+                        saved += chunk
                     } catch {
                         context.rollback() // leave these for the next scan, which will find them new again
                     }

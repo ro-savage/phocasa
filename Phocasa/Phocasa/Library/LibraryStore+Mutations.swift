@@ -177,7 +177,8 @@ extension LibraryStore {
             photosBeingDeleted.remove(photo.id)
         }
         try? modelContext?.save()
-        loadExistingData()
+        fileTypeDeleteDidFinish(binned: changes.filter { $0.change == .toBin }.map(\.photo),
+                                changed: changes.filter { $0.change != .toBin }.map(\.photo))
     }
 
     /// Moves the photos' files (and RAW sidecars) to the Trash, then deletes the photos from the store.
@@ -188,12 +189,12 @@ extension LibraryStore {
 
         await moveToTrash(photos.flatMap { Self.files(of: $0, jpg: true, raw: true) })
 
+        updateLibrary(adding: [], facts: [], removing: Set(photos.map(\.id))) // in memory, before the models go
         for photo in photos {
             photosBeingDeleted.remove(photo.id)
             context.delete(photo)
         }
         try? context.save()
-        loadExistingData()
     }
 
     /// The files a delete moves to the Trash: the photo's JPG (`jpg`) and/or its RAW (`raw`) together with the RAW's
