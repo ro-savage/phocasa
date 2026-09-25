@@ -13,10 +13,13 @@
 
 - Modify: `Phocasa/Phocasa/Services/FolderScanner.swift` (you own it)
 - Modify: `Phocasa/Phocasa/ViewModels/PhotoLibraryViewModel.swift`, **only**:
-  - `setModelContext`;
+  - `setModelContext` (keep its `loadPresets()` call: task 22 owns presets);
   - `// MARK: - File Availability` (`checkFileAvailability`, `refreshAvailability`, `missingPhotoIDs`, `needsAvailabilityCheck`);
+  - in `loadExistingData()`, **only** the availability lines (the `needsAvailabilityCheck` / `checkFileAvailability` block and the `missingPhotoIDs` filtering). The rest of Data Loading and the in-memory library stay as task 10 left them;
+  - the stored properties `scanner`, `missingPhotoIDs`, `needsAvailabilityCheck`, `isScanning`, `scanProgress`, plus any new private scan state you add;
   - `// MARK: - Folder Opening` (`openFolder`, `handleFolderSelected`, `rescanCurrentLibrary`, `scanFolder`);
   - `findOrCreateTag`.
+  - Task 22 edits the view model at the same time (editing state and the `previewTask`/`fullResRenderTask` properties next to yours). Keep your edits inside these regions so the merge stays mechanical.
 - Create: `Phocasa/Phocasa/Library/TagParsing.swift`, holding `Tag.parse(keyword:)` next to the existing `fullName` logic, as an extension on `Tag`
 - Modify: `Phocasa/PhocasaTests/FolderScannerTests.swift`
 - Create: `Phocasa/PhocasaTests/ScanTests.swift`
@@ -57,6 +60,35 @@
 - **Task 14:** `readMetadata` now returns real JPEG ratings, embedded RAW `xmp:Rating` values, and `dc:subject` keywords, and `PhotoMetadata` is `Sendable`. `MetadataWriter` owns every write; a scan never writes.
 - **Real files:** you may measure a first scan of `~/PhocasaBenchRAW` (190 JPG+ARW pairs) into a temp store. Scanning only reads files. Never rate, tag or edit anything in that store, and don't commit a test that depends on the folder.
 - **Launch:** `setModelContext` still calls `loadExistingData()` on the main actor (≈330 ms at 10k). Moving that fetch off the main actor is out of scope unless you find a simple, safe way. Record the launch main-actor time you measure either way.
+
+## Coordinator notes for wave 2 (checked against merged `main`, read before step 1)
+
+- **Step 4.2's fetch alone breaks the 150 ms target.** `scanFolder` fetches every `PhotoAsset` on the main actor. At
+  10k that fetch costs about 185 ms (`1a raw fetch … warm`), before any other work. Keep the per-row comparison off
+  the main actor. For example:
+  - read plain values (key, `persistentModelID`, `id`, paths, size, `isDeleted`) from a **background `ModelContext`**
+    on the same container (`context.container`);
+  - diff them against the scan on that background task;
+  - on the main actor, touch only the rows that changed (look them up by `persistentModelID`), insert the new ones and
+    save.
+
+  Unsaved main-context changes aren't visible to another context, so save first if `context.hasChanges`. If you find
+  a better way, use it and record why. If a quick measurement shows you can't get near the target, report that
+  rather than finishing.
+- **Missing files.** `allPhotos` already excludes `missingPhotoIDs`. So the diff has to see every row, missing ones
+  included, or a missing photo whose file comes back is inserted a second time. `testScanToleratesExistingDuplicates`
+  and a "file comes back" case should cover this.
+- **Harness (you own additions to `PerformanceBenchmarks.swift`):**
+  - `waitForScan` needs `isScanning` to be set synchronously (Step 6).
+  - The `Task.sleep(for: .milliseconds(500)) // let detached metadata writes drain` after `5a`/`5b` can become
+    `await MetadataWriter.shared.flush()` (task 14's note). Nothing else in the harness should change meaning: the
+    coordinator compares its lines between `main` and your branch.
+- **Task 23 runs in parallel and owns `MetadataService`.** It is changing how sidecars are read and written, but
+  `readMetadata(from:)` keeps its signature and stays stateless and thread-safe. Calling it from
+  `DispatchQueue.concurrentPerform` is fine. Don't edit `MetadataService`; put anything you need from it under
+  "Needs from other tasks".
+- **The benchmark files here are empty.** In the `N=10000` suite, `7x` reads no metadata, so it measures the
+  unchanged-rescan path alone.
 
 ## Steps
 

@@ -11,6 +11,7 @@
 - Create: `Phocasa/Phocasa/Services/ThumbnailDiskCache.swift`
 - Modify: `Phocasa/Phocasa/Services/ImageLoader.swift`: integrate the cache into the thumbnail decode path; `invalidate(path:)` also removes entries from disk
 - Create: `Phocasa/PhocasaTests/ThumbnailDiskCacheTests.swift`
+- Modify, if needed: `Phocasa/PhocasaTests/ImageLoaderTests.swift` (you own `ImageLoader` in this wave)
 
 **Don't touch:** the grid views (task 11, merged), the view model, the detail view.
 
@@ -45,10 +46,34 @@
 - **Encoding:** JPEG at quality 0.8 via `CGImageDestination`. It decodes fast, and HEIC encoding is slower.
 - **LRU:** update the access time on read (`URLResourceValues.contentAccessDate`, or touch the modification date). `trimIfNeeded()` runs after every ~100 stores, on the utility queue, and deletes the oldest files until the total is under `byteLimit`.
 - **Staleness:** the key includes file size and mtime.
-  - The app's own metadata writes *restore* mtime, but they don't change pixels, so a cached thumbnail stays valid.
+  - The app's own metadata writes *restore* mtime, but a JPEG rating or keyword write **changes the file size**
+    (the embedded XMP grows or shrinks). The key then misses once and that thumbnail is decoded again; the old entry
+    stays until LRU trims it. That is correct, just not free. Measure how often it matters, then either accept it
+    and document it, or propose something better in your results. Don't weaken the key without evidence.
   - Edit exports do change pixels. Task 30 wires `ImageLoader.invalidate(path:)` into the export success paths.
 - **Loader order** inside the scheduler work: memory cache (as today) → disk cache → decode, then `store` to disk.
-- **Test isolation:** the cache directory must be injectable. `ImageLoader` gets an internal initializer that takes a `ThumbnailDiskCache?`. The test host must not write into the real Caches folder while tests run: when `XCTestConfigurationFilePath` is set, `shared` uses a temp directory.
+  These are task 11's hooks (`results/11.md`, "Needs from other tasks"). Put the disk read inside the
+  `thumbnailScheduler` work closure, before `decodeThumbnail`, and the disk write next to
+  `store(_:for:generation:)`. Keep the generation check: a decode that was running when the path was invalidated must
+  not write a stale entry to disk either.
+- **Test isolation:** the cache directory must be injectable. `ImageLoader` gets an internal initializer that takes a
+  `ThumbnailDiskCache?`. The test host must never write into the real Caches folder. When `XCTestConfigurationFilePath`
+  is set, `shared` works like this:
+  - **No disk cache by default.** Existing `ImageLoaderTests` and the coordinator's cold-thumbnail benchmarks use
+    `ImageLoader.shared` and `clearCache()`, and expect a real decode.
+  - **If `PHOCASA_THUMBNAIL_CACHE_DIR` is set** (tests get it as `TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR`), `shared`
+    uses that directory. The coordinator uses this for its A/B runs and for the real-app relaunch check, where the app
+    is launched with the in-memory-store flag.
+  - A normal launch always uses `defaultDirectory`.
+- **`clearCache()` stays memory-only.** It has no app callers. The coordinator's "relaunch" benchmark relies on it:
+  memory emptied, disk kept. Tests clear the disk through `ThumbnailDiskCache` itself.
+- **Robust against outside deletion.** Someone else may empty or delete the cache directory while the app runs: the
+  user clearing `~/Library/Caches`, or the coordinator's harness between cold runs. Reads must then miss without
+  crashing, later stores must recreate folders, the index must heal itself, and trimming must tolerate files that are
+  already gone. Add a test.
+- **The cold path must not get slower.** On a miss, the cache now also encodes and writes a JPEG. That work runs on
+  a utility queue, but it competes with thumbnail decodes for the same cores during a fast scroll. Measure the cold
+  fast scroll with the disk cache enabled against `main` (see Step 5). It must not regress by more than 5%.
 
 ## Steps
 
@@ -70,6 +95,16 @@
 - [ ] **Step 4: Integrate it into `ImageLoader`** and make the loader test pass. `invalidate(path:)` now also calls `removeAll(forPath:)`. Commit.
 
 - [ ] **Step 5: Measure.** Add a benchmark gated on `PHOCASA_BENCH=1`: 100 thumbnails at bucket 512 from generated 6000×4000 JPEGs, cold decode vs a warm disk cache (with a fresh memory cache). Record the medians in your results file. The target is a warm-disk load ≥ 10× faster than a cold decode.
+  - Also measure, with a temp disk cache enabled:
+    - the **cold** fast scroll (task 11's protocol: cells 2.5 ms apart, a cell more than 40 behind cancelled), with
+      the disk cache empty before each run;
+    - the **relaunch** fast scroll: disk warm, memory empty.
+  - Measure both on `main` and on your branch.
+  - Also run on real files if the coordinator gives you `~/PhocasaBenchRAW`: 190 JPG+ARW pairs, read only. ARW
+    thumbnails already take about 12 ms from the embedded preview and real JPGs about 27 ms, so the win there is
+    smaller than on synthetic 24 MP files. Report it honestly.
+  - If a quick prototype shows the warm-disk path isn't meaningfully faster than decoding, stop and report instead of
+    finishing.
 
 - [ ] **Step 6: Full suite, warnings, results file, commit.**
 
@@ -77,7 +112,8 @@
 
 - All `ThumbnailDiskCacheTests` pass.
 - A warm-disk load is ≥ 10× faster than decoding from the original (benchmark).
-- Test runs never write to the real `~/Library/Caches/<bundle id>` folder.
+- The cold fast scroll with the disk cache enabled is within 5% of `main`.
+- Test runs, and the app launched with the in-memory-store flag, never write to the real `~/Library/Caches/<bundle id>` folder.
 - Zero new warnings. The full suite passes.
 
 ## Out of scope

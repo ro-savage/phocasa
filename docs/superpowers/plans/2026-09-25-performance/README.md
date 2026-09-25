@@ -52,8 +52,8 @@ DD="$TMPDIR/phocasa-dd-<task-id>"      # e.g. phocasa-dd-10
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -configuration Debug -derivedDataPath "$DD" build 2>&1 | tail -5
 
 # Full test suite (look for "** TEST SUCCEEDED **"; count warnings with: grep -c "warning:").
-# After task 00 the baseline is "Executed 125 tests, with 3 tests skipped": 122 real tests + 3 gated benchmarks.
-# Existing warnings (spec §F5 + one test warning): ImageLoader.swift:52, MetadataService.swift:99, ViewModelTests.swift:753.
+# After wave 1 the baseline is "Executed 293 tests, with 11 tests skipped and 0 failures" (the skips are gated
+# benchmarks), with 0 compiler warnings on a clean build.
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -destination 'platform=macOS' -derivedDataPath "$DD" test > "$DD.test.log" 2>&1; tail -3 "$DD.test.log"
 grep -E "error:|failed \(|Executed [0-9]+ tests" "$DD.test.log" | sort -u
 
@@ -144,7 +144,8 @@ wave 2, task 30/31 in wave 3. Other tasks put their gated benchmarks in their ow
 | File / region | 20 | 21 | 22 | 23 |
 |---|---|---|---|---|
 | VM: `setModelContext`, availability, folder opening, `rescanCurrentLibrary`, `scanFolder`, `findOrCreateTag` | **owns** | | | |
-| VM: editing state and editing, JPG comparison, crop, export, presets | | | **owns** | |
+| VM: the availability lines inside `loadExistingData()`; stored `scanner`, `missingPhotoIDs`, `needsAvailabilityCheck`, `isScanning`, `scanProgress` | **owns** | | | |
+| VM: editing state and editing, JPG comparison, crop, export, presets; `clearRAWSidecarEdits`, `revertEditsForPhoto`; the editing calls in `navigateDetail`/`closeDetail` | | | **owns** | |
 | VM: `metadataWriteItem(for:)`, `writeMetadataInBackground(_:)` | | | | **owns** |
 | `Services/FolderScanner.swift` | **owns** | | | |
 | New `Library/TagParsing.swift` | **owns** | | | |
@@ -155,7 +156,7 @@ wave 2, task 30/31 in wave 3. Other tasks put their gated benchmarks in their ow
 | `Views/PhotoDetailView.swift` and `Views/Detail/*`: edit-related references only | | | **owns** | |
 | `Views/ContentView.swift`: edit-related lines only (key handling, `EditSidebarView` presence) | | | **owns** | |
 | `PhocasaTests/PerformanceBenchmarks.swift` (add lines only) | **owns** | | | |
-| Tests | `FolderScannerTests`, new `ScanTests` | new `ThumbnailDiskCacheTests` | new `EditSessionTests`; the crop and preset tests in `ViewModelTests` | `Metadata*Tests`; the star tests in `PhotoGridItemViewTests` |
+| Tests | `FolderScannerTests`, new `ScanTests` | new `ThumbnailDiskCacheTests`; `ImageLoaderTests` | new `EditSessionTests`; the crop, preset and other editing tests in `ViewModelTests`; the saved-edit tests in `DetailViewTests` | `Metadata*Tests`; the star tests in `PhotoGridItemViewTests` |
 
 ### Wave 3
 

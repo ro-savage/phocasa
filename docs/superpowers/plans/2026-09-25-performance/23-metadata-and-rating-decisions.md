@@ -22,6 +22,38 @@
 
 **Don't touch:** `FolderScanner` and the scan code (task 20), `ImageLoader` (task 21), editing and the detail/edit views (task 22). Task 22 calls `MetadataWriter.enqueueEditParameters` and `MetadataService.clearEditParameters(forRAWAt:)`. Keep both working exactly as they are.
 
+## Coordinator notes for wave 2 (checked against merged `main`, read before starting)
+
+- **Keep every existing `MetadataService` API source-compatible.** Tasks 20 and 22 run in parallel against today's
+  signatures:
+  - `main`'s view model still calls `writeSidecar(rating:keywords:for:editParameters:)` (`clearRAWSidecarEdits`) and
+    `writeEditParameters(_:forRAWAt:)` (`saveCurrentEditParameters`, `applyPresetToSelection`) directly. Task 22 moves
+    those to `MetadataWriter`.
+  - `PhotoDetailView` calls `readEditParameters(forRAWAt:)`.
+  - `MetadataParsingTests` call `parseXMPSidecar(_:)` and `parseEditParameters(from:)`.
+  - `DataPathBenchmarks` call `readMetadata(from:)` and `writeMetadata(rating:keywords:toImageAt:)`.
+- **`readMetadata(from:)` must stay stateless, thread-safe and no slower.**
+  - Task 20 calls it from `DispatchQueue.concurrentPerform` during scans.
+  - The coordinator compares `scan1k readMetadata x1000` and its own `readMetadata` over the 190 real JPG and ARW
+    files (which have no sidecars). Neither may rise by more than 5%.
+  - Parse sidecars through ImageIO only when a sidecar exists, and measure.
+- **Edit-parameter writes no longer need a rating read.** Today `writeEditParameters` and `clearEditParameters`
+  rebuild the sidecar from `readMetadata`, which merges in values embedded in the RAW (task 14's follow-up "Where edits
+  get their rating and keywords"). With in-place updates, they change only `phocasa:EditParameters`. Say so in your
+  results.
+- **Star-click tests: `NSApp.currentEvent` pitfall.** `PhotoGridItemViewClickTests` deliver events with
+  `window.sendEvent(_:)`. That doesn't set `NSApp.currentEvent`, so a `clickCount` check that reads
+  `NSApp.currentEvent` will pass or fail for the wrong reason in tests. Choose a design the tests genuinely exercise,
+  and check it with a deliberately broken variant.
+  - `testDoubleClickOnTheStarsOpensWithoutRating` pins today's behaviour: a double-click on the stars opens the
+    photo. The user decided otherwise: it rates and doesn't open. Change that test to match the decision.
+- **Don't drive the real app.** Four agents share one screen and mouse, so synthetic clicks would collide. The
+  coordinator does the real-app check (below) after merging. Hosted-window unit tests are fine. List the real-app
+  items under "Couldn't verify".
+- **Real camera files:** the coordinator may give you `~/PhocasaBenchRAW` (190 Sony JPG+ARW pairs, read-only).
+  For round trips, copy a few files into your own temp dir and write only to the copies. Never commit a test that
+  depends on that folder.
+
 ## A. Update RAW sidecars in place, never rewrite them
 
 Today `writeSidecarToURL` builds a fresh XMP document with only a rating, keywords and Phocasa's edit parameters. Anything else in the file is lost the first time Phocasa rates, tags or edits that RAW.
@@ -89,4 +121,4 @@ Today `writeSidecarToURL` builds a fresh XMP document with only a rating, keywor
 - For pairs, rating and keywords land in both the JPG and the RAW sidecar, and RAW edits survive.
 - A grid star click rates at once. A double-click on a star leaves it set and doesn't open the photo.
 - The full suite passes, with zero new warnings, and no benchmark regresses by more than 5%. `5a`/`5b` measure the main-thread cost, which must not grow; the extra sidecar write runs on `MetadataWriter`'s queue.
-- **Check in the real app** (see `Tools/coordinator/README.md`), on temp copies of `~/PhocasaBenchRAW`: rate a pair and a RAW-only photo, then inspect both files. Put a Lightroom-style sidecar next to a copy, rate it, and check its `crs:` content survives.
+- **Check in the real app** (the coordinator does this after merging; see `Tools/coordinator/README.md`), on temp copies of `~/PhocasaBenchRAW`: rate a pair and a RAW-only photo, then inspect both files. Put a Lightroom-style sidecar next to a copy, rate it, and check its `crs:` content survives.

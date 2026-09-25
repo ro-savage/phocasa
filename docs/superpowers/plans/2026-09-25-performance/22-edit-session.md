@@ -22,10 +22,22 @@ This removes about 15 flags from the view model, along with the manual reset in 
 - Modify: `Phocasa/Phocasa/Views/EditSidebarView.swift`, `Phocasa/Phocasa/Views/CropOverlayView.swift` (bindings only)
 - Modify: `Phocasa/Phocasa/Views/PhotoDetailView.swift` and `Views/Detail/*`: **edit-related references only**. Task 12 already restructured these, so read them first.
 - Modify: `Phocasa/Phocasa/Views/ContentView.swift`: edit-related lines only (the `\` key, Escape handling, the `EditSidebarView` presence)
-- Modify: `Phocasa/PhocasaTests/ViewModelTests.swift`: move the crop and preset tests to `EditSessionTests`, keeping their assertions
+- Modify: `Phocasa/PhocasaTests/ViewModelTests.swift`: move the crop and preset tests to `EditSessionTests`, keeping their assertions. Other `ViewModelTests` that use the editing API may be updated to the session API, with their assertions kept.
+- Modify, if needed: the saved-edit tests in `Phocasa/PhocasaTests/DetailViewTests.swift` (`renderSavedEdit`)
 - Create: `Phocasa/PhocasaTests/EditSessionTests.swift`
 
-**Don't touch:** the scan and availability code (task 20, running in parallel), `ImageLoader` (task 21, running in parallel), `ImageEditingService` internals (task 13, merged).
+**Don't touch:** the scan and availability code (task 20, running in parallel), `ImageLoader` (task 21, running in parallel), `ImageEditingService` internals (task 13, merged), `MetadataService` / `MetadataWriter` (task 23, running in parallel).
+
+**Keep these working for other callers:**
+- `setModelContext` (task 20's region) calls `loadPresets()`.
+- `PhotoGridView`, which no wave-2 task owns, calls `editPresets`, `applyPresetToSelection(_:)` and
+  `revertEditsForPhoto(_:)`.
+- `DetailOverlayControls` calls `isEditing`, `editingRAW`, `startEditing` and `stopEditing`. You own its edit-related
+  references, so you may move it to the session API.
+- `Tools/coordinator/CoordinatorBenchmarks.swift` isn't yours. The coordinator will update its edit tests to your API.
+  Keep the render scheduling the same: 30 ms preview debounce, 300 ms `.full` pass, `lane: .preview` for sized
+  renders and `.full` for full-size ones. The coordinator compares slider-tick latency and first draw against
+  `main`, and they must not regress by more than 5%.
 
 ## Interfaces
 
