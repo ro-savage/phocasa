@@ -91,6 +91,17 @@ that.** When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-m
 - **A line over 5% that the branch doesn't touch:** re-run just that test alternately on both sides with
   `-only-testing:…/<test> -test-iterations 3`, in two separate worktrees so nothing rebuilds between runs. In wave 2
   two such lines were suite-order effects, not regressions.
+- **Edit harness and task 35.** An `EditSession` without `viewportPixelSize` renders its passes natively, so the
+  harness (which has no view) measures the same work on every checkout. To measure the viewport-sized passes, set
+  `session.viewportPixelSize = CGSize(width: 2894, height: 2130)` after `vm.editSession` (code from task 35 on only);
+  `session.fullImageIsNative` says which kind of pass `fullImage` is. Task 35's own gated benchmarks are
+  `EditRenderSizeBenchmarks` (needs `TEST_RUNNER_PHOCASA_TEST_RAW`, and optionally `_2`, naming *copies* of real RAWs;
+  on older code, apply the `sed` line in its header).
+- **Give the suite and the benchmark run different labels.** `runtests.sh` names its DerivedData and log after the
+  label, so a suite and an `ab.sh` run with the same label overwrite each other's log.
+- **`mdb_txn_commit error: MDB_MAP_FULL`** in test logs is Metal's shader-archive usage database for the bundle id
+  (`$(getconf DARWIN_USER_CACHE_DIR)com.phocasa.app/com.apple.metal/archiveUsage.db`) being full after many runs.
+  It's a system cache shared with the user's real app; it only stops usage tracking.
 - **Keep the display awake.** `runtests.sh` (and so `ab.sh`) runs `xcodebuild` under `caffeinate -d -u`. With the
   display asleep (after the idle display-sleep timeout, e.g. overnight), `GridKeepAliveTests` fail (scroll offset 0) and
   image/GPU lines shift, so runs taken with the display off aren't comparable with runs taken with it on.

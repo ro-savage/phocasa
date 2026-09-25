@@ -43,6 +43,12 @@ keep it in step. See `Tools/imagebench/README.md`.
   newest-first scheduler with memory and disk caches; the detail view decodes on the hardware path and applies EXIF
   orientation at display time.
 - **Image editing:** CoreImage + `CIRAWFilter`, non-destructive, rendered on Metal-backed `CIContext`s.
+- **Edit renders are sized to the screen.** The session's pass after each slider pause and the detail view's saved
+  edit are `ImageEditingService`'s sized render (`maxSize` from `EditRenderSize.fitMaxSize`), filling the detail view
+  at fit. They go to native resolution only once the view is zoomed in past them (`ZoomableImageView.onNeedsMorePixels`
+  → `EditSession.requestNativeResolution()` / `SavedEditState.needsMorePixels`). An `EditSession` without
+  `viewportPixelSize` renders its passes natively. Exports are always native. Don't render edits at native size for
+  display.
 - **No third-party dependencies** — all Apple frameworks
 
 ### Project Structure
@@ -61,12 +67,17 @@ Phocasa/
 │   ├── Library/
 │   │   ├── LibraryStore            — the in-memory library: model context, allPhotos/bin + facts, counts, tag
 │   │   │                             lists, the grid (`photos`, `index(of:)`), photosDidChange. Extension files:
-│   │   │   +Loading                  launch (`open`), loadExistingData, file availability
+│   │   │   +Loading                  launch (`open`, a big library loads in the background), loadExistingData,
+│   │   │                             file availability
 │   │   │   +Scan                     folder opening, serialised scans, waitForScans
 │   │   │   +Mutations                rating, tags, bin, deletes (files trashed via FileTrasher), metadata write-back
-│   │   │   +ListEditing              moving photos between library and bin in memory
+│   │   │   +ListEditing              in-memory list edits: bin moves, scan inserts/removals, deletes
 │   │   │   +Filtering                filters, search, sort toggle, tag lists
-│   │   ├── LibrarySort             — THE definition of photo order (fetch sort, key, insertion index, merge, toggle)
+│   │   ├── LibrarySort             — THE definition of photo order: capture date, then creation date (fetch,
+│   │   │                             key, insertion index, merge, toggle, re-order)
+│   │   ├── LibrarySnapshot         — the library as plain values, read in background contexts (launch of a big
+│   │   │                             library): order, facts, counts, stored rows
+│   │   ├── CaptureDateBackfill     — after launch, fills in missing capture dates and re-orders once
 │   │   ├── SelectionModel          — selection, range/select-all, primary photo, grid keyboard navigation
 │   │   ├── PhotoQuery              — SidebarFilter, PhotoFacts, pure filtering/search/facet counts
 │   │   ├── ScanPlan                — StoredPhoto snapshot (background read) and the pure scan diff
@@ -74,7 +85,10 @@ Phocasa/
 │   ├── Editing/
 │   │   ├── EditSession             — one photo's edit: parameters, renders, comparison, crop, export, save/revert
 │   │   ├── RAWEditStore            — RAW edit parameters: saves via MetadataWriter, reads see queued saves
-│   │   └── SavedEdit               — renders the saved edit for the detail view; the session's hand-off
+│   │   ├── EditRenderSize          — how large an edit render must be on screen (fit maxSize from viewport, crop,
+│   │   │                             rotation)
+│   │   └── SavedEdit               — renders the saved edit for the detail view; the session's hand-off;
+│   │                                 SavedEditState (fitted render, native on zoom, next photo prefetched)
 │   ├── Views/                      — ContentView (keys, search, alerts), MainContentView (grid kept alive under
 │   │   │                             the detail view), LibraryToolbar, StatusBarView, SidebarView, PhotoGridView,
 │   │   │                             PhotoGridItemView, RatingView, TagEditorView, EditSidebarView, CropOverlayView,
@@ -84,6 +98,7 @@ Phocasa/
 │   └── Services/
 │       ├── FolderScanner           — walks a folder, pairs JPG+RAW, reads new photos' metadata concurrently
 │       ├── MetadataService         — stateless, thread-safe metadata reads and writes (JPEG splice, sidecars)
+│       ├── CaptureDate             — parses and reads EXIF DateTimeOriginal (subseconds, offset) by hand
 │       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through (re-keys cached
 │       │                             thumbnails after JPEG metadata rewrites)
 │       ├── ImageLoader             — grid thumbnails: size buckets, memory cache, disk cache, invalidation
@@ -108,16 +123,33 @@ Tools/
   `Tag.parse(keyword:)`)
 - **Folder access:** Uses SwiftUI `.fileImporter` for folder selection, security-scoped bookmarks for persistent access
 - **Menu commands:** Uses SwiftUI `FocusedValues` to communicate between App-level commands and views
-- **Data flow:** the library is fetched from the store only by `LibraryStore.loadExistingData()` and by scans. UI
-  interactions (filters, search, sort, rating, tags, bin) work on the in-memory library and its `PhotoFacts` and must
-  never re-fetch:
-  mutations patch the lists, the grid and the counts in place. Code that changes a photo's rating, tags, file paths
-  or file name outside `LibraryStore` calls `photosDidChange(_:)`.
-- **Photo order:** `LibrarySort` is the only definition of photo order. Fetches, insertion into sorted lists, merges
-  and the sort toggle all go through it; don't sort photos anywhere else.
+- **Data flow:** the library is fetched from the store only by `LibraryStore.loadExistingData()`, the launch's
+  background load and scans. UI interactions (filters, search, sort, rating, tags, bin) work on the in-memory library
+  and its `PhotoFacts` and must never re-fetch: mutations patch the lists, the grid and the counts in place. Scans and
+  deletes patch the in-memory library too (`updateLibrary(adding:facts:removing:)`, `fileTypeDeleteDidFinish`,
+  `relocate` in `+ListEditing`) instead of reloading; a scan that finds a full load ran meanwhile
+  (`loading.generation`) reloads instead. Code that changes a photo's rating, tags, file paths or file name outside
+  `LibraryStore` calls `photosDidChange(_:)`.
+- **Photo order:** `LibrarySort` is the only definition of photo order: capture date (`PhotoAsset.captureDate`,
+  EXIF `DateTimeOriginal`) falling back to the file creation date, newest first by default, ties broken by creation
+  date (`LibrarySort.Key`). The store sorts by `(captureDate, creationDate)` and `fetch(where:in:)` merges the dated and
+  undated runs in memory. Fetches, insertion, merges, the toggle and the backfill's re-order all go through it; don't
+  sort photos anywhere else, and don't compare `key(of:)` dates yourself (use `sortKey(of:)`/`precedes`).
+- **Capture dates:** scans store `found.metadata?.captureDate` at both insert sites. After launch (2 s after the launch
+  scans) `CaptureDateBackfill` reads the dates of rows that have none, off the main actor, writes them on the main
+  context in chunks of about 12 ms, and re-orders the in-memory library once (no reload). Rows without a date are
+  re-read on each launch, in the background; empty files (`fileSize == 0`) are skipped.
+- **Launch:** `LibraryStore.open` loads a store of more than 500 photos in the background, as the first job of the scan
+  queue (`isScanning` is true, and `waitForScans()` waits for it). `LibrarySnapshot` is read off the main actor while
+  the main actor fetches the rows as models, 400 per turn (the grid needs filled-in models; each turn stays under a
+  frame). The library then appears whole in one turn, and the launch rescan, queued behind it, reuses the snapshot's
+  rows and a walk started at launch. Smaller stores load synchronously; `loadExistingData()` stays synchronous; a full
+  load since `open` drops the background load.
+- **Bin:** a scan never takes a photo out of the bin (user decision); it still updates a binned photo's paths and size.
 - **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
   rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
-  photos, so an unchanged rescan writes nothing and doesn't reload.
+  photos, so an unchanged rescan writes nothing and changes nothing in memory. One that adds k photos costs
+  O(k log n) on the main actor, or one merge for many.
 - **Thumbnail disk cache** (`Services/ThumbnailDiskCache.swift`): one JPEG per photo and size bucket under
   `Caches/<bundle id>/Thumbnails/v1/<h0h1>/<sha256(path)>/<bucket>-<size>-<mtime>.jpg`, LRU by mtime, 1 GB. The test
   host has none unless `PHOCASA_THUMBNAIL_CACHE_DIR` is set.
@@ -183,10 +215,24 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - **Background contexts:** a background `ModelContext` may read, and may insert rows that have no relationships. It
   must never change, or link to, a row the main context may hold (the main context's later save loses those links).
   Scans insert photos without keywords through a background context and photos with keywords on the main actor.
-- `PhotoAsset.isDeleted` means "in the bin" and collides with SwiftData's own `isDeleted` (spec §H5): reading it
-  returns false after a save, and saving any later change to a binned row writes the flag back as false (a probe in
-  task 30: rating a photo in the bin takes it out of the bin in the store). Read bin membership through a
-  `#Predicate { $0.isDeleted }` fetch, never the property.
+- The bin flag is `PhotoAsset.isInBin`, stored with `@Attribute(originalName: "isDeleted")` (task 31: the old name
+  collided with SwiftData's own `PersistentModel.isDeleted`, spec §H5, so saves of binned rows wrote it back as false).
+  Never name a stored property after a `PersistentModel` / `NSManagedObject` member (`isDeleted`, `isInserted`,
+  `isUpdated`, `hasChanges`, `isFault`, `objectID`, `entity`, `modelContext`). `photo.isDeleted` still compiles, but it
+  is SwiftData's "deleted from the context" flag, and `#Predicate { $0.isDeleted }` crashes at fetch time.
+- **Schema changes** migrate the user's library in place at launch, by SwiftData's automatic lightweight migration
+  (there is no `SchemaMigrationPlan`): new attributes must be optional or have a default value, and renames use
+  `@Attribute(originalName:)`. `MigrationTests` keeps the models as they were before task 31 (`PhocasaSchemaV1`, never
+  edit it) and opens a V1 store with the live models; extend it for every schema change. If a change can't be
+  inferred, move `PhocasaSchemaV1` into `Models/`, add a V2 for the live models and pass `migrationPlan:` in
+  `PhocasaApp` (keep the in-memory test-host branch).
+- Every `PhotoAsset` attribute costs every fetch and save: one `Date?` measured +2–4% on the fetch-bound benchmarks at
+  10k. Measure before adding one.
+- **A `ModelContext` doesn't keep its container alive,** and reading `context.container` once the container is gone
+  traps. The app's container lives as long as the app. Work that runs later against a stored context (a delayed task)
+  holds the container weakly and gives up if it's gone (see `backfillCaptureDatesAfterScans`).
+- A main-context save costs about 7 ms at 10k loaded photos however few rows it writes, plus about 0.13 ms per row.
+  Bulk writes on the main context go in chunks sized by time, with a pause between them (see `CaptureDateBackfill`).
 
 ### Metadata
 
@@ -195,6 +241,10 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - JPEG writes splice only ImageIO's new XMP/IPTC segments into the original bytes (the camera's MakerNote and other
   segments survive), falling back to ImageIO's full rewrite for files the splice can't handle. Writes go through a
   temp file and `replaceItemAt`.
+- Capture dates come from the metadata tree `readMetadata` already copies: ImageIO shows `DateTimeOriginal` as
+  `photoshop:DateCreated` (ISO 8601, subseconds merged in) and the offset as `exif:OffsetTimeOriginal`. No offset means
+  local time, in the time zone current when the file is read. Parse by hand (`CaptureDate`), never with
+  `DateFormatter`.
 
 ### Thumbnail cache
 
@@ -213,6 +263,13 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 
 ### Testing
 
+- `MigrationTests` and `BinFlagTests` use temp store files they delete; never point a test at the real store.
+- `library.loading.backgroundLoadThreshold` (and `pageSize`) put small test stores on the background launch path.
+- Test hooks stored on a `LibraryStore` (`scanWillSave`, `loading.backgroundLoadDidApply`,
+  `captureDates.didApplyChunk`) capture their view model or library `[unowned]`/`[weak]`: a strong capture is a retain
+  cycle that keeps the library alive after the test, and its after-launch work then runs against a released
+  container.
+- Hosted-window tests (`GridKeepAliveTests`) need the display awake: run `xcodebuild test` under `caffeinate -d -u`.
 - The test host (`XCTestConfigurationFilePath` set) uses an in-memory SwiftData store, and `ImageLoader.shared` has no
   disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names a folder (pass `TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR`).
   Tests must never open or modify anything under `~/Library/Application Support` (the user's real library) or write to
