@@ -111,6 +111,37 @@ enum SavedEdit {
         return image.map { SavedEditRender(key: key, image: $0, fittedMaxSize: maxSize, sourceSize: source) }
     }
 
+    /// The saved edit `render(for:)` would show first for `photo`: its JPG edit, else its RAW edit (the sidecar read
+    /// off the main thread).
+    @MainActor
+    static func winningKey(for photo: PhotoAsset) async -> SavedEditKey? {
+        if let params = photo.jpgEditParameters, !params.isDefault, photo.jpgPath != nil {
+            return SavedEditKey(isRAW: false, parameters: params)
+        }
+        guard let rawPath = photo.rawPath, let params = await RAWEditStore.shared.load(forRAWAt: rawPath),
+              !params.isDefault else { return nil }
+        return SavedEditKey(isRAW: true, parameters: params)
+    }
+
+    /// Whether `render`, made earlier, still shows `photo`'s saved edit, with the pixels of a render fitting
+    /// `viewport` (nil: native).
+    @MainActor
+    static func isCurrent(_ render: SavedEditRender, for photo: PhotoAsset, fitting viewport: CGSize?) async -> Bool {
+        guard await winningKey(for: photo) == render.key else { return false }
+        var wanted: CGSize?
+        if let viewport, let source = render.sourceSize {
+            wanted = EditRenderSize.fitMaxSize(native: source, parameters: render.key.parameters, viewport: viewport)
+        }
+        return EditRenderSize.covers(render.fittedMaxSize, wanted)
+    }
+
+    /// Whether the model says `photo` has a saved edit worth rendering ahead: a JPG edit, or a RAW edit flagged by
+    /// `hasRawEdits` (set whenever Phocasa saves one).
+    static func mayHaveSavedEdit(_ photo: PhotoAsset) -> Bool {
+        if let params = photo.jpgEditParameters, !params.isDefault, photo.jpgPath != nil { return true }
+        return photo.hasRawEdits && photo.rawPath != nil
+    }
+
     /// What the detail view shows right after `handoff`, until `render(for:reusing:)` has resolved the saved edit
     /// again. It follows the same precedence (a JPG edit wins over a RAW one) with what is known without reading the
     /// sidecar:
@@ -144,7 +175,10 @@ enum SavedEdit {
 ///   resolution: for a 16 MP RAW, a quarter to a third of the bytes.
 /// - `needsMorePixels` renders it natively once the view is zoomed in past that, or larger when the viewport grew.
 /// - After an editing session saved this photo, `adopt` resolves it again, reusing the session's render.
+/// - `prefetch` renders the next photo's saved edit ahead, so navigating to it shows the edit at once. At fit size a
+///   render is small enough to keep one ahead; a RAW's cost is mostly its decode, which a smaller size doesn't cut.
 /// Only the latest request may assign `render`: a new photo, a hand-off or an upgrade supersedes older ones.
+/// Prefetches outlive navigation (`invalidate`), and are checked against the photo's saved edit when used.
 @Observable @MainActor
 final class SavedEditState {
     /// The saved edit on screen; nil when the photo has none, or while it is being resolved.
@@ -154,6 +188,8 @@ final class SavedEditState {
 
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var adoptTask: Task<Void, Never>?
+    /// Saved-edit renders started ahead (`prefetch`), by photo. `resolve` takes its photo's.
+    @ObservationIgnored private var prefetched: [UUID: Task<SavedEditRender?, Never>] = [:]
     /// The upgrade in flight and the size it renders (nil: native).
     @ObservationIgnored private var upgrade: (task: Task<Void, Never>, target: CGSize?)?
 
@@ -171,17 +207,49 @@ final class SavedEditState {
     }
 
     /// Resolves `photo`'s saved edit and renders it to fill `viewport` (device pixels) at fit; nil renders natively.
-    /// `handoff`: a session that just saved this photo, whose render is reused when it has the pixels.
+    /// A prefetched render is used (waiting for it if it is still running) when it still shows the photo's saved
+    /// edit with the pixels wanted. `handoff`: a session that just saved this photo, whose render is reused when it
+    /// has the pixels.
     func resolve(for photo: PhotoAsset, fitting viewport: CGSize?, reusing handoff: SavedEditHandoff?) async {
         generation += 1
         let generation = self.generation
         upgrade?.task.cancel()
         upgrade = nil
-        let rendered = await SavedEdit.render(for: photo, fitting: viewport, reusing: handoff)
+        let ahead = prefetched.removeValue(forKey: photo.id)
+        var rendered: SavedEditRender?
+        if handoff == nil, let ahead, let candidate = await ahead.value,
+           await SavedEdit.isCurrent(candidate, for: photo, fitting: viewport) {
+            rendered = candidate
+        } else {
+            guard !Task.isCancelled, generation == self.generation else { return }
+            rendered = await SavedEdit.render(for: photo, fitting: viewport, reusing: handoff)
+        }
         guard !Task.isCancelled, generation == self.generation else { return }
         render = rendered
         if let handoff { adoptedHandoffID = handoff.id }
     }
+
+    /// Renders the saved edits of `photos` (the next photos the view may show) ahead, to fill `viewport` at fit.
+    /// Photos without a saved edit are skipped. Renders for photos no longer in `photos` are dropped.
+    func prefetch(_ photos: [PhotoAsset], fitting viewport: CGSize?) {
+        let wanted = Set(photos.map(\.id))
+        for (id, task) in prefetched where !wanted.contains(id) {
+            task.cancel()
+            prefetched[id] = nil
+        }
+        for photo in photos where prefetched[photo.id] == nil && SavedEdit.mayHaveSavedEdit(photo) {
+            prefetched[photo.id] = Task { await SavedEdit.render(for: photo, fitting: viewport) }
+        }
+    }
+
+    /// Drops every prefetched render (the detail view closed, or an export rewrote a file).
+    func discardPrefetches() {
+        for task in prefetched.values { task.cancel() }
+        prefetched = [:]
+    }
+
+    /// The photos with a prefetched saved edit. For tests.
+    var prefetchedPhotoIDs: Set<UUID> { Set(prefetched.keys) }
 
     /// A session just saved `photo`: resolves its saved edit again, reusing the session's render.
     func adopt(_ handoff: SavedEditHandoff, for photo: PhotoAsset, fitting viewport: CGSize?) {

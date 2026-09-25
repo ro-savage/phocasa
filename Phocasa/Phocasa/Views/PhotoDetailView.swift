@@ -177,6 +177,7 @@ struct PhotoDetailView: View {
             // Leaving the detail view: give back the decoded photos (up to 512 MB), as before task 12.
             fullResolutionTask?.cancel()
             savedEdit.invalidate()
+            savedEdit.discardPrefetches()
             FullImageLoader.shared.clear()
         }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
@@ -222,8 +223,9 @@ struct PhotoDetailView: View {
         let filesVersion = viewModel.editedFilesVersion
         guard path != loadedPath || filesVersion != loadedFilesVersion, !path.isEmpty else { return }
         if let loadedFilesVersion, loadedFilesVersion != filesVersion {
-            // An export rewrote a photo file, so cached decodes may hold its old pixels.
+            // An export rewrote a photo file, so cached decodes and renders may hold its old pixels.
             FullImageLoader.shared.clear()
+            savedEdit.discardPrefetches()
         }
         requestedPath = path
         fullResolutionTask?.cancel()
@@ -252,22 +254,27 @@ struct PhotoDetailView: View {
             loadedFilesVersion = filesVersion
             zoomState.reset()
         }
-        prefetchNeighbours(of: photo, viewport: viewport)
+        let next = prefetchNeighbours(of: photo, viewport: viewport)
 
         // Saved edits: a JPG edit render wins over a RAW one, rendered on the .full lane to fill the viewport.
         await savedEdit.resolve(for: photo, fitting: knownViewportPixelSize,
                                 reusing: viewModel.savedEditHandoff.flatMap { $0.photoID == photo.id ? $0 : nil })
         guard !Task.isCancelled else { return }
+        // Then the next photo's saved edit, ahead. Not while editing: the session's passes use the same lane.
+        if viewModel.editSession == nil {
+            savedEdit.prefetch(next.map { [$0] } ?? [], fitting: knownViewportPixelSize)
+        }
 
         let thumbnail = await ImageLoader.shared.loadThumbnail(for: path, maxSize: 400)
         guard !Task.isCancelled else { return }
         minimapThumbnail = thumbnail.flatMap(DisplayImage.init(nsImage:))
     }
 
-    /// Prefetches the photos either side, plus a second one in the direction of travel.
-    private func prefetchNeighbours(of photo: PhotoAsset, viewport: CGSize) {
+    /// Prefetches the photos either side, plus a second one in the direction of travel. Returns the next photo in
+    /// the direction of travel, if any.
+    private func prefetchNeighbours(of photo: PhotoAsset, viewport: CGSize) -> PhotoAsset? {
         let photos = viewModel.library.photos
-        guard let index = viewModel.library.index(of: photo.id) else { return }
+        guard let index = viewModel.library.index(of: photo.id) else { return nil }
         let step = (lastIndex.map { index < $0 } ?? false) ? -1 : 1
         lastIndex = index
         let paths = [index + step, index + 2 * step, index - step]
@@ -275,6 +282,7 @@ struct PhotoDetailView: View {
             .map { photos[$0].displayPath }
             .filter { !$0.isEmpty }
         FullImageLoader.shared.prefetchFit(paths: paths, viewportPixelSize: viewport)
+        return photos.indices.contains(index + step) ? photos[index + step] : nil
     }
 
     /// The image on screen is drawn with more device pixels than it has (zoomed in, the viewport grew, a RAW

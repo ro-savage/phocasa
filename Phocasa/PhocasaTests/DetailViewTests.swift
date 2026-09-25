@@ -544,7 +544,105 @@ final class DetailEditRenderSizeTests: XCTestCase {
         XCTAssertEqual(state.render?.fittedMaxSize, CGSize(width: 1200, height: 800), "the first photo's native render didn't land")
     }
 
+    // MARK: SavedEditState prefetch
+
+    /// Navigating to the prefetched photo shows its saved edit without rendering it again (it joins the prefetch
+    /// if that is still running).
+    func testPrefetchedSavedEditIsShownWithoutRenderingAgain() async throws {
+        let next = try insertPhoto(savedEdit: exposure(1), name: "next.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        state.prefetch([next], fitting: viewport)
+        let started = await waitFor { ImageEditingService.shared.renderCount > rendersBefore ? true : nil }
+        XCTAssertNotNil(started, "the prefetch renders before the photo is shown")
+        state.invalidate()   // navigating to it
+        state.clear()
+        await state.resolve(for: next, fitting: viewport, reusing: nil)
+
+        XCTAssertEqual(state.render?.key.parameters, exposure(1))
+        XCTAssertEqual(pixelSize(state.render?.image), CGSize(width: 1200, height: 800))
+        XCTAssertEqual(ImageEditingService.shared.renderCount - rendersBefore, 1, "only the prefetch rendered")
+    }
+
+    /// A prefetched render whose saved edit changed since is not shown.
+    func testPrefetchedRenderOfAChangedEditIsRenderedAgain() async throws {
+        let next = try insertPhoto(savedEdit: exposure(1), name: "next.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        state.prefetch([next], fitting: viewport)
+
+        next.jpgEditParameters = exposure(-1)
+        await state.resolve(for: next, fitting: viewport, reusing: nil)
+
+        XCTAssertEqual(state.render?.key.parameters, exposure(-1))
+    }
+
+    /// A prefetched render too small for the viewport now (the window grew) is not shown.
+    func testPrefetchedRenderTooSmallForTheViewportIsRenderedAgain() async throws {
+        let next = try insertPhoto(savedEdit: exposure(1), name: "next.jpg")
+        let state = SavedEditState()
+        state.prefetch([next], fitting: CGSize(width: 1200, height: 1000))
+
+        await state.resolve(for: next, fitting: CGSize(width: 1800, height: 1500), reusing: nil)
+
+        XCTAssertEqual(pixelSize(state.render?.image), CGSize(width: 1800, height: 1200))
+    }
+
+    func testPrefetchSkipsPhotosWithoutSavedEdits() async throws {
+        let plain = try insertPhoto(name: "plain.jpg")
+        let state = SavedEditState()
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        state.prefetch([plain], fitting: CGSize(width: 1200, height: 1000))
+        try await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertEqual(ImageEditingService.shared.renderCount, rendersBefore)
+    }
+
+    /// A new prefetch set drops renders of photos no longer next.
+    func testANewPrefetchSetDropsTheOldOne() async throws {
+        let first = try insertPhoto(savedEdit: exposure(1), name: "first.jpg")
+        let second = try insertPhoto(savedEdit: exposure(0.5), name: "second.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        state.prefetch([first], fitting: viewport)
+        state.prefetch([second], fitting: viewport)
+        try await Task.sleep(for: .milliseconds(300))
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        await state.resolve(for: first, fitting: viewport, reusing: nil)
+
+        XCTAssertEqual(ImageEditingService.shared.renderCount - rendersBefore, 1, "the first photo renders again")
+        XCTAssertEqual(state.prefetchedPhotoIDs, Set([second.id]))
+    }
+
     // MARK: In the detail view (hosted)
+
+    /// The detail view prefetches the next photo's saved edit, so navigating to it renders nothing more.
+    func testDetailViewPrefetchesTheNextSavedEdit() throws {
+        let first = try insertPhoto(name: "a.jpg")
+        first.creationDate = Date()
+        let second = try insertPhoto(savedEdit: exposure(1), name: "b.jpg")
+        second.creationDate = Date().addingTimeInterval(-60)
+        try context.save()
+        let state = SavedEditState()
+        let rendersBefore = ImageEditingService.shared.renderCount
+        let (viewModel, _) = host(first, zoom: ZoomPanState(), savedEdit: state)
+        XCTAssertEqual(viewModel.library.photos.map(\.id), [first.id, second.id])
+
+        XCTAssertNotNil(spin(until: { state.prefetchedPhotoIDs == Set([second.id]) ? true : nil }), "the next photo's edit is prefetched")
+        XCTAssertNotNil(spin(until: { ImageEditingService.shared.renderCount > rendersBefore ? true : nil }))
+        _ = spin(seconds: 0.5, until: { nil as Bool? })
+        let rendersAfterPrefetch = ImageEditingService.shared.renderCount
+
+        viewModel.navigateDetail(direction: 1)
+
+        let shown = spin(until: { state.render?.key.parameters == exposure(1) ? state.render : nil })
+        XCTAssertNotNil(shown, "the next photo's saved edit is shown")
+        XCTAssertEqual(ImageEditingService.shared.renderCount, rendersAfterPrefetch, "from the prefetch, no render")
+    }
 
     /// Hosts the detail view in a 400×300 pt window with the given zoom and saved-edit state.
     private func host(_ photo: PhotoAsset, zoom: ZoomPanState, savedEdit: SavedEditState) -> (PhotoLibraryViewModel, CGSize) {
@@ -556,8 +654,8 @@ final class DetailEditRenderSizeTests: XCTestCase {
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         windows.append(window)
-        window.contentView = NSHostingView(rootView: PhotoDetailView(viewModel: viewModel, photo: photo,
-                                                                     zoom: zoom, savedEdit: savedEdit))
+        window.contentView = NSHostingView(rootView: InjectedDetailHost(viewModel: viewModel, zoom: zoom,
+                                                                        savedEdit: savedEdit))
         let scale = window.backingScaleFactor
         return (viewModel, CGSize(width: 400 * scale, height: 300 * scale))
     }
@@ -619,6 +717,18 @@ private struct DetailHost: View {
     var body: some View {
         if let photo = viewModel.selectedDetailPhoto {
             PhotoDetailView(viewModel: viewModel, photo: photo)
+        }
+    }
+}
+
+/// `DetailHost` with the zoom and saved-edit state given, so a test can drive and observe them.
+private struct InjectedDetailHost: View {
+    let viewModel: PhotoLibraryViewModel
+    let zoom: ZoomPanState
+    let savedEdit: SavedEditState
+    var body: some View {
+        if let photo = viewModel.selectedDetailPhoto {
+            PhotoDetailView(viewModel: viewModel, photo: photo, zoom: zoom, savedEdit: savedEdit)
         }
     }
 }
