@@ -78,9 +78,7 @@ final class PhotoLibraryViewModel {
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
         if selection.isPartOfMultiSelection(photo) {
             let selected = selection.selectedPhotosList
-            let allHave = selected.allSatisfy { $0.tags.contains { $0.id == tag.id } }
-
-            if allHave {
+            if Self.tagIDsAllHave(selected, in: library).contains(tag.id) {
                 library.removeTag(tag, from: selected)
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
@@ -94,12 +92,29 @@ final class PhotoLibraryViewModel {
         }
     }
 
+    /// Whether the context menu on `photo` shows `tag` as checked (see `contextMenuTagIDs(for:)`).
     func contextMenuTagState(_ tag: Tag, for photo: PhotoAsset) -> Bool {
+        contextMenuTagIDs(for: photo).contains(tag.id)
+    }
+
+    /// The tags the context menu on `photo` shows as checked: those every photo `toggleTag` would act on has (the
+    /// selection when `photo` is part of a multi-selection). Computed once per menu from the in-memory facts, not by
+    /// reading every selected photo's tags for each tag in the menu.
+    func contextMenuTagIDs(for photo: PhotoAsset) -> Set<UUID> {
         if selection.isPartOfMultiSelection(photo) {
-            return selection.selectedPhotosList.allSatisfy { $0.tags.contains { $0.id == tag.id } }
-        } else {
-            return photo.tags.contains { $0.id == tag.id }
+            return Self.tagIDsAllHave(selection.selectedPhotosList, in: library)
         }
+        return library.tagIDs(of: photo)
+    }
+
+    /// The tags every one of `photos` has. With no photos, every tag (as `allSatisfy` over nothing is true).
+    private static func tagIDsAllHave(_ photos: [PhotoAsset], in library: LibraryStore) -> Set<UUID> {
+        guard let first = photos.first else { return Set(library.allTags.map(\.id)) }
+        var common = library.tagIDs(of: first)
+        for photo in photos.dropFirst() where !common.isEmpty {
+            common.formIntersection(library.tagIDs(of: photo))
+        }
+        return common
     }
 
     func openTagEditorForContextMenu(photo: PhotoAsset) {

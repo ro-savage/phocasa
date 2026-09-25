@@ -144,9 +144,13 @@ extension LibraryStore {
                 // Both file type filters active — normal soft delete
                 photo.isDeleted = true
             } else if deleteRAW && photo.hasRawPair {
-                trashRAWFile(for: photo)
+                Self.moveToTrash(Self.files(of: photo, jpg: false, raw: true))
+                photo.rawPath = nil
+                photo.hasRawEdits = false
             } else if deleteJPG && photo.hasRawPair {
-                trashJPGFile(for: photo)
+                Self.moveToTrash(Self.files(of: photo, jpg: true, raw: false))
+                photo.jpgPath = nil
+                photo.jpgEditParametersData = nil
             } else {
                 // Non-paired photo: normal soft delete
                 photo.isDeleted = true
@@ -156,48 +160,40 @@ extension LibraryStore {
         loadExistingData()
     }
 
-    private func trashRAWFile(for photo: PhotoAsset) {
-        if let rawPath = photo.rawPath {
-            try? FileManager.default.trashItem(at: URL(fileURLWithPath: rawPath), resultingItemURL: nil)
-            // Clean up XMP sidecar
-            let sidecarURL = URL(fileURLWithPath: rawPath).xmpSidecarURL
-            if FileManager.default.fileExists(atPath: sidecarURL.path) {
-                try? FileManager.default.trashItem(at: sidecarURL, resultingItemURL: nil)
-            }
-        }
-        photo.rawPath = nil
-        photo.hasRawEdits = false
-    }
-
-    private func trashJPGFile(for photo: PhotoAsset) {
-        if let jpgPath = photo.jpgPath {
-            try? FileManager.default.trashItem(at: URL(fileURLWithPath: jpgPath), resultingItemURL: nil)
-        }
-        photo.jpgPath = nil
-        photo.jpgEditParametersData = nil
-    }
-
     /// Moves the photos' files (and RAW sidecars) to the Trash and deletes the photos from the store.
     func deletePermanently(_ photosToDelete: [PhotoAsset]) {
         guard let context = modelContext else { return }
 
         for photo in photosToDelete {
-            if let jpgPath = photo.jpgPath {
-                try? FileManager.default.trashItem(at: URL(fileURLWithPath: jpgPath), resultingItemURL: nil)
-            }
-            if let rawPath = photo.rawPath {
-                try? FileManager.default.trashItem(at: URL(fileURLWithPath: rawPath), resultingItemURL: nil)
-                // Clean up XMP sidecar
-                let sidecarURL = URL(fileURLWithPath: rawPath).xmpSidecarURL
-                if FileManager.default.fileExists(atPath: sidecarURL.path) {
-                    try? FileManager.default.trashItem(at: sidecarURL, resultingItemURL: nil)
-                }
-            }
+            Self.moveToTrash(Self.files(of: photo, jpg: true, raw: true))
             context.delete(photo)
         }
 
         try? context.save()
         loadExistingData()
+    }
+
+    /// The files a delete moves to the Trash: the photo's JPG (`jpg`) and/or its RAW (`raw`) together with the RAW's
+    /// XMP sidecar. Every delete uses this one list.
+    static func files(of photo: PhotoAsset, jpg: Bool, raw: Bool) -> [URL] {
+        var urls: [URL] = []
+        if jpg, let jpgPath = photo.jpgPath {
+            urls.append(URL(fileURLWithPath: jpgPath))
+        }
+        if raw, let rawPath = photo.rawPath {
+            let rawURL = URL(fileURLWithPath: rawPath)
+            urls.append(rawURL)
+            urls.append(rawURL.xmpSidecarURL)
+        }
+        return urls
+    }
+
+    /// Moves each of `urls` that exists to the Trash, in order. Failures are ignored, as before.
+    private static func moveToTrash(_ urls: [URL]) {
+        let fm = FileManager.default
+        for url in urls where fm.fileExists(atPath: url.path) {
+            try? fm.trashItem(at: url, resultingItemURL: nil)
+        }
     }
 
     // MARK: - Background Metadata Write-back

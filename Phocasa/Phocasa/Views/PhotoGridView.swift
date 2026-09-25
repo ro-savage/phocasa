@@ -183,16 +183,19 @@ struct PhotoGridView: View {
 
     @ViewBuilder
     private func tagMenuContent(for photo: PhotoAsset) -> some View {
+        // Which tags are checked, worked out once for the whole menu.
+        let checked = viewModel.contextMenuTagIDs(for: photo)
+
         ForEach(viewModel.library.tagCategories, id: \.self) { category in
             Menu(category.capitalized) {
-                ForEach(viewModel.library.allTags.filter { $0.category == category }, id: \.id) { tag in
-                    tagToggleButton(tag, for: photo)
+                ForEach(viewModel.library.tagsByCategory[category] ?? [], id: \.id) { tag in
+                    tagToggleButton(tag, for: photo, isChecked: checked.contains(tag.id))
                 }
             }
         }
 
         ForEach(viewModel.library.uncategorizedTags, id: \.id) { tag in
-            tagToggleButton(tag, for: photo)
+            tagToggleButton(tag, for: photo, isChecked: checked.contains(tag.id))
         }
 
         if !viewModel.library.allTags.isEmpty {
@@ -205,11 +208,11 @@ struct PhotoGridView: View {
     }
 
     @ViewBuilder
-    private func tagToggleButton(_ tag: Tag, for photo: PhotoAsset) -> some View {
+    private func tagToggleButton(_ tag: Tag, for photo: PhotoAsset, isChecked: Bool) -> some View {
         Button {
             viewModel.toggleTag(tag, for: photo)
         } label: {
-            if viewModel.contextMenuTagState(tag, for: photo) {
+            if isChecked {
                 Label(tag.name, systemImage: "checkmark")
             } else {
                 Text(tag.name)

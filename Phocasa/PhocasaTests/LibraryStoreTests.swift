@@ -406,4 +406,16 @@ final class LibraryStoreTests: LibraryTestCase {
         library.applyFilter(.all)
         XCTAssertFalse(library.hasFileTypeFilter)
     }
+
+    /// Every delete trashes the files this one list names: the JPG, and the RAW with its XMP sidecar.
+    func testFilesToTrashIncludeTheRAWSidecar() {
+        let pair = PhotoAsset(fileName: "p", jpgPath: "/f/p.jpg", rawPath: "/f/p.arw", folderPath: "/f")
+        let jpgOnly = PhotoAsset(fileName: "j", jpgPath: "/f/j.jpg", folderPath: "/f")
+        let paths = { (urls: [URL]) in urls.map(\.path) }
+
+        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: true, raw: true)), ["/f/p.jpg", "/f/p.arw", "/f/p.xmp"])
+        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: false, raw: true)), ["/f/p.arw", "/f/p.xmp"])
+        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: true, raw: false)), ["/f/p.jpg"])
+        XCTAssertEqual(paths(LibraryStore.files(of: jpgOnly, jpg: true, raw: true)), ["/f/j.jpg"])
+    }
 }

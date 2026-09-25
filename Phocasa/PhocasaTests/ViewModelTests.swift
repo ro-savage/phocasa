@@ -428,6 +428,33 @@ final class ViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.library.tagCounts[x.id])
     }
 
+    /// The context menu's checked tags come from the in-memory facts, once per menu. They must be what reading each
+    /// targeted photo's tags gives: the tags all selected photos share, or the clicked photo's own.
+    func testContextMenuTagIDsMatchTheTargetedPhotosTags() {
+        let photos = (0..<4).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.library.addTag(name: "shared", category: "cat", to: photos[0])
+        viewModel.library.addTag(name: "shared", category: "cat", to: photos[1])
+        viewModel.library.addTag(name: "shared", category: "cat", to: photos[2])
+        viewModel.library.addTag(name: "some", category: "", to: photos[0])
+        viewModel.library.addTag(name: "one", category: "cat", to: photos[3])
+        let tags = viewModel.library.allTags
+        func fromModels(_ targets: [PhotoAsset]) -> Set<UUID> {
+            Set(tags.filter { tag in targets.allSatisfy { $0.tags.contains { $0.id == tag.id } } }.map(\.id))
+        }
+
+        viewModel.selection.selectedPhotos = [photos[0].id, photos[1].id, photos[2].id]
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[1]), fromModels(Array(photos[0...2])))
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[1]).count, 1, "only the shared tag")
+        // A photo outside the selection: its own tags.
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[3]), fromModels([photos[3]]))
+        viewModel.selection.selectedPhotos = [photos[0].id]
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[0]), fromModels([photos[0]]))
+        for tag in tags {
+            XCTAssertEqual(viewModel.contextMenuTagState(tag, for: photos[0]), photos[0].tags.contains { $0.id == tag.id })
+        }
+    }
+
     func testNavigateDetailMovesThroughGridOrder() {
         let a = insertPhoto(name: "a", creationDate: date(3000))
         let b = insertPhoto(name: "b", creationDate: date(2000))

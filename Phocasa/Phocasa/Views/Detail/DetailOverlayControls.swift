@@ -2,9 +2,9 @@ import SwiftUI
 
 /// File name, position, tags, edit buttons, rating and the previous/next chevrons over the detail image.
 ///
-/// Equatable by identity (`.equatable()` at the call site): the container re-evaluates on every slider tick,
-/// and without this the `firstIndex` lookup below (O(N) in the library) would run each time. Changes to
-/// what this view reads from the view model and the photo still re-render it through Observation.
+/// Equatable by identity (`.equatable()` at the call site): the container re-evaluates on every slider tick, and
+/// this body needn't. Changes to what this view reads from the view model and the photo still re-render it through
+/// Observation.
 /// (`@preconcurrency`: SwiftUI compares views on the main actor.)
 struct DetailOverlayControls: View, @preconcurrency Equatable {
     let viewModel: PhotoLibraryViewModel
@@ -31,9 +31,7 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
                             .foregroundStyle(.white.opacity(0.7))
                     }
 
-                    // O(N); runs only when this view re-renders (not on zoom or pan frames). Task 30 swaps it
-                    // for an index lookup.
-                    if let index = viewModel.library.photos.firstIndex(where: { $0.id == photo.id }) {
+                    if let index = viewModel.library.index(of: photo.id) {
                         Text("\(index + 1) / \(viewModel.library.photos.count)")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.7))

@@ -232,6 +232,14 @@ final class LibraryStore {
         return nil
     }
 
+    /// The ids of the photo's tags, from the in-memory facts: no model reads when the photo is in the grid.
+    func tagIDs(of photo: PhotoAsset) -> Set<UUID> {
+        if let position = position(of: photo.id, useIndex: true) {
+            return (position.inBin ? binFacts : allFacts)[position.index].tagIDs
+        }
+        return Set(photo.tags.map(\.id))
+    }
+
     /// A linear scan that reads only the `id` field of each element (no struct copies).
     private static func firstIndex(of id: UUID, in facts: [PhotoFacts]) -> Int? {
         facts.withUnsafeBufferPointer { buffer in
