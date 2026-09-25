@@ -46,6 +46,18 @@ final class DataPathBenchmarks: XCTestCase {
         report(tag, label, samples)
     }
 
+    /// Like `bench`, but runs `setup` untimed before each timed `body`, so every run measures a change.
+    private func benchChange(_ tag: String, _ label: String, warmup: Int = 1, runs: Int = 5,
+                             setup: () -> Void, _ body: () -> Void) {
+        for _ in 0..<warmup { setup(); body() }
+        var samples: [Double] = []
+        for _ in 0..<runs {
+            setup()
+            samples.append(ms(clock.measure { body() }))
+        }
+        report(tag, label, samples)
+    }
+
     private func benchAsync(_ tag: String, _ label: String, warmup: Int = 1, runs: Int = 5,
                             _ body: () async throws -> Void) async throws {
         for _ in 0..<warmup { try await body() }
@@ -203,6 +215,21 @@ final class DataPathBenchmarks: XCTestCase {
         bench(tag, "3c applyFilter(.all)") { vm.applyFilter(.all) }
         bench(tag, "3d toggleSortOrder()") { vm.toggleSortOrder() }
         if !vm.sortNewestFirst { vm.toggleSortOrder() }
+        // 3e–3h (added by task 10): 3a–3c repeat the same click, which an in-memory data path can
+        // answer without work. These change the filter on every run.
+        benchChange(tag, "3e applyFilter(.rated(3)) from no filter", setup: { vm.applyFilter(.all) }) {
+            vm.applyFilter(.rated(3))
+        }
+        benchChange(tag, "3f applyFilter(.tag(people-0)) from no filter", setup: { vm.applyFilter(.all) }) {
+            vm.applyFilter(.tag(tagId))
+        }
+        benchChange(tag, "3g applyFilter(.all) from .rated(3)", setup: { vm.applyFilter(.rated(3)) }) {
+            vm.applyFilter(.all)
+        }
+        benchChange(tag, "3h applyFilter(.rated(4)) replacing .rated(3)", setup: { vm.applyFilter(.rated(3)) }) {
+            vm.applyFilter(.rated(4))
+        }
+        vm.applyFilter(.all)
         print("BENCH|\(tag)|info|rated3=\(rated3Count)|tagPeople0=\(tagCount)")
 
         // 4
@@ -212,6 +239,14 @@ final class DataPathBenchmarks: XCTestCase {
             vm.applyCurrentFilter()
         }
         print("BENCH|\(tag)|info|searchMatches=\(vm.photos.count)")
+        // 4b (added by task 10): 4 repeats the same text; this changes it on every run.
+        benchChange(tag, "4b search keystroke '' -> 't' (text changes every run)", setup: {
+            vm.searchText = ""
+            vm.applyCurrentFilter()
+        }) {
+            vm.searchText = "t"
+            vm.applyCurrentFilter()
+        }
         vm.searchText = ""
         vm.applyFilter(.all)
 
@@ -229,6 +264,27 @@ final class DataPathBenchmarks: XCTestCase {
             flip.toggle()
             vm.setRating(flip ? 4 : 3, for: target2)
         }
+
+        // 8 bin moves and batch rating (added by task 10; each run moves a different photo)
+        vm.applyFilter(.all)
+        let binTargets = Array(vm.photos.prefix(6)) // 1 warmup + 5 runs
+        var nextTarget = 0
+        bench(tag, "8a moveToBin single photo") {
+            vm.deletePhoto(binTargets[nextTarget])
+            nextTarget += 1
+        }
+        nextTarget = 0
+        bench(tag, "8b restoreFromBin single photo") {
+            vm.restoreFromBin([binTargets[nextTarget]])
+            nextTarget += 1
+        }
+        XCTAssertEqual(vm.allPhotos.count, n)
+        vm.selectedPhotos = Set(vm.photos.prefix(50).map(\.id))
+        bench(tag, "8c setRatingForSelection 50 photos") {
+            flip.toggle()
+            vm.setRatingForSelection(flip ? 4 : 3)
+        }
+        vm.selectedPhotos = []
         try await Task.sleep(for: .milliseconds(500)) // let detached metadata writes drain
 
         // 6 in-memory baselines
