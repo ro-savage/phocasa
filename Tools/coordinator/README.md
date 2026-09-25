@@ -61,8 +61,9 @@ The wave-1 quiet baseline and results are in `docs/superpowers/plans/2026-09-25-
 
 ## Checking the real app without touching the user's library
 
-A normal launch opens the user's real SwiftData store (`~/Library/Application Support/default.store`). **Never do
-that.** When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-memory store instead.
+A normal launch opens the user's real SwiftData store: `~/Library/Application Support/Phocasa/Phocasa.store`, where
+the first launch of a build from 2026-09-26 on moves `~/Library/Application Support/default.store`. **Never do that.**
+When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-memory store instead.
 
 1. **Photos:** make a writable temp copy of some test photos. Include rotated ones (`orient`), and remove one JPG to
    get a RAW-only photo:
@@ -70,7 +71,7 @@ that.** When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-m
 2. **Build** with `xcodebuild … -derivedDataPath "$TMPDIR/phocasa-dd-coord-app" build`, and check for 0 source warnings.
 3. **Launch the binary directly**, in the background:
    `XCTestConfigurationFilePath=/dev/null/in-memory "$TMPDIR/phocasa-dd-coord-app/Build/Products/Debug/Phocasa.app/Contents/MacOS/Phocasa"`.
-   Confirm with `lsof -p <pid> | grep -c default.store` that it's `0`.
+   Confirm with `lsof -p <pid> | grep -c "\.store"` that it's `0` (neither `Phocasa.store` nor `default.store`).
 4. **Drive it.** The terminal needs Accessibility and Screen Recording permission; the user granted both on 2026-09-25.
    - Bring it to the front and size it: `tell application "System Events" to tell process "Phocasa" …`.
    - Open the folder: Cmd-O, then Cmd-Shift-G, type the path, Return, Return.
@@ -113,6 +114,12 @@ that.** When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-m
 - **Focus moves.** Another window can come to the front between commands, or the window can move. Before *every*
   click or key, pin the window in the same shell command:
   `osascript -e 'tell application "System Events" to tell process "Phocasa"' -e 'set frontmost to true' -e 'set position of window 1 to {40, 60}' -e 'set size of window 1 to {1400, 900}' -e 'end tell' -e 'delay 0.3'`.
+  Send each `key code` inside that same `osascript`, after a second `set frontmost to true`. A key sent from a
+  separate `osascript` call can land in the terminal (wave 3).
+- **The toolbar moves.** Selecting a photo adds the Delete button, which shifts Rescan and the sort toggle about
+  37 pt to the left; the Bin view adds more. Take a screenshot before clicking a toolbar button.
+- **Permanent deletes go to the user's Trash,** which the terminal can't list or clean. Delete only an extra copy
+  added for that purpose, and say so in the record.
 - **Coordinates.** `screencapture -R40,60,1400,900` gives a 2800×1800 image. A point in it maps to screen points as
   `x = 40 + px/2`, `y = 60 + py/2`. The image viewer may show it scaled; convert with its stated factor.
 - **Relaunch with the disk cache.** Launch with both `XCTestConfigurationFilePath=/dev/null/in-memory` and

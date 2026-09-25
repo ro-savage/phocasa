@@ -60,7 +60,8 @@ Phocasa/
 │   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host), menu commands
 │   ├── AppDelegate.swift           — quit waits for pending metadata writes (at most 5 s)
 │   ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary, EditPreset)
-│   │                                 + EditParameters struct, NormalizedRect struct
+│   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
+│   │                                 store lives, and the one-time move of a legacy `default.store`)
 │   ├── ViewModels/
 │   │   └── PhotoLibraryViewModel   — coordinator: owns LibraryStore, SelectionModel, editSession; UI flags; detail,
 │   │                                 delete, selection-wide rating/tagging, editing entry points, presets
@@ -115,6 +116,12 @@ Tools/
 
 ## Key Design Decisions
 
+- **Store location:** the library is `~/Library/Application Support/Phocasa/Phocasa.store` (with its `-wal`, `-shm`
+  and `.Phocasa_SUPPORT` external-data folder). Builds before 2026-09-26 left it at SwiftData's default,
+  `Application Support/default.store`, which every non-sandboxed app with the default shares. `StoreLocation.prepare`
+  moves such a store into the Phocasa folder once, before the container opens (companions first, the store file
+  last), only when its metadata names Phocasa's `PhotoAsset` entity; another app's `default.store` is left alone, and
+  one whose metadata can't be read is opened where it is.
 - **JPG+RAW pairing:** Files with the same stem name are combined into one PhotoAsset entry
 - **Dual metadata:** the SwiftData DB is the primary store. Ratings and tags are also written back to the files:
   XMP (`xmp:Rating`, `dc:subject`) and IPTC keywords inside JPGs, the `.xmp` sidecar for RAW files, and both files
@@ -233,6 +240,10 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   holds the container weakly and gives up if it's gone (see `backfillCaptureDatesAfterScans`).
 - A main-context save costs about 7 ms at 10k loaded photos however few rows it writes, plus about 0.13 ms per row.
   Bulk writes on the main context go in chunks sized by time, with a pause between them (see `CaptureDateBackfill`).
+- `StoreLocation` reads a store's metadata with Core Data's `NSPersistentStoreCoordinator.metadataForPersistentStore`
+  (SwiftData has no API to read a store without opening, and so migrating, it). That's the only Core Data use.
+- A store's SQLite files change whenever SQLite checkpoints, which SwiftData does when it likes, even after its
+  container is released. Tests check a store's contents by opening it, never by comparing its files' bytes.
 
 ### Metadata
 
@@ -273,7 +284,7 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - The test host (`XCTestConfigurationFilePath` set) uses an in-memory SwiftData store, and `ImageLoader.shared` has no
   disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names a folder (pass `TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR`).
   Tests must never open or modify anything under `~/Library/Application Support` (the user's real library) or write to
-  `~/Library/Caches/com.phocasa.app`.
+  `~/Library/Caches/com.phocasa.app`. `StoreLocationTests` pass a temp folder in place of Application Support.
 - Tests use temp directories and in-memory or temp-file stores. Tests that delete files give `LibraryStore` a
   `FileTrasher` that moves them into a temp folder, never the user's Trash.
 - Gated benchmarks need `PHOCASA_BENCH=1` (see Build & Run); tests on a real camera RAW are skipped unless

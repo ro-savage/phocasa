@@ -22,9 +22,13 @@ struct PhocasaApp: App {
     /// never open, migrate or rescan the user's real library.
     private static let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+    /// The library lives in `Application Support/Phocasa/Phocasa.store` (`StoreLocation`, which moves a store left at
+    /// SwiftData's default location there first).
     private let modelContainer: ModelContainer = {
         let schema = Schema([PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self])
-        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: isTestHost)
+        let configuration = isTestHost
+            ? ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            : ModelConfiguration(schema: schema, url: StoreLocation.prepare(in: .applicationSupportDirectory))
         do {
             return try ModelContainer(for: schema, configurations: configuration)
         } catch {
