@@ -99,7 +99,10 @@ final class PhotoLibraryViewModel {
     private let scanner = FolderScanner()
     private let metadata = MetadataService.shared
     private var modelContext: ModelContext?
-    private var availablePhotoIDs: Set<UUID> = []
+    /// Photos whose files were missing at the last availability check. Tracking the missing set
+    /// (rather than the available set) means photos inserted or restored since the last check
+    /// stay visible instead of silently disappearing.
+    private var missingPhotoIDs: Set<UUID> = []
     private var needsAvailabilityCheck = true
     private var previewTask: Task<Void, Never>?
     private var fullResRenderTask: Task<Void, Never>?
@@ -114,16 +117,16 @@ final class PhotoLibraryViewModel {
     // MARK: - File Availability
 
     private func checkFileAvailability(for photos: [PhotoAsset]) {
-        var available = Set<UUID>()
+        var missing = Set<UUID>()
         let fm = FileManager.default
         for photo in photos {
             let jpgExists = photo.jpgPath.map { fm.fileExists(atPath: $0) } ?? false
             let rawExists = photo.rawPath.map { fm.fileExists(atPath: $0) } ?? false
-            if jpgExists || rawExists {
-                available.insert(photo.id)
+            if !jpgExists && !rawExists {
+                missing.insert(photo.id)
             }
         }
-        availablePhotoIDs = available
+        missingPhotoIDs = missing
         needsAvailabilityCheck = false
     }
 
@@ -149,7 +152,7 @@ final class PhotoLibraryViewModel {
             checkFileAvailability(for: fetchedPhotos)
         }
 
-        allPhotos = fetchedPhotos.filter { availablePhotoIDs.contains($0.id) }
+        allPhotos = fetchedPhotos.filter { !missingPhotoIDs.contains($0.id) }
 
         let binDescriptor = FetchDescriptor<PhotoAsset>(
             predicate: #Predicate { $0.isDeleted },

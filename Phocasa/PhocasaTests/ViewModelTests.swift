@@ -324,6 +324,49 @@ final class ViewModelTests: XCTestCase {
         viewModel.restoreFromBin([photo])
 
         XCTAssertFalse(photo.isDeleted)
+        XCTAssertTrue(viewModel.allPhotos.contains { $0.id == photo.id })
+    }
+
+    // MARK: - File Availability
+
+    private func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PhocasaTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    func testRefreshAvailabilityHidesPhotosWithMissingFiles() throws {
+        let dir = try makeTempDir()
+        let presentPath = dir.appendingPathComponent("present.jpg").path
+        FileManager.default.createFile(atPath: presentPath, contents: Data())
+
+        let present = insertPhoto(name: "present")
+        present.jpgPath = presentPath
+        let gone = insertPhoto(name: "gone")
+        gone.jpgPath = dir.appendingPathComponent("gone.jpg").path
+        try context.save()
+
+        viewModel.refreshAvailability()
+
+        XCTAssertEqual(viewModel.allPhotos.map(\.id), [present.id])
+    }
+
+    func testRestoringPhotoBinnedBeforeAvailabilityCheckShowsIt() throws {
+        let dir = try makeTempDir()
+        let path = dir.appendingPathComponent("binned.jpg").path
+        FileManager.default.createFile(atPath: path, contents: Data())
+
+        let photo = insertPhoto(name: "binned", isDeleted: true)
+        photo.jpgPath = path
+        try context.save()
+
+        // The availability check only looks at non-binned photos (as at app launch).
+        viewModel.refreshAvailability()
+        viewModel.restoreFromBin([photo])
+
+        XCTAssertTrue(viewModel.allPhotos.contains { $0.id == photo.id })
     }
 
     func testRestoreSelected() {
