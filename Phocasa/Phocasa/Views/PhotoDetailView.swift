@@ -23,6 +23,9 @@ struct PhotoDetailView: View {
     @State private var viewportSize: CGSize = .zero
     /// Index of the photo shown last, to prefetch in the direction of travel.
     @State private var lastIndex: Int?
+    /// The photo `loadImages` is loading or has loaded. While the next photo loads, the previous image is
+    /// still on screen and must not start a full-resolution decode.
+    @State private var requestedPath: String?
     @State private var fullResolutionTask: Task<Void, Never>?
     @Environment(\.displayScale) private var displayScale
 
@@ -145,6 +148,7 @@ struct PhotoDetailView: View {
     private func loadImages() async {
         let path = photo.displayPath
         guard path != loadedPath, !path.isEmpty else { return }
+        requestedPath = path
         fullResolutionTask?.cancel()
         fullResolutionTask = nil
         let viewport = viewportPixelSize
@@ -209,8 +213,8 @@ struct PhotoDetailView: View {
     /// in, the viewport grew, or a RAW preview). Keeps zoom and pan. At most once per photo.
     private func loadFullResolution() {
         // Only for the loader's image: edit renders are produced at full resolution by the view model.
-        guard fullResolutionTask == nil, currentImage == displayedImage, let path = loadedPath, let shown = displayedImage,
-              let info = FullImageLoader.shared.cachedInfo(path: path),
+        guard fullResolutionTask == nil, currentImage == displayedImage, let path = loadedPath, path == requestedPath,
+              let shown = displayedImage, let info = FullImageLoader.shared.cachedInfo(path: path),
               shown.pixelSize != info.pixelSize || shown.orientation != info.orientation else { return }
         fullResolutionTask = Task {
             let full = await FullImageLoader.shared.load(path: path, subsample: 1)
