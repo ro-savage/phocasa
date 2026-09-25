@@ -236,26 +236,30 @@ struct PhotoDetailView: View {
             zoomState.reset()
         }
 
-        // Check for saved JPG edits and render
+        // Saved edits: a JPG edit render wins over a RAW one.
+        var jpgRender: (() async -> NSImage?)?
         if let params = photo.jpgEditParameters, !params.isDefault, let jpgPath = photo.jpgPath {
-            let url = URL(fileURLWithPath: jpgPath)
-            renderedEditImage = await ImageEditingService.shared.processStandard(url: url, parameters: params)
-        } else {
-            renderedEditImage = nil
+            jpgRender = { await ImageEditingService.shared.processStandard(url: URL(fileURLWithPath: jpgPath), parameters: params) }
         }
-
-        // Check for saved RAW edits
+        var rawRender: (() async -> NSImage?)?
         if let rawPath = photo.rawPath {
-            if let params = MetadataService.shared.readEditParameters(forRAWAt: rawPath), !params.isDefault {
-                let url = URL(fileURLWithPath: rawPath)
-                let rendered = await ImageEditingService.shared.processRAW(url: url, parameters: params)
-                if rendered != nil && renderedEditImage == nil {
-                    renderedEditImage = rendered
-                }
+            rawRender = {
+                guard let params = MetadataService.shared.readEditParameters(forRAWAt: rawPath), !params.isDefault else { return nil }
+                return await ImageEditingService.shared.processRAW(url: URL(fileURLWithPath: rawPath), parameters: params)
             }
         }
+        renderedEditImage = await Self.renderSavedEdit(jpg: jpgRender, raw: rawRender)
 
         minimapThumbnail = await ImageLoader.shared.loadThumbnail(for: path, maxSize: 400)
+    }
+
+    /// The saved-edit render to show. The JPG render takes precedence, so the RAW render, which takes seconds
+    /// at full resolution, runs only when there is no JPG render. Before, both ran and the RAW result was
+    /// thrown away whenever the photo had both (spec §D4).
+    static func renderSavedEdit(jpg: (() async -> NSImage?)?, raw: (() async -> NSImage?)?) async -> NSImage? {
+        if let jpg, let rendered = await jpg() { return rendered }
+        if let raw { return await raw() }
+        return nil
     }
 
     // MARK: - Single Image View

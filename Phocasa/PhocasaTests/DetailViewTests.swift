@@ -55,6 +55,39 @@ final class DetailViewTests: XCTestCase {
             windowHeight: windowHeight, viewportFrame: viewport), "no host window captured: never consume")
     }
 
+    // MARK: - Saved edit renders (spec §D4)
+
+    @MainActor
+    func testSavedJPGEditSkipsRAWRender() async {
+        let jpgImage = NSImage(size: NSSize(width: 4, height: 4))
+        var rawRendered = false
+        let shown = await PhotoDetailView.renderSavedEdit(
+            jpg: { jpgImage },
+            raw: { rawRendered = true; return NSImage(size: NSSize(width: 8, height: 8)) })
+        XCTAssertTrue(shown === jpgImage)
+        XCTAssertFalse(rawRendered, "the RAW render would be discarded, so it must not run")
+    }
+
+    @MainActor
+    func testSavedRAWEditRendersWithoutJPGEdit() async {
+        let rawImage = NSImage(size: NSSize(width: 8, height: 8))
+        let shown = await PhotoDetailView.renderSavedEdit(jpg: nil, raw: { rawImage })
+        XCTAssertTrue(shown === rawImage)
+    }
+
+    @MainActor
+    func testSavedRAWEditRendersWhenJPGRenderFails() async {
+        let rawImage = NSImage(size: NSSize(width: 8, height: 8))
+        let shown = await PhotoDetailView.renderSavedEdit(jpg: { nil }, raw: { rawImage })
+        XCTAssertTrue(shown === rawImage)
+    }
+
+    @MainActor
+    func testNoSavedEditsRenderNothing() async {
+        let shown = await PhotoDetailView.renderSavedEdit(jpg: nil, raw: nil)
+        XCTAssertNil(shown)
+    }
+
     /// The monitor compares `NSEvent.locationInWindow`, flipped with the window's height, against a SwiftUI
     /// `.global` frame. Check that against ground truth in a real hosting window, with and without a full-size
     /// content view: an AppKit probe view placed exactly where the viewport is reports its own window-coordinate
