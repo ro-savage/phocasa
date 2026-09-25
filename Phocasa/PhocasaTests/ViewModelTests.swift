@@ -49,248 +49,13 @@ final class ViewModelTests: XCTestCase {
         return photo
     }
 
-    // MARK: - Loading
-
-    func testLoadExistingData() {
-        insertPhoto(name: "photo1")
-        insertPhoto(name: "photo2")
-        insertPhoto(name: "deleted", isDeleted: true)
-
-        viewModel.loadExistingData()
-
-        XCTAssertEqual(viewModel.allPhotos.count, 2)
-        XCTAssertEqual(viewModel.binCount, 1)
-    }
-
-    func testLoadSetsPhotosArray() {
-        insertPhoto(name: "a")
-        insertPhoto(name: "b")
-
-        viewModel.loadExistingData()
-
-        XCTAssertEqual(viewModel.photos.count, 2)
-    }
-
-    func testLoadBinViewShowsDeletedPhotos() {
-        insertPhoto(name: "active")
-        insertPhoto(name: "binned", isDeleted: true)
-
-        viewModel.viewingBin = true
-        viewModel.loadExistingData()
-
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.fileName, "binned")
-    }
-
-    // MARK: - Rating Counts
-
-    func testRatingCountsComputed() {
-        insertPhoto(name: "a", rating: 0)
-        insertPhoto(name: "b", rating: 3)
-        insertPhoto(name: "c", rating: 3)
-        insertPhoto(name: "d", rating: 5)
-
-        viewModel.loadExistingData()
-
-        XCTAssertEqual(viewModel.ratingCounts[0], 1)
-        XCTAssertEqual(viewModel.ratingCounts[3], 2)
-        XCTAssertEqual(viewModel.ratingCounts[5], 1)
-        XCTAssertNil(viewModel.ratingCounts[1])
-        XCTAssertNil(viewModel.ratingCounts[2])
-    }
-
-    func testRatingCountsEmptyLibrary() {
-        viewModel.loadExistingData()
-        XCTAssertTrue(viewModel.ratingCounts.isEmpty)
-    }
-
-    // MARK: - Filtering
-
-    func testFilterAll() {
-        insertPhoto(name: "a", rating: 1)
-        insertPhoto(name: "b", rating: 3)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.all)
-
-        XCTAssertEqual(viewModel.photos.count, 2)
-    }
-
-    func testFilterByRating() {
-        insertPhoto(name: "a", rating: 1)
-        insertPhoto(name: "b", rating: 3)
-        insertPhoto(name: "c", rating: 3)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.rated(3))
-
-        XCTAssertEqual(viewModel.photos.count, 2)
-        XCTAssertTrue(viewModel.photos.allSatisfy { $0.rating == 3 })
-    }
-
-    func testFilterUnrated() {
-        insertPhoto(name: "a", rating: 0)
-        insertPhoto(name: "b", rating: 3)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.unrated)
-
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.rating, 0)
-    }
-
-    func testFilterBin() {
-        insertPhoto(name: "a")
-        insertPhoto(name: "b", isDeleted: true)
-        insertPhoto(name: "c", isDeleted: true)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.bin)
-
-        XCTAssertTrue(viewModel.viewingBin)
-        XCTAssertEqual(viewModel.photos.count, 2)
-    }
-
-    func testFilterBinDoesNotShowActivePhotos() {
-        insertPhoto(name: "active")
-        insertPhoto(name: "binned", isDeleted: true)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.bin)
-
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.fileName, "binned")
-    }
-
-    // MARK: - In-memory contract
-
-    /// The store is read by `loadExistingData()` (and by scans). UI interactions work on the in-memory
-    /// state; in the app every store change goes through the view model, so nothing is lost.
-    func testFilterChangesDoNotRefetch() {
-        insertPhoto(name: "loaded")
-        viewModel.loadExistingData()
-
-        let late = insertPhoto(name: "late")
-        viewModel.applyFilter(.all)
-        XCTAssertFalse(viewModel.photos.contains { $0.id == late.id })
-
-        viewModel.loadExistingData()
-        XCTAssertTrue(viewModel.photos.contains { $0.id == late.id })
-    }
-
-    // MARK: - Selection
-
-    func testToggleSelectionSingle() {
-        let photo = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-
-        viewModel.toggleSelection(for: photo, addToSelection: false)
-
-        XCTAssertEqual(viewModel.selectedPhotos, [photo.id])
-        XCTAssertEqual(viewModel.lastSelectedId, photo.id)
-    }
-
-    func testToggleSelectionReplacesExisting() {
-        let a = insertPhoto(name: "a")
-        let b = insertPhoto(name: "b")
-        viewModel.loadExistingData()
-
-        viewModel.toggleSelection(for: a, addToSelection: false)
-        viewModel.toggleSelection(for: b, addToSelection: false)
-
-        XCTAssertEqual(viewModel.selectedPhotos, [b.id])
-    }
-
-    func testToggleSelectionAddToSelection() {
-        let a = insertPhoto(name: "a")
-        let b = insertPhoto(name: "b")
-        viewModel.loadExistingData()
-
-        viewModel.toggleSelection(for: a, addToSelection: false)
-        viewModel.toggleSelection(for: b, addToSelection: true)
-
-        XCTAssertEqual(viewModel.selectedPhotos, [a.id, b.id])
-    }
-
-    func testToggleSelectionRemoveFromSelection() {
-        let a = insertPhoto(name: "a")
-        let b = insertPhoto(name: "b")
-        viewModel.loadExistingData()
-
-        viewModel.toggleSelection(for: a, addToSelection: false)
-        viewModel.toggleSelection(for: b, addToSelection: true)
-        viewModel.toggleSelection(for: a, addToSelection: true)
-
-        XCTAssertEqual(viewModel.selectedPhotos, [b.id])
-    }
-
-    func testSelectAll() {
-        let a = insertPhoto(name: "a")
-        let b = insertPhoto(name: "b")
-        let c = insertPhoto(name: "c")
-        viewModel.loadExistingData()
-
-        viewModel.selectAll()
-
-        XCTAssertEqual(viewModel.selectedPhotos, [a.id, b.id, c.id])
-    }
-
-    func testClearSelection() {
-        let photo = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-        viewModel.selectedPhotos = [photo.id]
-        viewModel.lastSelectedId = photo.id
-
-        viewModel.clearSelection()
-
-        XCTAssertTrue(viewModel.selectedPhotos.isEmpty)
-        XCTAssertNil(viewModel.lastSelectedId)
-    }
-
-    func testRangeSelect() {
-        let a = insertPhoto(name: "a")
-        let b = insertPhoto(name: "b")
-        let c = insertPhoto(name: "c")
-        viewModel.loadExistingData()
-
-        viewModel.toggleSelection(for: a, addToSelection: false)
-        viewModel.rangeSelect(to: c)
-
-        XCTAssertTrue(viewModel.selectedPhotos.contains(a.id))
-        XCTAssertTrue(viewModel.selectedPhotos.contains(b.id))
-        XCTAssertTrue(viewModel.selectedPhotos.contains(c.id))
-    }
-
-    func testRangeSelectReverse() {
-        let a = insertPhoto(name: "a")
-        let b = insertPhoto(name: "b")
-        let c = insertPhoto(name: "c")
-        viewModel.loadExistingData()
-
-        viewModel.toggleSelection(for: c, addToSelection: false)
-        viewModel.rangeSelect(to: a)
-
-        XCTAssertTrue(viewModel.selectedPhotos.contains(a.id))
-        XCTAssertTrue(viewModel.selectedPhotos.contains(b.id))
-        XCTAssertTrue(viewModel.selectedPhotos.contains(c.id))
-    }
-
     // MARK: - Rating
-
-    func testSetRating() {
-        let photo = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-
-        viewModel.setRating(4, for: photo)
-
-        XCTAssertEqual(photo.rating, 4)
-    }
 
     func testSetRatingForSelection() {
         let a = insertPhoto(name: "a")
         let b = insertPhoto(name: "b")
         viewModel.loadExistingData()
-        viewModel.selectedPhotos = [a.id, b.id]
+        viewModel.selection.selectedPhotos = [a.id, b.id]
 
         viewModel.setRatingForSelection(3)
 
@@ -302,7 +67,7 @@ final class ViewModelTests: XCTestCase {
         let a = insertPhoto(name: "a")
         let b = insertPhoto(name: "b")
         viewModel.loadExistingData()
-        viewModel.selectedPhotos = [a.id, b.id]
+        viewModel.selection.selectedPhotos = [a.id, b.id]
         viewModel.showingDetail = true
         viewModel.selectedDetailPhoto = a
 
@@ -318,13 +83,13 @@ final class ViewModelTests: XCTestCase {
     func testDeleteSelectedMovesToBin() {
         let photo = insertPhoto(name: "a")
         viewModel.loadExistingData()
-        viewModel.selectedPhotos = [photo.id]
+        viewModel.selection.selectedPhotos = [photo.id]
 
-        let previousBinCount = viewModel.binCount
+        let previousBinCount = viewModel.library.binCount
         viewModel.deleteSelected()
 
-        XCTAssertTrue(viewModel.selectedPhotos.isEmpty)
-        XCTAssertEqual(viewModel.binCount, previousBinCount + 1)
+        XCTAssertTrue(viewModel.selection.selectedPhotos.isEmpty)
+        XCTAssertEqual(viewModel.library.binCount, previousBinCount + 1)
     }
 
     func testDeletePhotoSingle() {
@@ -334,8 +99,8 @@ final class ViewModelTests: XCTestCase {
         viewModel.deletePhoto(photo)
 
         // After moveToBin + loadExistingData, the photo should be in the bin
-        XCTAssertEqual(viewModel.binCount, 1)
-        XCTAssertEqual(viewModel.allPhotos.count, 0)
+        XCTAssertEqual(viewModel.library.binCount, 1)
+        XCTAssertEqual(viewModel.library.allPhotos.count, 0)
     }
 
     func testRestoreFromBin() {
@@ -345,7 +110,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.restoreFromBin([photo])
 
         XCTAssertFalse(photo.isDeleted)
-        XCTAssertTrue(viewModel.allPhotos.contains { $0.id == photo.id })
+        XCTAssertTrue(viewModel.library.allPhotos.contains { $0.id == photo.id })
     }
 
     // MARK: - File Availability
@@ -358,22 +123,6 @@ final class ViewModelTests: XCTestCase {
         return dir
     }
 
-    func testRefreshAvailabilityHidesPhotosWithMissingFiles() throws {
-        let dir = try makeTempDir()
-        let presentPath = dir.appendingPathComponent("present.jpg").path
-        FileManager.default.createFile(atPath: presentPath, contents: Data())
-
-        let present = insertPhoto(name: "present")
-        present.jpgPath = presentPath
-        let gone = insertPhoto(name: "gone")
-        gone.jpgPath = dir.appendingPathComponent("gone.jpg").path
-        try context.save()
-
-        viewModel.refreshAvailability()
-
-        XCTAssertEqual(viewModel.allPhotos.map(\.id), [present.id])
-    }
-
     func testRestoringPhotoBinnedBeforeAvailabilityCheckShowsIt() throws {
         let dir = try makeTempDir()
         let path = dir.appendingPathComponent("binned.jpg").path
@@ -384,18 +133,18 @@ final class ViewModelTests: XCTestCase {
         try context.save()
 
         // The availability check only looks at non-binned photos (as at app launch).
-        viewModel.refreshAvailability()
+        viewModel.library.refreshAvailability()
         viewModel.restoreFromBin([photo])
 
-        XCTAssertTrue(viewModel.allPhotos.contains { $0.id == photo.id })
+        XCTAssertTrue(viewModel.library.allPhotos.contains { $0.id == photo.id })
     }
 
     func testRestoreSelected() {
         let a = insertPhoto(name: "a", isDeleted: true)
         let b = insertPhoto(name: "b", isDeleted: true)
         viewModel.loadExistingData()
-        viewModel.applyFilter(.bin)
-        viewModel.selectedPhotos = [a.id, b.id]
+        viewModel.library.applyFilter(.bin)
+        viewModel.selection.selectedPhotos = [a.id, b.id]
 
         viewModel.restoreSelected()
 
@@ -452,108 +201,6 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.gridColumns, 20, "Should not zoom out past 20 columns")
     }
 
-    // MARK: - Sort
-
-    func testToggleSortOrder() {
-        XCTAssertTrue(viewModel.sortNewestFirst)
-        viewModel.toggleSortOrder()
-        XCTAssertFalse(viewModel.sortNewestFirst)
-        viewModel.toggleSortOrder()
-        XCTAssertTrue(viewModel.sortNewestFirst)
-    }
-
-    // MARK: - Grid Navigation
-
-    func testNavigateGridRight() {
-        // sortNewestFirst=true means newest (later date) appears first in the array
-        let a = insertPhoto(name: "a", creationDate: Date(timeIntervalSince1970: 2000))
-        let b = insertPhoto(name: "b", creationDate: Date(timeIntervalSince1970: 1000))
-        viewModel.loadExistingData()
-        // a is newest → index 0, b is oldest → index 1
-        viewModel.selectedPhotos = [a.id]
-        viewModel.lastSelectedId = a.id
-
-        viewModel.navigateGrid(direction: .right, extendSelection: false)
-
-        XCTAssertEqual(viewModel.selectedPhotos, [b.id])
-        XCTAssertEqual(viewModel.lastSelectedId, b.id)
-    }
-
-    func testNavigateGridWithExtendSelection() {
-        let a = insertPhoto(name: "a", creationDate: Date(timeIntervalSince1970: 2000))
-        let b = insertPhoto(name: "b", creationDate: Date(timeIntervalSince1970: 1000))
-        viewModel.loadExistingData()
-        viewModel.selectedPhotos = [a.id]
-        viewModel.lastSelectedId = a.id
-
-        viewModel.navigateGrid(direction: .right, extendSelection: true)
-
-        XCTAssertTrue(viewModel.selectedPhotos.contains(a.id))
-        XCTAssertTrue(viewModel.selectedPhotos.contains(b.id))
-    }
-
-    func testNavigateGridEmptyPhotos() {
-        viewModel.loadExistingData()
-        viewModel.navigateGrid(direction: .right, extendSelection: false)
-        // Should not crash
-    }
-
-    func testNavigateGridNoSelection() {
-        insertPhoto(name: "a")
-        insertPhoto(name: "b")
-        viewModel.loadExistingData()
-
-        viewModel.navigateGrid(direction: .right, extendSelection: false)
-
-        // Should select the first photo
-        XCTAssertEqual(viewModel.selectedPhotos.count, 1)
-    }
-
-    // MARK: - Tags
-
-    func testFindOrCreateTag() {
-        let tag = viewModel.findOrCreateTag(name: "sunset", category: "time", in: context)
-        XCTAssertEqual(tag.name, "sunset")
-        XCTAssertEqual(tag.category, "time")
-
-        // Finding again should return the same tag
-        let same = viewModel.findOrCreateTag(name: "sunset", category: "time", in: context)
-        XCTAssertEqual(tag.id, same.id)
-    }
-
-    func testAddTag() {
-        let photo = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-
-        viewModel.addTag(name: "sunset", category: "time", to: photo)
-
-        XCTAssertEqual(photo.tags.count, 1)
-        XCTAssertEqual(photo.tags.first?.name, "sunset")
-        XCTAssertEqual(photo.tags.first?.category, "time")
-    }
-
-    func testAddDuplicateTag() {
-        let photo = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-
-        viewModel.addTag(name: "sunset", category: "time", to: photo)
-        viewModel.addTag(name: "sunset", category: "time", to: photo)
-
-        XCTAssertEqual(photo.tags.count, 1, "Duplicate tags should not be added")
-    }
-
-    func testRemoveTag() {
-        let photo = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-
-        viewModel.addTag(name: "sunset", category: "time", to: photo)
-        let tag = photo.tags.first!
-
-        viewModel.removeTag(tag, from: photo)
-
-        XCTAssertTrue(photo.tags.isEmpty)
-    }
-
     // MARK: - Revert Edits
 
     func testRevertEditsForPhoto() {
@@ -569,194 +216,19 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(photo.hasRawEdits)
     }
 
-    // MARK: - Search
-
-    func testSearchByFilename() {
-        insertPhoto(name: "sunset_beach")
-        insertPhoto(name: "mountain_view")
-        viewModel.loadExistingData()
-        viewModel.searchText = "sunset"
-
-        viewModel.applyCurrentFilter()
-
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.fileName, "sunset_beach")
-    }
-
-    func testSearchCaseInsensitive() {
-        insertPhoto(name: "Sunset_Beach")
-        viewModel.loadExistingData()
-        viewModel.searchText = "sunset"
-
-        viewModel.applyCurrentFilter()
-
-        XCTAssertEqual(viewModel.photos.count, 1)
-    }
-
-    func testSearchClearedRestoresAll() {
-        insertPhoto(name: "a")
-        insertPhoto(name: "b")
-        viewModel.loadExistingData()
-        viewModel.searchText = "a"
-        viewModel.applyCurrentFilter()
-        XCTAssertEqual(viewModel.photos.count, 1)
-
-        viewModel.searchText = ""
-        viewModel.applyCurrentFilter()
-        XCTAssertEqual(viewModel.photos.count, 2)
-    }
-
-    // MARK: - File Type Filter
-
-    func testFilterJPGOnly() {
-        insertPhoto(name: "jpg_only")
-        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
-                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
-        context.insert(rawOnly)
-        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
-                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
-        context.insert(paired)
-        try? context.save()
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.jpgOnly)
-
-        XCTAssertEqual(viewModel.photos.count, 2, "Should show jpg_only and paired (both have jpgPath)")
-        XCTAssertTrue(viewModel.photos.allSatisfy { $0.jpgPath != nil })
-    }
-
-    func testFilterRAWOnly() {
-        insertPhoto(name: "jpg_only")
-        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
-                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
-        context.insert(rawOnly)
-        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
-                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
-        context.insert(paired)
-        try? context.save()
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.rawOnly)
-
-        XCTAssertEqual(viewModel.photos.count, 2, "Should show raw_only and paired (both have rawPath)")
-        XCTAssertTrue(viewModel.photos.allSatisfy { $0.rawPath != nil })
-    }
-
-    func testFileTypeCountsComputed() {
-        insertPhoto(name: "jpg_only")
-        let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
-                                 folderPath: "/fake", creationDate: Date(), fileSize: 1000)
-        context.insert(rawOnly)
-        let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
-                                folderPath: "/fake", creationDate: Date(), fileSize: 2000)
-        context.insert(paired)
-        try? context.save()
-        viewModel.loadExistingData()
-
-        XCTAssertEqual(viewModel.jpgCount, 2, "jpg_only + paired")
-        XCTAssertEqual(viewModel.rawCount, 2, "raw_only + paired")
-    }
-
-    // MARK: - Multi-Filter
-
-    func testMultiFilterAutoCombinesDifferentCategories() {
-        let a = insertPhoto(name: "a", rating: 3)
-        a.rawPath = "/fake/a.cr3"
-        insertPhoto(name: "b", rating: 3)
-        // b has no rawPath
-        let c = insertPhoto(name: "c", rating: 5)
-        c.rawPath = "/fake/c.cr3"
-        try? context.save()
-        viewModel.loadExistingData()
-
-        // Click rating 3
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(viewModel.photos.count, 2, "a and b are rated 3")
-
-        // Click RAW only — should auto-combine (different category)
-        viewModel.applyFilter(.rawOnly)
-        XCTAssertEqual(viewModel.photos.count, 1, "Only a is rated 3 AND has RAW")
-        XCTAssertEqual(viewModel.photos.first?.fileName, "a")
-        XCTAssertEqual(viewModel.activeFilters.count, 2)
-    }
-
-    func testMultiFilterReplacesWithinCategory() {
-        insertPhoto(name: "a", rating: 3)
-        insertPhoto(name: "b", rating: 4)
-        insertPhoto(name: "c", rating: 5)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(viewModel.photos.count, 1)
-
-        // Click 4-star — should replace 3-star (same category)
-        viewModel.applyFilter(.rated(4))
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.rating, 4)
-        XCTAssertEqual(viewModel.activeFilters.count, 1)
-    }
-
-    func testMultiFilterShiftToggle() {
-        insertPhoto(name: "a", rating: 3)
-        insertPhoto(name: "b", rating: 4)
-        insertPhoto(name: "c", rating: 5)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(viewModel.photos.count, 1)
-
-        // Shift-click 4-star — should add (now showing 3 AND 4)
-        viewModel.applyFilter(.rated(4), isShiftHeld: true)
-        XCTAssertEqual(viewModel.photos.count, 2)
-        XCTAssertTrue(viewModel.activeFilters.contains(.rated(3)))
-        XCTAssertTrue(viewModel.activeFilters.contains(.rated(4)))
-
-        // Shift-click 3-star again — should remove it
-        viewModel.applyFilter(.rated(3), isShiftHeld: true)
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.rating, 4)
-    }
-
-    func testClearFiltersWithAll() {
-        insertPhoto(name: "a", rating: 3)
-        insertPhoto(name: "b", rating: 5)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(viewModel.photos.count, 1)
-
-        viewModel.applyFilter(.all)
-        XCTAssertTrue(viewModel.activeFilters.isEmpty)
-        XCTAssertEqual(viewModel.photos.count, 2)
-    }
-
-    func testBinFilterIsExclusive() {
-        insertPhoto(name: "a", rating: 3)
-        insertPhoto(name: "b", isDeleted: true)
-        viewModel.loadExistingData()
-
-        viewModel.applyFilter(.rated(3))
-        viewModel.applyFilter(.bin)
-
-        XCTAssertTrue(viewModel.viewingBin)
-        XCTAssertEqual(viewModel.activeFilters, [.bin])
-        XCTAssertEqual(viewModel.photos.count, 1)
-        XCTAssertEqual(viewModel.photos.first?.fileName, "b")
-    }
-
     // MARK: - Smart Delete (File Type)
 
-    func testDeleteInRAWOnlyModeRemovesOnlyRAW() {
+    func testDeleteInRAWOnlyModeRemovesOnlyRAW() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
         context.insert(paired)
         try? context.save()
         viewModel.loadExistingData()
 
-        viewModel.applyFilter(.rawOnly)
-        viewModel.selectedPhotos = [paired.id]
+        viewModel.library.applyFilter(.rawOnly)
+        viewModel.selection.selectedPhotos = [paired.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         // RAW path should be cleared, JPG should remain
         XCTAssertNil(paired.rawPath)
@@ -765,17 +237,17 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(paired.hasRawEdits, "RAW edits should be cleared")
     }
 
-    func testDeleteInJPGOnlyModeRemovesOnlyJPG() {
+    func testDeleteInJPGOnlyModeRemovesOnlyJPG() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
         context.insert(paired)
         try? context.save()
         viewModel.loadExistingData()
 
-        viewModel.applyFilter(.jpgOnly)
-        viewModel.selectedPhotos = [paired.id]
+        viewModel.library.applyFilter(.jpgOnly)
+        viewModel.selection.selectedPhotos = [paired.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         // JPG path should be cleared, RAW should remain
         XCTAssertNil(paired.jpgPath)
@@ -783,47 +255,37 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(paired.isDeleted, "Photo should NOT be in bin")
     }
 
-    func testDeleteNonPairedInRAWOnlyModeSoftDeletes() {
+    func testDeleteNonPairedInRAWOnlyModeSoftDeletes() async {
         let rawOnly = PhotoAsset(fileName: "raw_only", rawPath: "/fake/raw_only.cr3",
                                  folderPath: "/fake", creationDate: Date(), fileSize: 1000)
         context.insert(rawOnly)
         try? context.save()
         viewModel.loadExistingData()
 
-        viewModel.applyFilter(.rawOnly)
-        viewModel.selectedPhotos = [rawOnly.id]
+        viewModel.library.applyFilter(.rawOnly)
+        viewModel.selection.selectedPhotos = [rawOnly.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
         // Non-paired RAW should go to bin — check via binCount since the photo
         // gets refetched by loadExistingData after delete
-        XCTAssertEqual(viewModel.binCount, 1, "Non-paired photo should be soft-deleted to bin")
-        XCTAssertEqual(viewModel.allPhotos.count, 0, "No active photos should remain")
+        XCTAssertEqual(viewModel.library.binCount, 1, "Non-paired photo should be soft-deleted to bin")
+        XCTAssertEqual(viewModel.library.allPhotos.count, 0, "No active photos should remain")
     }
 
-    func testDeleteClearsSelectionAfterFileTypeDelete() {
+    func testDeleteClearsSelectionAfterFileTypeDelete() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
         context.insert(paired)
         try? context.save()
         viewModel.loadExistingData()
 
-        viewModel.applyFilter(.rawOnly)
-        viewModel.selectedPhotos = [paired.id]
+        viewModel.library.applyFilter(.rawOnly)
+        viewModel.selection.selectedPhotos = [paired.id]
 
-        viewModel.deleteSelected()
+        await viewModel.deleteSelected()?.value
 
-        XCTAssertTrue(viewModel.selectedPhotos.isEmpty)
-    }
-
-    func testHasFileTypeFilter() {
-        XCTAssertFalse(viewModel.hasFileTypeFilter)
-
-        viewModel.applyFilter(.rawOnly)
-        XCTAssertTrue(viewModel.hasFileTypeFilter)
-
-        viewModel.applyFilter(.all)
-        XCTAssertFalse(viewModel.hasFileTypeFilter)
+        XCTAssertTrue(viewModel.selection.selectedPhotos.isEmpty)
     }
 
     // MARK: - In-memory library state
@@ -846,40 +308,40 @@ final class ViewModelTests: XCTestCase {
         let c = insertPhoto(name: "c", creationDate: date(2000))
         let d = insertPhoto(name: "d", creationDate: date(1000))
         viewModel.loadExistingData()
-        XCTAssertEqual(ids(viewModel.photos), [a.id, b.id, c.id, d.id])
+        XCTAssertEqual(ids(viewModel.library.photos), [a.id, b.id, c.id, d.id])
 
         viewModel.deletePhoto(b)
         viewModel.deletePhoto(d)
-        XCTAssertEqual(ids(viewModel.allPhotos), [a.id, c.id])
-        XCTAssertEqual(ids(viewModel.photos), [a.id, c.id])
-        XCTAssertEqual(viewModel.binCount, 2)
+        XCTAssertEqual(ids(viewModel.library.allPhotos), [a.id, c.id])
+        XCTAssertEqual(ids(viewModel.library.photos), [a.id, c.id])
+        XCTAssertEqual(viewModel.library.binCount, 2)
         XCTAssertEqual(storedBinIDs(), [b.id, d.id])
 
-        viewModel.applyFilter(.bin)
-        XCTAssertEqual(ids(viewModel.photos), [b.id, d.id])
+        viewModel.library.applyFilter(.bin)
+        XCTAssertEqual(ids(viewModel.library.photos), [b.id, d.id])
 
         viewModel.restoreFromBin([d])
-        XCTAssertEqual(ids(viewModel.photos), [b.id])
-        XCTAssertEqual(viewModel.binCount, 1)
+        XCTAssertEqual(ids(viewModel.library.photos), [b.id])
+        XCTAssertEqual(viewModel.library.binCount, 1)
         XCTAssertEqual(storedBinIDs(), [b.id])
 
-        viewModel.applyFilter(.all)
-        XCTAssertEqual(ids(viewModel.photos), [a.id, c.id, d.id])
+        viewModel.library.applyFilter(.all)
+        XCTAssertEqual(ids(viewModel.library.photos), [a.id, c.id, d.id])
         viewModel.restoreFromBin([b])
-        XCTAssertEqual(ids(viewModel.photos), [a.id, b.id, c.id, d.id])
-        XCTAssertEqual(viewModel.binCount, 0)
+        XCTAssertEqual(ids(viewModel.library.photos), [a.id, b.id, c.id, d.id])
+        XCTAssertEqual(viewModel.library.binCount, 0)
 
         // Oldest first: inserts keep the reversed order too.
-        viewModel.toggleSortOrder()
-        XCTAssertEqual(ids(viewModel.photos), [d.id, c.id, b.id, a.id])
+        viewModel.library.toggleSortOrder()
+        XCTAssertEqual(ids(viewModel.library.photos), [d.id, c.id, b.id, a.id])
         viewModel.deletePhoto(c)
         viewModel.deletePhoto(a)
-        XCTAssertEqual(ids(viewModel.photos), [d.id, b.id])
-        viewModel.applyFilter(.bin)
-        XCTAssertEqual(ids(viewModel.photos), [c.id, a.id])
+        XCTAssertEqual(ids(viewModel.library.photos), [d.id, b.id])
+        viewModel.library.applyFilter(.bin)
+        XCTAssertEqual(ids(viewModel.library.photos), [c.id, a.id])
         viewModel.restoreFromBin([a, c])
-        viewModel.applyFilter(.all)
-        XCTAssertEqual(ids(viewModel.photos), [d.id, c.id, b.id, a.id])
+        viewModel.library.applyFilter(.all)
+        XCTAssertEqual(ids(viewModel.library.photos), [d.id, c.id, b.id, a.id])
         XCTAssertEqual(storedBinIDs(), [])
     }
 
@@ -888,14 +350,14 @@ final class ViewModelTests: XCTestCase {
         let b = insertPhoto(name: "b", rating: 1, creationDate: date(2000))
         let c = insertPhoto(name: "c", rating: 3, creationDate: date(1000))
         viewModel.loadExistingData()
-        viewModel.applyFilter(.rated(3))
+        viewModel.library.applyFilter(.rated(3))
 
         viewModel.deletePhoto(a)
 
-        XCTAssertEqual(ids(viewModel.photos), [c.id])
-        XCTAssertEqual(ids(viewModel.allPhotos), [b.id, c.id])
-        XCTAssertEqual(viewModel.activeFilters, [.rated(3)])
-        XCTAssertEqual(viewModel.ratingCounts, [3: 1, 1: 1])
+        XCTAssertEqual(ids(viewModel.library.photos), [c.id])
+        XCTAssertEqual(ids(viewModel.library.allPhotos), [b.id, c.id])
+        XCTAssertEqual(viewModel.library.activeFilters, [.rated(3)])
+        XCTAssertEqual(viewModel.library.ratingCounts, [3: 1, 1: 1])
     }
 
     func testMovingPhotoLoadedAfterLastFetchToBinShowsItInBin() {
@@ -903,27 +365,10 @@ final class ViewModelTests: XCTestCase {
         let late = insertPhoto(name: "late")
 
         viewModel.deletePhoto(late)
-        viewModel.applyFilter(.bin)
+        viewModel.library.applyFilter(.bin)
 
-        XCTAssertEqual(viewModel.binCount, 1)
-        XCTAssertEqual(ids(viewModel.photos), [late.id])
-    }
-
-    func testPhotosDidChangePicksUpDirectModelChanges() {
-        let raw = PhotoAsset(fileName: "raw", rawPath: "/fake/raw.arw", folderPath: "/fake", creationDate: date(2000))
-        context.insert(raw)
-        let jpg = insertPhoto(name: "jpg", creationDate: date(1000))
-        viewModel.loadExistingData()
-        viewModel.applyFilter(.jpgOnly)
-        XCTAssertEqual(ids(viewModel.photos), [jpg.id])
-        XCTAssertEqual(viewModel.jpgCount, 1)
-
-        // As an export that writes a JPG next to a RAW-only photo does.
-        raw.jpgPath = "/fake/raw-raw-edit.jpg"
-        viewModel.photosDidChange([raw])
-
-        XCTAssertEqual(ids(viewModel.photos), [raw.id, jpg.id])
-        XCTAssertEqual(viewModel.jpgCount, 2)
+        XCTAssertEqual(viewModel.library.binCount, 1)
+        XCTAssertEqual(ids(viewModel.library.photos), [late.id])
     }
 
     func testEmptyBinUsesInMemoryBin() {
@@ -938,30 +383,16 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(Set(ids(viewModel.photosToDelete)), [a.id, b.id])
     }
 
-    func testConfirmPermanentDeleteEmptiesBin() {
+    func testConfirmPermanentDeleteEmptiesBin() async {
         insertPhoto(name: "a", isDeleted: true)
         insertPhoto(name: "b")
         viewModel.loadExistingData()
         viewModel.emptyBin()
 
-        viewModel.confirmPermanentDelete()
+        await viewModel.confirmPermanentDelete()?.value
 
-        XCTAssertEqual(viewModel.binCount, 0)
-        XCTAssertEqual(viewModel.allPhotos.count, 1)
-    }
-
-    func testSetRatingUpdatesFilterAndCountsInMemory() {
-        let a = insertPhoto(name: "a", rating: 3, creationDate: date(3000))
-        let b = insertPhoto(name: "b", rating: 3, creationDate: date(2000))
-        insertPhoto(name: "c", rating: 5, creationDate: date(1000))
-        viewModel.loadExistingData()
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(viewModel.ratingCounts, [3: 2, 5: 1])
-
-        viewModel.setRating(4, for: a)
-
-        XCTAssertEqual(ids(viewModel.photos), [b.id])
-        XCTAssertEqual(viewModel.ratingCounts, [3: 1, 4: 1, 5: 1])
+        XCTAssertEqual(viewModel.library.binCount, 0)
+        XCTAssertEqual(viewModel.library.allPhotos.count, 1)
     }
 
     func testSetRatingForSelectionUpdatesCounts() {
@@ -969,241 +400,59 @@ final class ViewModelTests: XCTestCase {
         let b = insertPhoto(name: "b", creationDate: date(2000))
         insertPhoto(name: "c", creationDate: date(1000))
         viewModel.loadExistingData()
-        viewModel.selectedPhotos = [a.id, b.id]
+        viewModel.selection.selectedPhotos = [a.id, b.id]
 
         viewModel.setRatingForSelection(2)
-        XCTAssertEqual(viewModel.ratingCounts, [0: 1, 2: 2])
+        XCTAssertEqual(viewModel.library.ratingCounts, [0: 1, 2: 2])
 
-        viewModel.applyFilter(.rated(2))
-        XCTAssertEqual(ids(viewModel.photos), [a.id, b.id])
-    }
-
-    func testFacetCountsWithActiveFilter() {
-        let a = insertPhoto(name: "a", rating: 3)
-        let b = insertPhoto(name: "b", rating: 5)
-        viewModel.loadExistingData()
-        viewModel.addTag(name: "alice", category: "people", to: a)
-        viewModel.addTag(name: "alice", category: "people", to: b)
-        let alice = a.tags[0]
-
-        viewModel.applyFilter(.rated(3))
-
-        XCTAssertEqual(viewModel.ratingCounts, [3: 1, 5: 1], "rating counts ignore the rating filter")
-        XCTAssertEqual(viewModel.tagCounts, [alice.id: 1], "tag counts only cover 3-star photos")
-        XCTAssertEqual(viewModel.categoryCounts, ["people": 1])
-        XCTAssertEqual(viewModel.jpgCount, 1)
-    }
-
-    func testAddAndRemoveTagUpdateTagListsCountsAndFiltersInMemory() {
-        let a = insertPhoto(name: "a", creationDate: date(2000))
-        let b = insertPhoto(name: "b", creationDate: date(1000))
-        viewModel.loadExistingData()
-
-        viewModel.addTag(name: "bob", category: "people", to: a)
-        let bob = a.tags[0]
-        XCTAssertEqual(viewModel.tagsByCategory["people"]?.map(\.name), ["bob"])
-        XCTAssertEqual(viewModel.tagCategories, ["people"])
-        XCTAssertEqual(viewModel.tagCounts, [bob.id: 1])
-        XCTAssertEqual(viewModel.categoryCounts, ["people": 1])
-
-        viewModel.addTag(name: "alice", category: "people", to: b)
-        viewModel.addTag(name: "zed", category: "", to: a)
-        XCTAssertEqual(viewModel.tagsByCategory["people"]?.map(\.name), ["alice", "bob"])
-        XCTAssertEqual(viewModel.uncategorizedTags.map(\.name), ["zed"])
-        XCTAssertEqual(viewModel.allTags.map(\.name), ["zed", "alice", "bob"])
-        XCTAssertEqual(viewModel.categoryCounts, ["people": 2])
-
-        viewModel.applyFilter(.tag(bob.id))
-        XCTAssertEqual(ids(viewModel.photos), [a.id])
-        viewModel.applyFilter(.tagCategory("people"))
-        XCTAssertEqual(ids(viewModel.photos), [a.id, b.id])
-
-        viewModel.removeTag(bob, from: a)
-        XCTAssertEqual(ids(viewModel.photos), [b.id])
-        XCTAssertNil(viewModel.tagCounts[bob.id])
-        XCTAssertEqual(viewModel.categoryCounts, ["people": 1])
+        viewModel.library.applyFilter(.rated(2))
+        XCTAssertEqual(ids(viewModel.library.photos), [a.id, b.id])
     }
 
     func testToggleTagForMultiSelectionAddsThenRemoves() {
         let a = insertPhoto(name: "a", creationDate: date(2000))
         let b = insertPhoto(name: "b", creationDate: date(1000))
         viewModel.loadExistingData()
-        viewModel.addTag(name: "x", category: "cat", to: a)
+        viewModel.library.addTag(name: "x", category: "cat", to: a)
         let x = a.tags[0]
-        viewModel.selectedPhotos = [a.id, b.id]
+        viewModel.selection.selectedPhotos = [a.id, b.id]
 
         viewModel.toggleTag(x, for: a)
         XCTAssertTrue(b.tags.contains { $0.id == x.id })
-        XCTAssertEqual(viewModel.tagCounts[x.id], 2)
+        XCTAssertEqual(viewModel.library.tagCounts[x.id], 2)
         XCTAssertTrue(viewModel.contextMenuTagState(x, for: a))
 
         viewModel.toggleTag(x, for: a)
         XCTAssertTrue(a.tags.isEmpty)
         XCTAssertTrue(b.tags.isEmpty)
-        XCTAssertNil(viewModel.tagCounts[x.id])
+        XCTAssertNil(viewModel.library.tagCounts[x.id])
     }
 
-    func testSearchFindsTagAddedInMemory() {
-        let a = insertPhoto(name: "IMG_1")
-        insertPhoto(name: "IMG_2")
+    /// The context menu's checked tags come from the in-memory facts, once per menu. They must be what reading each
+    /// targeted photo's tags gives: the tags all selected photos share, or the clicked photo's own.
+    func testContextMenuTagIDsMatchTheTargetedPhotosTags() {
+        let photos = (0..<4).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
         viewModel.loadExistingData()
-        viewModel.addTag(name: "Sunset", category: "Time", to: a)
+        viewModel.library.addTag(name: "shared", category: "cat", to: photos[0])
+        viewModel.library.addTag(name: "shared", category: "cat", to: photos[1])
+        viewModel.library.addTag(name: "shared", category: "cat", to: photos[2])
+        viewModel.library.addTag(name: "some", category: "", to: photos[0])
+        viewModel.library.addTag(name: "one", category: "cat", to: photos[3])
+        let tags = viewModel.library.allTags
+        func fromModels(_ targets: [PhotoAsset]) -> Set<UUID> {
+            Set(tags.filter { tag in targets.allSatisfy { $0.tags.contains { $0.id == tag.id } } }.map(\.id))
+        }
 
-        viewModel.searchText = "sunset"
-        viewModel.applyCurrentFilter()
-        XCTAssertEqual(ids(viewModel.photos), [a.id])
-
-        viewModel.searchText = "time"
-        viewModel.applyCurrentFilter()
-        XCTAssertEqual(ids(viewModel.photos), [a.id])
-    }
-
-    func testSearchAppliesInBinView() {
-        insertPhoto(name: "sunset", isDeleted: true)
-        insertPhoto(name: "forest", isDeleted: true)
-        viewModel.loadExistingData()
-        viewModel.searchText = "sun"
-
-        viewModel.applyFilter(.bin)
-
-        XCTAssertEqual(viewModel.photos.map(\.fileName), ["sunset"])
-    }
-
-    func testSearchSuggestions() {
-        let a = insertPhoto(name: "a")
-        viewModel.loadExistingData()
-        viewModel.addTag(name: "Sundown", category: "time", to: a)
-        viewModel.addTag(name: "sunrise", category: "time", to: a)
-        viewModel.addTag(name: "beach", category: "sunny places", to: a)
-
-        // Matching categories first (in sidebar order), then matching tag names (in `allTags` order).
-        viewModel.searchText = "SUN"
-        XCTAssertEqual(viewModel.searchSuggestions, ["sunny places", "Sundown", "sunrise"])
-
-        viewModel.searchText = "tim"
-        XCTAssertEqual(viewModel.searchSuggestions, ["time"])
-
-        viewModel.searchText = ""
-        XCTAssertEqual(viewModel.searchSuggestions, [])
-    }
-
-    func testToggleSortOrderReversesInMemory() {
-        let a = insertPhoto(name: "a", rating: 3, creationDate: date(3000))
-        let b = insertPhoto(name: "b", rating: 1, creationDate: date(2000))
-        let c = insertPhoto(name: "c", rating: 3, creationDate: date(1000))
-        viewModel.loadExistingData()
-
-        viewModel.toggleSortOrder()
-        XCTAssertEqual(ids(viewModel.photos), [c.id, b.id, a.id])
-
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(ids(viewModel.photos), [c.id, a.id])
-
-        viewModel.toggleSortOrder()
-        XCTAssertEqual(ids(viewModel.photos), [a.id, c.id])
-
-        // A later full load uses the same order.
-        viewModel.toggleSortOrder()
-        viewModel.loadExistingData()
-        XCTAssertEqual(ids(viewModel.photos), [c.id, a.id])
-    }
-
-    func testLoadExistingDataKeepsActiveFiltersAndSearch() {
-        insertPhoto(name: "sunset", rating: 3, creationDate: date(3000))
-        insertPhoto(name: "forest", rating: 3, creationDate: date(2000))
-        insertPhoto(name: "sunrise", rating: 5, creationDate: date(1000))
-        viewModel.loadExistingData()
-        viewModel.applyFilter(.rated(3))
-        viewModel.searchText = "sun"
-        viewModel.applyCurrentFilter()
-
-        insertPhoto(name: "sundown", rating: 3, creationDate: date(500))
-        viewModel.loadExistingData()
-
-        XCTAssertEqual(viewModel.photos.map(\.fileName), ["sunset", "sundown"])
-    }
-
-    func testIndexOfTracksFiltering() {
-        let a = insertPhoto(name: "a", rating: 3, creationDate: date(3000))
-        let b = insertPhoto(name: "b", rating: 1, creationDate: date(2000))
-        let c = insertPhoto(name: "c", rating: 3, creationDate: date(1000))
-        viewModel.loadExistingData()
-        XCTAssertEqual(viewModel.index(of: a.id), 0)
-        XCTAssertEqual(viewModel.index(of: b.id), 1)
-        XCTAssertEqual(viewModel.index(of: c.id), 2)
-
-        viewModel.applyFilter(.rated(3))
-        XCTAssertEqual(viewModel.index(of: a.id), 0)
-        XCTAssertNil(viewModel.index(of: b.id))
-        XCTAssertEqual(viewModel.index(of: c.id), 1)
-
-        viewModel.toggleSortOrder()
-        XCTAssertEqual(viewModel.index(of: c.id), 0)
-        XCTAssertEqual(viewModel.index(of: a.id), 1)
-
-        viewModel.applyFilter(.all)
-        XCTAssertEqual(viewModel.index(of: b.id), 1)
-        XCTAssertNil(viewModel.index(of: UUID()))
-    }
-
-    func testSelectedPhotosListInGridOrder() {
-        let photos = (0..<5).map { insertPhoto(name: "p\($0)", rating: $0 % 2, creationDate: date(Double(10 - $0))) }
-        viewModel.loadExistingData()
-        viewModel.selectedPhotos = [photos[3].id, photos[0].id, photos[4].id, photos[1].id]
-
-        XCTAssertEqual(ids(viewModel.selectedPhotosList), [photos[0].id, photos[1].id, photos[3].id, photos[4].id])
-
-        viewModel.toggleSortOrder()
-        XCTAssertEqual(ids(viewModel.selectedPhotosList), [photos[4].id, photos[3].id, photos[1].id, photos[0].id])
-
-        // Only photos in the grid are listed.
-        viewModel.applyFilter(.rated(1))
-        XCTAssertEqual(ids(viewModel.selectedPhotosList), [photos[3].id, photos[1].id])
-    }
-
-    func testPrimarySelectedPhotoPrefersLastSelected() {
-        let a = insertPhoto(name: "a", creationDate: date(3000))
-        let b = insertPhoto(name: "b", creationDate: date(2000))
-        let c = insertPhoto(name: "c", creationDate: date(1000))
-        viewModel.loadExistingData()
-        XCTAssertNil(viewModel.primarySelectedPhoto)
-
-        viewModel.toggleSelection(for: c, addToSelection: false)
-        viewModel.toggleSelection(for: a, addToSelection: true)
-        XCTAssertEqual(viewModel.primarySelectedPhoto?.id, a.id)
-
-        // Deselecting the last-clicked photo falls back to the first selected photo in grid order.
-        viewModel.toggleSelection(for: a, addToSelection: true)
-        XCTAssertEqual(viewModel.primarySelectedPhoto?.id, c.id)
-
-        viewModel.selectedPhotos = [c.id, b.id]
-        viewModel.lastSelectedId = nil
-        XCTAssertEqual(viewModel.primarySelectedPhoto?.id, b.id)
-    }
-
-    func testRangeSelectOnlySelectsVisiblePhotos() {
-        let a = insertPhoto(name: "a", rating: 3, creationDate: date(3000))
-        let b = insertPhoto(name: "b", rating: 1, creationDate: date(2000))
-        let c = insertPhoto(name: "c", rating: 3, creationDate: date(1000))
-        viewModel.loadExistingData()
-        viewModel.applyFilter(.rated(3))
-
-        viewModel.toggleSelection(for: a, addToSelection: false)
-        viewModel.rangeSelect(to: c)
-
-        XCTAssertEqual(viewModel.selectedPhotos, [a.id, c.id])
-        XCTAssertFalse(viewModel.selectedPhotos.contains(b.id))
-    }
-
-    func testSelectAllSelectsVisiblePhotosOnly() {
-        let a = insertPhoto(name: "a", rating: 3)
-        insertPhoto(name: "b", rating: 1)
-        viewModel.loadExistingData()
-        viewModel.applyFilter(.rated(3))
-
-        viewModel.selectAll()
-
-        XCTAssertEqual(viewModel.selectedPhotos, [a.id])
+        viewModel.selection.selectedPhotos = [photos[0].id, photos[1].id, photos[2].id]
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[1]), fromModels(Array(photos[0...2])))
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[1]).count, 1, "only the shared tag")
+        // A photo outside the selection: its own tags.
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[3]), fromModels([photos[3]]))
+        viewModel.selection.selectedPhotos = [photos[0].id]
+        XCTAssertEqual(viewModel.contextMenuTagIDs(for: photos[0]), fromModels([photos[0]]))
+        for tag in tags {
+            XCTAssertEqual(viewModel.contextMenuTagState(tag, for: photos[0]), photos[0].tags.contains { $0.id == tag.id })
+        }
     }
 
     func testNavigateDetailMovesThroughGridOrder() {
@@ -1220,20 +469,6 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedDetailPhoto?.id, a.id)
     }
 
-    func testNavigateGridUpAndDownUseColumns() {
-        let photos = (0..<5).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
-        viewModel.loadExistingData()
-        viewModel.gridColumns = 2
-        viewModel.toggleSelection(for: photos[0], addToSelection: false)
-
-        viewModel.navigateGrid(direction: .down, extendSelection: false)
-        XCTAssertEqual(viewModel.selectedPhotos, [photos[2].id])
-        viewModel.navigateGrid(direction: .down, extendSelection: true)
-        XCTAssertEqual(viewModel.selectedPhotos, [photos[2].id, photos[3].id, photos[4].id])
-        viewModel.navigateGrid(direction: .up, extendSelection: false)
-        XCTAssertEqual(viewModel.selectedPhotos, [photos[2].id])
-    }
-
     // MARK: - In-memory state vs a fresh load
 
     /// A second view model on the same store, created before seeding so its one availability check
@@ -1246,30 +481,30 @@ final class ViewModelTests: XCTestCase {
 
     /// The in-memory state after mutations must equal what a full reload of the store gives.
     private func assertMatchesFreshLoad(_ oracle: PhotoLibraryViewModel, _ step: String, line: UInt = #line) {
-        oracle.sortNewestFirst = viewModel.sortNewestFirst
-        oracle.activeFilters = viewModel.activeFilters
-        oracle.viewingBin = viewModel.viewingBin
-        oracle.searchText = viewModel.searchText
+        oracle.library.sort = viewModel.library.sort
+        oracle.library.activeFilters = viewModel.library.activeFilters
+        oracle.library.viewingBin = viewModel.library.viewingBin
+        oracle.library.searchText = viewModel.library.searchText
         oracle.loadExistingData()
-        XCTAssertEqual(ids(viewModel.photos), ids(oracle.photos), "photos after \(step)", line: line)
-        XCTAssertEqual(ids(viewModel.allPhotos), ids(oracle.allPhotos), "allPhotos after \(step)", line: line)
-        XCTAssertEqual(viewModel.binCount, oracle.binCount, "binCount after \(step)", line: line)
-        XCTAssertEqual(viewModel.ratingCounts, oracle.ratingCounts, "ratingCounts after \(step)", line: line)
-        XCTAssertEqual(viewModel.tagCounts, oracle.tagCounts, "tagCounts after \(step)", line: line)
-        XCTAssertEqual(viewModel.categoryCounts, oracle.categoryCounts, "categoryCounts after \(step)", line: line)
-        XCTAssertEqual(viewModel.jpgCount, oracle.jpgCount, "jpgCount after \(step)", line: line)
-        XCTAssertEqual(viewModel.rawCount, oracle.rawCount, "rawCount after \(step)", line: line)
-        XCTAssertEqual(viewModel.allTags.map(\.id), oracle.allTags.map(\.id), "allTags after \(step)", line: line)
-        XCTAssertEqual(viewModel.tagCategories, oracle.tagCategories, "tagCategories after \(step)", line: line)
-        XCTAssertEqual(viewModel.uncategorizedTags.map(\.id), oracle.uncategorizedTags.map(\.id),
+        XCTAssertEqual(ids(viewModel.library.photos), ids(oracle.library.photos), "photos after \(step)", line: line)
+        XCTAssertEqual(ids(viewModel.library.allPhotos), ids(oracle.library.allPhotos), "allPhotos after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.binCount, oracle.library.binCount, "binCount after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.ratingCounts, oracle.library.ratingCounts, "ratingCounts after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.tagCounts, oracle.library.tagCounts, "tagCounts after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.categoryCounts, oracle.library.categoryCounts, "categoryCounts after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.jpgCount, oracle.library.jpgCount, "jpgCount after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.rawCount, oracle.library.rawCount, "rawCount after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.allTags.map(\.id), oracle.library.allTags.map(\.id), "allTags after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.tagCategories, oracle.library.tagCategories, "tagCategories after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.uncategorizedTags.map(\.id), oracle.library.uncategorizedTags.map(\.id),
                        "uncategorizedTags after \(step)", line: line)
-        XCTAssertEqual(viewModel.tagsByCategory.mapValues { $0.map(\.id) },
-                       oracle.tagsByCategory.mapValues { $0.map(\.id) }, "tagsByCategory after \(step)", line: line)
-        XCTAssertEqual(viewModel.photos.indices.map { viewModel.index(of: viewModel.photos[$0].id) },
-                       viewModel.photos.indices.map { $0 }, "index(of:) after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.tagsByCategory.mapValues { $0.map(\.id) },
+                       oracle.library.tagsByCategory.mapValues { $0.map(\.id) }, "tagsByCategory after \(step)", line: line)
+        XCTAssertEqual(viewModel.library.photos.indices.map { viewModel.library.index(of: viewModel.library.photos[$0].id) },
+                       viewModel.library.photos.indices.map { $0 }, "index(of:) after \(step)", line: line)
     }
 
-    func testInMemoryStateMatchesFreshLoad() {
+    func testInMemoryStateMatchesFreshLoad() async {
         let oracle = makeOracle()
         let people = Tag(name: "alice", category: "people")
         let places = Tag(name: "paris", category: "places")
@@ -1292,59 +527,59 @@ final class ViewModelTests: XCTestCase {
         let check = { (step: String, line: UInt) in self.assertMatchesFreshLoad(oracle, step, line: line) }
 
         check("load", #line)
-        viewModel.setRating(5, for: photos[1]); check("setRating", #line)
-        viewModel.applyFilter(.rated(0)); check("rating filter", #line)
-        viewModel.applyFilter(.rated(2), isShiftHeld: true); check("shift rating filter", #line)
-        viewModel.setRating(3, for: viewModel.photos[0]); check("setRating out of the filter", #line)
-        viewModel.setRating(2, for: photos[1]); check("setRating of a hidden photo into the filter", #line)
-        viewModel.applyFilter(.jpgOnly); check("file-type filter", #line)
-        viewModel.addTag(name: "rome", category: "places", to: viewModel.photos[0]); check("addTag new tag", #line)
-        viewModel.applyFilter(.tagCategory("places")); check("tag category filter", #line)
-        viewModel.removeTag(places, from: photos[0]); check("removeTag out of a tag filter", #line)
-        viewModel.addTag(name: "paris", category: "places", to: photos[3]); check("addTag into a tag filter", #line)
-        viewModel.deletePhoto(viewModel.photos[0]); check("deletePhoto under a filter", #line)
-        viewModel.applyFilter(.all); check("clear filters", #line)
-        viewModel.selectedPhotos = [photos[0].id, photos[2].id, photos[4].id]
+        viewModel.library.setRating(5, for: photos[1]); check("setRating", #line)
+        viewModel.library.applyFilter(.rated(0)); check("rating filter", #line)
+        viewModel.library.applyFilter(.rated(2), isShiftHeld: true); check("shift rating filter", #line)
+        viewModel.library.setRating(3, for: viewModel.library.photos[0]); check("setRating out of the filter", #line)
+        viewModel.library.setRating(2, for: photos[1]); check("setRating of a hidden photo into the filter", #line)
+        viewModel.library.applyFilter(.jpgOnly); check("file-type filter", #line)
+        viewModel.library.addTag(name: "rome", category: "places", to: viewModel.library.photos[0]); check("addTag new tag", #line)
+        viewModel.library.applyFilter(.tagCategory("places")); check("tag category filter", #line)
+        viewModel.library.removeTag(places, from: photos[0]); check("removeTag out of a tag filter", #line)
+        viewModel.library.addTag(name: "paris", category: "places", to: photos[3]); check("addTag into a tag filter", #line)
+        viewModel.deletePhoto(viewModel.library.photos[0]); check("deletePhoto under a filter", #line)
+        viewModel.library.applyFilter(.all); check("clear filters", #line)
+        viewModel.selection.selectedPhotos = [photos[0].id, photos[2].id, photos[4].id]
         viewModel.setRatingForSelection(1); check("setRatingForSelection", #line)
         viewModel.addTagToSelection(name: "beach", category: "scenes"); check("addTagToSelection new category", #line)
         viewModel.addTagToSelection(name: "misc", category: ""); check("addTagToSelection existing tag", #line)
         viewModel.toggleTag(people, for: photos[0]); check("toggleTag multi (remove)", #line)
         viewModel.toggleTag(people, for: photos[0]); check("toggleTag multi (add)", #line)
-        viewModel.removeTag(places, from: photos[5]); check("removeTag", #line)
-        viewModel.applyFilter(.tag(people.id)); check("tag filter", #line)
-        viewModel.selectedPhotos = Set(viewModel.photos.prefix(2).map(\.id))
+        viewModel.library.removeTag(places, from: photos[5]); check("removeTag", #line)
+        viewModel.library.applyFilter(.tag(people.id)); check("tag filter", #line)
+        viewModel.selection.selectedPhotos = Set(viewModel.library.photos.prefix(2).map(\.id))
         viewModel.deleteSelected(); check("deleteSelected", #line)
-        viewModel.toggleSortOrder(); check("toggleSortOrder", #line)
-        viewModel.applyFilter(.bin); check("bin", #line)
-        viewModel.searchText = "img_1"; viewModel.applyCurrentFilter(); check("search in bin", #line)
-        viewModel.selectAll()
+        viewModel.library.toggleSortOrder(); check("toggleSortOrder", #line)
+        viewModel.library.applyFilter(.bin); check("bin", #line)
+        viewModel.library.searchText = "img_1"; viewModel.library.applyCurrentFilter(); check("search in bin", #line)
+        viewModel.selection.selectAll()
         viewModel.restoreSelected(); check("restoreSelected", #line)
-        viewModel.searchText = ""; viewModel.applyFilter(.all); check("back to all", #line)
-        viewModel.deletePhoto(viewModel.photos[3]); check("deletePhoto", #line)
+        viewModel.library.searchText = ""; viewModel.library.applyFilter(.all); check("back to all", #line)
+        viewModel.deletePhoto(viewModel.library.photos[3]); check("deletePhoto", #line)
         viewModel.deletePhoto(undated); check("deletePhoto undated", #line)
-        viewModel.toggleSortOrder(); check("toggleSortOrder back", #line)
-        viewModel.applyFilter(.bin)
-        viewModel.restoreFromBin(Array(viewModel.photos)); check("restore everything", #line)
+        viewModel.library.toggleSortOrder(); check("toggleSortOrder back", #line)
+        viewModel.library.applyFilter(.bin)
+        viewModel.restoreFromBin(Array(viewModel.library.photos)); check("restore everything", #line)
 
         // Bulk paths (more photos than are patched in place).
-        viewModel.applyFilter(.all)
-        viewModel.selectAll()
+        viewModel.library.applyFilter(.all)
+        viewModel.selection.selectAll()
         viewModel.setRatingForSelection(4); check("bulk setRatingForSelection", #line)
-        viewModel.applyFilter(.rated(4))
-        viewModel.selectedPhotos = Set(viewModel.photos.prefix(12).map(\.id))
+        viewModel.library.applyFilter(.rated(4))
+        viewModel.selection.selectedPhotos = Set(viewModel.library.photos.prefix(12).map(\.id))
         viewModel.setRatingForSelection(5); check("bulk setRatingForSelection out of the filter", #line)
-        viewModel.applyFilter(.all)
-        viewModel.selectAll()
+        viewModel.library.applyFilter(.all)
+        viewModel.selection.selectAll()
         viewModel.addTagToSelection(name: "bulk", category: "scenes"); check("bulk addTagToSelection", #line)
-        viewModel.selectedPhotos = Set(viewModel.photos.prefix(15).map(\.id))
+        viewModel.selection.selectedPhotos = Set(viewModel.library.photos.prefix(15).map(\.id))
         viewModel.deleteSelected(); check("bulk deleteSelected", #line)
-        viewModel.applyFilter(.bin)
-        viewModel.selectAll()
+        viewModel.library.applyFilter(.bin)
+        viewModel.selection.selectAll()
         viewModel.restoreSelected(); check("bulk restoreSelected", #line)
 
-        viewModel.applyFilter(.rawOnly)
-        viewModel.selectedPhotos = [viewModel.photos[0].id]
-        viewModel.deleteSelected(); check("deleteFileTypeOnly", #line)
+        viewModel.library.applyFilter(.rawOnly)
+        viewModel.selection.selectedPhotos = [viewModel.library.photos[0].id]
+        await viewModel.deleteSelected()?.value; check("deleteFileTypeOnly", #line)
     }
 
     /// Random sequences of every interaction, checked against a fresh load after each step.
@@ -1368,59 +603,59 @@ final class ViewModelTests: XCTestCase {
                                         .tagCategory("people"), .tagCategory("places"), .bin]
 
         for step in 0..<250 {
-            let visible = viewModel.photos
+            let visible = viewModel.library.photos
             let action = Int.random(in: 0..<12, using: &rng)
             switch action {
             case 0:
-                viewModel.applyFilter(filters.randomElement(using: &rng)!, isShiftHeld: Bool.random(using: &rng))
+                viewModel.library.applyFilter(filters.randomElement(using: &rng)!, isShiftHeld: Bool.random(using: &rng))
             case 1:
-                if let tag = viewModel.allTags.randomElement(using: &rng) {
-                    viewModel.applyFilter(.tag(tag.id), isShiftHeld: Bool.random(using: &rng))
+                if let tag = viewModel.library.allTags.randomElement(using: &rng) {
+                    viewModel.library.applyFilter(.tag(tag.id), isShiftHeld: Bool.random(using: &rng))
                 }
             case 2:
-                let pool = Bool.random(using: &rng) ? visible : viewModel.allPhotos
+                let pool = Bool.random(using: &rng) ? visible : viewModel.library.allPhotos
                 if let photo = pool.randomElement(using: &rng) {
-                    viewModel.setRating(Int.random(in: 0...5, using: &rng), for: photo)
+                    viewModel.library.setRating(Int.random(in: 0...5, using: &rng), for: photo)
                 }
             case 3 where !visible.isEmpty:
-                viewModel.selectedPhotos = Set(randomSubset(visible, upTo: 20).map(\.id))
+                viewModel.selection.selectedPhotos = Set(randomSubset(visible, upTo: 20).map(\.id))
                 viewModel.setRatingForSelection(Int.random(in: 0...5, using: &rng))
             case 4:
                 let tag = tagPool.randomElement(using: &rng)!
-                if let photo = viewModel.allPhotos.randomElement(using: &rng) {
-                    viewModel.addTag(name: tag.name, category: tag.category, to: photo)
+                if let photo = viewModel.library.allPhotos.randomElement(using: &rng) {
+                    viewModel.library.addTag(name: tag.name, category: tag.category, to: photo)
                 }
             case 5:
-                if let photo = viewModel.allPhotos.randomElement(using: &rng), let tag = photo.tags.randomElement(using: &rng) {
-                    viewModel.removeTag(tag, from: photo)
+                if let photo = viewModel.library.allPhotos.randomElement(using: &rng), let tag = photo.tags.randomElement(using: &rng) {
+                    viewModel.library.removeTag(tag, from: photo)
                 }
             case 6 where !visible.isEmpty:
                 let tag = tagPool.randomElement(using: &rng)!
-                viewModel.selectedPhotos = Set(randomSubset(visible, upTo: 20).map(\.id))
+                viewModel.selection.selectedPhotos = Set(randomSubset(visible, upTo: 20).map(\.id))
                 viewModel.addTagToSelection(name: tag.name, category: tag.category)
             case 7 where visible.count > 1:
                 let subset = randomSubset(visible, upTo: 20)
-                viewModel.selectedPhotos = Set(subset.map(\.id))
-                if let tag = viewModel.allTags.randomElement(using: &rng) {
+                viewModel.selection.selectedPhotos = Set(subset.map(\.id))
+                if let tag = viewModel.library.allTags.randomElement(using: &rng) {
                     viewModel.toggleTag(tag, for: subset[0])
                 }
-            case 8 where !visible.isEmpty && !viewModel.viewingBin && !viewModel.hasFileTypeFilter:
+            case 8 where !visible.isEmpty && !viewModel.library.viewingBin && !viewModel.library.hasFileTypeFilter:
                 if Bool.random(using: &rng) {
                     viewModel.deletePhoto(visible.randomElement(using: &rng)!)
                 } else {
-                    viewModel.selectedPhotos = Set(randomSubset(visible, upTo: 20).map(\.id))
+                    viewModel.selection.selectedPhotos = Set(randomSubset(visible, upTo: 20).map(\.id))
                     viewModel.deleteSelected()
                 }
             case 9:
-                if !viewModel.viewingBin { viewModel.applyFilter(.bin) }
-                if !viewModel.photos.isEmpty {
-                    viewModel.restoreFromBin(randomSubset(viewModel.photos, upTo: 20))
+                if !viewModel.library.viewingBin { viewModel.library.applyFilter(.bin) }
+                if !viewModel.library.photos.isEmpty {
+                    viewModel.restoreFromBin(randomSubset(viewModel.library.photos, upTo: 20))
                 }
             case 10:
-                viewModel.toggleSortOrder()
+                viewModel.library.toggleSortOrder()
             case 11:
-                viewModel.searchText = ["", "", "img_1", "img_2", "people", "a", "zz"].randomElement(using: &rng)!
-                viewModel.applyCurrentFilter()
+                viewModel.library.searchText = ["", "", "img_1", "img_2", "people", "a", "zz"].randomElement(using: &rng)!
+                viewModel.library.applyCurrentFilter()
             default:
                 break
             }

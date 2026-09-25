@@ -8,14 +8,17 @@ struct PhotoGridItemView: View {
     let onRate: (Int) -> Void
     var onSelect: () -> Void = {}
     var onOpen: () -> Void = {}
+    /// While the grid is hidden under the detail view: start no thumbnail load, and cancel the one in flight.
+    var thumbnailsPaused = false
 
     @State private var thumbnail: NSImage?
 
     /// Identity of the thumbnail load. A window resize that stays within one bucket keeps the same identity,
-    /// so it never restarts the load.
+    /// so it never restarts the load. Pausing cancels the load, and resuming starts it again.
     struct ThumbnailTaskID: Hashable {
         let path: String
         let bucket: Int
+        var paused = false
     }
 
     var body: some View {
@@ -54,7 +57,8 @@ struct PhotoGridItemView: View {
             RatingView(rating: photo.rating, compact: true, onRate: onRate)
                 .padding(.bottom, 6)
         }
-        .task(id: ThumbnailTaskID(path: path, bucket: thumbnailBucket)) {
+        .task(id: ThumbnailTaskID(path: path, bucket: thumbnailBucket, paused: thumbnailsPaused)) {
+            guard !thumbnailsPaused else { return }
             await loadThumbnail(path: path)
         }
     }
@@ -108,9 +112,13 @@ struct PhotoGridItemView: View {
         .padding(4)
     }
 
+    /// Thumbnail loads started by grid cells, for tests: the grid hidden under the detail view must start none.
+    @MainActor static var thumbnailLoadsStarted = 0
+
     private func loadThumbnail(path: String) async {
         guard !path.isEmpty else { return }
 
+        Self.thumbnailLoadsStarted += 1
         if let img = await ImageLoader.shared.loadThumbnail(for: path, maxSize: CGFloat(thumbnailBucket)) {
             thumbnail = img
         }

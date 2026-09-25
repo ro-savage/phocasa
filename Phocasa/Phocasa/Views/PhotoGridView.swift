@@ -2,6 +2,8 @@ import SwiftUI
 
 struct PhotoGridView: View {
     @Bindable var viewModel: PhotoLibraryViewModel
+    /// The grid is hidden under the detail view: its cells start no thumbnail loads.
+    var thumbnailsPaused = false
     @Environment(\.displayScale) private var displayScale
 
     nonisolated private static let spacing: CGFloat = 8
@@ -32,20 +34,21 @@ struct PhotoGridView: View {
             ScrollViewReader { scrollProxy in
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: Self.spacing) {
-                        ForEach(viewModel.photos, id: \.id) { photo in
+                        ForEach(viewModel.library.photos, id: \.id) { photo in
                             PhotoGridItemView(
                                 photo: photo,
-                                isSelected: viewModel.selectedPhotos.contains(photo.id),
+                                isSelected: viewModel.selection.selectedPhotos.contains(photo.id),
                                 thumbnailBucket: bucket,
                                 onRate: { rating in
-                                    viewModel.setRating(rating, for: photo)
+                                    viewModel.library.setRating(rating, for: photo)
                                 },
                                 onSelect: {
                                     handleSelectionClick(photo)
                                 },
                                 onOpen: {
                                     viewModel.openDetail(for: photo)
-                                }
+                                },
+                                thumbnailsPaused: thumbnailsPaused
                             )
                         .id(photo.id)
                         .contextMenu {
@@ -55,7 +58,7 @@ struct PhotoGridView: View {
                 }
                 .padding()
             }
-            .onChange(of: viewModel.lastSelectedId) { _, newId in
+            .onChange(of: viewModel.selection.lastSelectedId) { _, newId in
                 if let id = newId {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         scrollProxy.scrollTo(id, anchor: nil)
@@ -69,8 +72,8 @@ struct PhotoGridView: View {
                 .frame(width: 300, height: 400)
         }
         .overlay {
-            if viewModel.photos.isEmpty && !viewModel.isScanning {
-                if viewModel.viewingBin {
+            if viewModel.library.photos.isEmpty && !viewModel.library.isScanning {
+                if viewModel.library.viewingBin {
                     ContentUnavailableView {
                         Label("Bin is Empty", systemImage: "trash")
                     } description: {
@@ -80,7 +83,7 @@ struct PhotoGridView: View {
                     ContentUnavailableView {
                         Label("No Photos", systemImage: "photo.on.rectangle.angled")
                     } description: {
-                        if viewModel.allPhotos.isEmpty {
+                        if viewModel.library.allPhotos.isEmpty {
                             Text("Open a folder to get started")
                         } else {
                             Text("No photos match the current filter")
@@ -96,17 +99,17 @@ struct PhotoGridView: View {
         let rangeSelect = NSEvent.modifierFlags.contains(.shift)
 
         if rangeSelect {
-            viewModel.rangeSelect(to: photo)
+            viewModel.selection.rangeSelect(to: photo)
         } else {
-            viewModel.toggleSelection(for: photo, addToSelection: addToSelection)
+            viewModel.selection.toggleSelection(for: photo, addToSelection: addToSelection)
         }
     }
 
     @ViewBuilder
     private func contextMenu(for photo: PhotoAsset) -> some View {
-        let isMulti = viewModel.isPartOfMultiSelection(photo)
+        let isMulti = viewModel.selection.isPartOfMultiSelection(photo)
 
-        if !viewModel.viewingBin {
+        if !viewModel.library.viewingBin {
             Button("View") {
                 viewModel.openDetail(for: photo)
             }
@@ -119,7 +122,7 @@ struct PhotoGridView: View {
                         if isMulti {
                             viewModel.setRatingForSelection(stars)
                         } else {
-                            viewModel.setRating(stars, for: photo)
+                            viewModel.library.setRating(stars, for: photo)
                         }
                     }
                 }
@@ -128,7 +131,7 @@ struct PhotoGridView: View {
                     if isMulti {
                         viewModel.setRatingForSelection(0)
                     } else {
-                        viewModel.setRating(0, for: photo)
+                        viewModel.library.setRating(0, for: photo)
                     }
                 }
             }
@@ -144,10 +147,10 @@ struct PhotoGridView: View {
                             if isMulti {
                                 viewModel.applyPresetToSelection(preset)
                             } else {
-                                let wasSelected = viewModel.selectedPhotos
-                                viewModel.selectedPhotos = [photo.id]
+                                let wasSelected = viewModel.selection.selectedPhotos
+                                viewModel.selection.selectedPhotos = [photo.id]
                                 viewModel.applyPresetToSelection(preset)
-                                viewModel.selectedPhotos = wasSelected
+                                viewModel.selection.selectedPhotos = wasSelected
                             }
                         }
                     }
@@ -183,19 +186,22 @@ struct PhotoGridView: View {
 
     @ViewBuilder
     private func tagMenuContent(for photo: PhotoAsset) -> some View {
-        ForEach(viewModel.tagCategories, id: \.self) { category in
+        // Which tags are checked, worked out once for the whole menu.
+        let checked = viewModel.contextMenuTagIDs(for: photo)
+
+        ForEach(viewModel.library.tagCategories, id: \.self) { category in
             Menu(category.capitalized) {
-                ForEach(viewModel.allTags.filter { $0.category == category }, id: \.id) { tag in
-                    tagToggleButton(tag, for: photo)
+                ForEach(viewModel.library.tagsByCategory[category] ?? [], id: \.id) { tag in
+                    tagToggleButton(tag, for: photo, isChecked: checked.contains(tag.id))
                 }
             }
         }
 
-        ForEach(viewModel.uncategorizedTags, id: \.id) { tag in
-            tagToggleButton(tag, for: photo)
+        ForEach(viewModel.library.uncategorizedTags, id: \.id) { tag in
+            tagToggleButton(tag, for: photo, isChecked: checked.contains(tag.id))
         }
 
-        if !viewModel.allTags.isEmpty {
+        if !viewModel.library.allTags.isEmpty {
             Divider()
         }
 
@@ -205,11 +211,11 @@ struct PhotoGridView: View {
     }
 
     @ViewBuilder
-    private func tagToggleButton(_ tag: Tag, for photo: PhotoAsset) -> some View {
+    private func tagToggleButton(_ tag: Tag, for photo: PhotoAsset, isChecked: Bool) -> some View {
         Button {
             viewModel.toggleTag(tag, for: photo)
         } label: {
-            if viewModel.contextMenuTagState(tag, for: photo) {
+            if isChecked {
                 Label(tag.name, systemImage: "checkmark")
             } else {
                 Text(tag.name)

@@ -89,13 +89,13 @@ final class DataPathBenchmarks: XCTestCase {
     }
 
     private func waitForScan(_ vm: PhotoLibraryViewModel) async throws {
-        while vm.isScanning { try await Task.sleep(for: .milliseconds(1)) }
+        while vm.library.isScanning { try await Task.sleep(for: .milliseconds(1)) }
     }
 
     /// Main-actor time of the view model's last scan, from task 20's `lastScanReport` hook. To run this harness
     /// against code without that hook, make this return nil: the main-actor lines are then left out.
     private func lastScanMainActorMs(_ vm: PhotoLibraryViewModel) -> Double? {
-        vm.lastScanReport.map { ms($0.mainActorTime) }
+        vm.library.lastScanReport.map { ms($0.mainActorTime) }
     }
 
     private func reportIfAny(_ tag: String, _ label: String, _ samples: [Double]) {
@@ -164,7 +164,7 @@ final class DataPathBenchmarks: XCTestCase {
             let c2 = try makeContainer(storeURL: storeURL)
             let vm2 = PhotoLibraryViewModel()
             let t = clock.measure { vm2.setModelContext(c2.mainContext) }
-            print("BENCH|\(tag)|COLD setModelContext (fetch+stat+counts+tags)|ms=\(f(ms(t)))|allPhotos=\(vm2.allPhotos.count)")
+            print("BENCH|\(tag)|COLD setModelContext (fetch+stat+counts+tags)|ms=\(f(ms(t)))|allPhotos=\(vm2.library.allPhotos.count)")
         }
         do {
             let c3 = try makeContainer(storeURL: storeURL)
@@ -202,8 +202,8 @@ final class DataPathBenchmarks: XCTestCase {
         // --- Warm paths on the seeding context ---
         let vm = PhotoLibraryViewModel()
         vm.setModelContext(context)
-        vm.refreshAvailability()
-        XCTAssertEqual(vm.allPhotos.count, n)
+        vm.library.refreshAvailability()
+        XCTAssertEqual(vm.library.allPhotos.count, n)
 
         // 1
         bench(tag, "1 loadExistingData() warm") { vm.loadExistingData() }
@@ -216,76 +216,76 @@ final class DataPathBenchmarks: XCTestCase {
             _ = try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isDeleted }))
         }
         // 2
-        bench(tag, "2 refreshAvailability() (stat all + load)") { vm.refreshAvailability() }
+        bench(tag, "2 refreshAvailability() (stat all + load)") { vm.library.refreshAvailability() }
         let fm = FileManager.default
-        let paths = vm.allPhotos.compactMap(\.jpgPath)
+        let paths = vm.library.allPhotos.compactMap(\.jpgPath)
         bench(tag, "2a fileExists loop only (\(paths.count) stats)") {
             var c = 0
             for p in paths where fm.fileExists(atPath: p) { c += 1 }
             XCTAssertEqual(c, n)
         }
         // 3
-        bench(tag, "3a applyFilter(.rated(3))") { vm.applyFilter(.rated(3)) }
-        let rated3Count = vm.photos.count
+        bench(tag, "3a applyFilter(.rated(3))") { vm.library.applyFilter(.rated(3)) }
+        let rated3Count = vm.library.photos.count
         let tagId = tags[0].id
-        bench(tag, "3b applyFilter(.tag(people-0))") { vm.applyFilter(.tag(tagId)) }
-        let tagCount = vm.photos.count
-        bench(tag, "3c applyFilter(.all)") { vm.applyFilter(.all) }
-        bench(tag, "3d toggleSortOrder()") { vm.toggleSortOrder() }
-        if !vm.sortNewestFirst { vm.toggleSortOrder() }
+        bench(tag, "3b applyFilter(.tag(people-0))") { vm.library.applyFilter(.tag(tagId)) }
+        let tagCount = vm.library.photos.count
+        bench(tag, "3c applyFilter(.all)") { vm.library.applyFilter(.all) }
+        bench(tag, "3d toggleSortOrder()") { vm.library.toggleSortOrder() }
+        if !vm.library.sortNewestFirst { vm.library.toggleSortOrder() }
         // 3e–3h (added by task 10): 3a–3c repeat the same click, which an in-memory data path can
         // answer without work. These change the filter on every run.
-        benchChange(tag, "3e applyFilter(.rated(3)) from no filter", setup: { vm.applyFilter(.all) }) {
-            vm.applyFilter(.rated(3))
+        benchChange(tag, "3e applyFilter(.rated(3)) from no filter", setup: { vm.library.applyFilter(.all) }) {
+            vm.library.applyFilter(.rated(3))
         }
-        benchChange(tag, "3f applyFilter(.tag(people-0)) from no filter", setup: { vm.applyFilter(.all) }) {
-            vm.applyFilter(.tag(tagId))
+        benchChange(tag, "3f applyFilter(.tag(people-0)) from no filter", setup: { vm.library.applyFilter(.all) }) {
+            vm.library.applyFilter(.tag(tagId))
         }
-        benchChange(tag, "3g applyFilter(.all) from .rated(3)", setup: { vm.applyFilter(.rated(3)) }) {
-            vm.applyFilter(.all)
+        benchChange(tag, "3g applyFilter(.all) from .rated(3)", setup: { vm.library.applyFilter(.rated(3)) }) {
+            vm.library.applyFilter(.all)
         }
-        benchChange(tag, "3h applyFilter(.rated(4)) replacing .rated(3)", setup: { vm.applyFilter(.rated(3)) }) {
-            vm.applyFilter(.rated(4))
+        benchChange(tag, "3h applyFilter(.rated(4)) replacing .rated(3)", setup: { vm.library.applyFilter(.rated(3)) }) {
+            vm.library.applyFilter(.rated(4))
         }
-        vm.applyFilter(.all)
+        vm.library.applyFilter(.all)
         print("BENCH|\(tag)|info|rated3=\(rated3Count)|tagPeople0=\(tagCount)")
 
         // 4
-        vm.applyFilter(.all)
+        vm.library.applyFilter(.all)
         bench(tag, "4 search keystroke 't' (set searchText + applyCurrentFilter)") {
-            vm.searchText = "t"
-            vm.applyCurrentFilter()
+            vm.library.searchText = "t"
+            vm.library.applyCurrentFilter()
         }
-        print("BENCH|\(tag)|info|searchMatches=\(vm.photos.count)")
+        print("BENCH|\(tag)|info|searchMatches=\(vm.library.photos.count)")
         // 4b (added by task 10): 4 repeats the same text; this changes it on every run.
         benchChange(tag, "4b search keystroke '' -> 't' (text changes every run)", setup: {
-            vm.searchText = ""
-            vm.applyCurrentFilter()
+            vm.library.searchText = ""
+            vm.library.applyCurrentFilter()
         }) {
-            vm.searchText = "t"
-            vm.applyCurrentFilter()
+            vm.library.searchText = "t"
+            vm.library.applyCurrentFilter()
         }
-        vm.searchText = ""
-        vm.applyFilter(.all)
+        vm.library.searchText = ""
+        vm.library.applyFilter(.all)
 
         // 5
-        vm.applyFilter(.rated(3))
-        let target = vm.photos[0]
+        vm.library.applyFilter(.rated(3))
+        let target = vm.library.photos[0]
         var flip = false
         bench(tag, "5a setRating with .rated(3) filter active") {
             flip.toggle()
-            vm.setRating(flip ? 4 : 3, for: target)
+            vm.library.setRating(flip ? 4 : 3, for: target)
         }
-        vm.applyFilter(.all)
-        let target2 = vm.photos[vm.photos.count / 2]
+        vm.library.applyFilter(.all)
+        let target2 = vm.library.photos[vm.library.photos.count / 2]
         bench(tag, "5b setRating no filter") {
             flip.toggle()
-            vm.setRating(flip ? 4 : 3, for: target2)
+            vm.library.setRating(flip ? 4 : 3, for: target2)
         }
 
         // 8 bin moves and batch rating (added by task 10; each run moves a different photo)
-        vm.applyFilter(.all)
-        let binTargets = Array(vm.photos.prefix(6)) // 1 warmup + 5 runs
+        vm.library.applyFilter(.all)
+        let binTargets = Array(vm.library.photos.prefix(6)) // 1 warmup + 5 runs
         var nextTarget = 0
         bench(tag, "8a moveToBin single photo") {
             vm.deletePhoto(binTargets[nextTarget])
@@ -296,18 +296,18 @@ final class DataPathBenchmarks: XCTestCase {
             vm.restoreFromBin([binTargets[nextTarget]])
             nextTarget += 1
         }
-        XCTAssertEqual(vm.allPhotos.count, n)
-        vm.selectedPhotos = Set(vm.photos.prefix(50).map(\.id))
+        XCTAssertEqual(vm.library.allPhotos.count, n)
+        vm.selection.selectedPhotos = Set(vm.library.photos.prefix(50).map(\.id))
         bench(tag, "8c setRatingForSelection 50 photos") {
             flip.toggle()
             vm.setRatingForSelection(flip ? 4 : 3)
         }
-        vm.selectedPhotos = []
+        vm.selection.selectedPhotos = []
         await MetadataWriter.shared.flush() // let the queued metadata writes drain
 
         // 6 in-memory baselines
-        vm.applyFilter(.all)
-        let all = vm.allPhotos
+        vm.library.applyFilter(.all)
+        let all = vm.library.allPhotos
         bench(tag, "6a allPhotos.filter { rating == 3 }") { _ = all.filter { $0.rating == 3 } }
         bench(tag, "6b one-pass rating/tag/category/type counts") {
             var counts: [Int: Int] = [:], cat: [String: Int] = [:], tc: [UUID: Int] = [:]
@@ -345,27 +345,27 @@ final class DataPathBenchmarks: XCTestCase {
                 p.tags.contains { $0.name.lowercased().contains("t") || $0.category.lowercased().contains("t") }
             }
         }
-        vm.selectedPhotos = Set(all.prefix(50).map(\.id))
-        bench(tag, "6k selectedPhotosList (50 selected)") { _ = vm.selectedPhotosList }
-        vm.selectedPhotos = []
+        vm.selection.selectedPhotos = Set(all.prefix(50).map(\.id))
+        bench(tag, "6k selectedPhotosList (50 selected)") { _ = vm.selection.selectedPhotosList }
+        vm.selection.selectedPhotos = []
 
         // 7x Rescan where every row already exists (empty files → no metadata reads)
         context.insert(PhotoLibrary(rootFolderPath: filesDir.path))
         try context.save()
         vm.loadExistingData()
-        XCTAssertNotNil(vm.currentLibrary)
+        XCTAssertNotNil(vm.library.currentLibrary)
         var rescanMainActor: [Double] = [] // (added by task 20)
         try await benchAsync(tag, "7x rescanCurrentLibrary() all-existing (until !isScanning)", runs: 3) {
-            vm.rescanCurrentLibrary()
+            vm.library.rescanCurrentLibrary()
             try await waitForScan(vm)
             if let t = lastScanMainActorMs(vm) { rescanMainActor.append(t) }
         }
-        print("BENCH|\(tag)|info|scanProgress=\(vm.scanProgress)")
+        print("BENCH|\(tag)|info|scanProgress=\(vm.library.scanProgress)")
         // (added by task 20) The seed's `/var/…` paths aren't the `/private/var/…` ones the folder enumerator
         // reports, so 7x's warm-up run inserts a second row per file and its timed runs rescan twice the rows.
         // 7w (testRescanUnchanged10k) is the true unchanged-library rescan.
         let storedRows = (try? context.fetchCount(FetchDescriptor<PhotoAsset>())) ?? -1
-        print("BENCH|\(tag)|info|7x stored rows=\(storedRows) allPhotos=\(vm.allPhotos.count)")
+        print("BENCH|\(tag)|info|7x stored rows=\(storedRows) allPhotos=\(vm.library.allPhotos.count)")
         reportIfAny(tag, "7x main-actor time of each rescan (scan task)", Array(rescanMainActor.dropFirst()))
         try await benchAsync(tag, "7y FolderScanner.scan alone", runs: 3) {
             _ = await FolderScanner().scan(folderURL: filesDir)
@@ -401,7 +401,7 @@ final class DataPathBenchmarks: XCTestCase {
             try await waitForScan(launchVM)
             launchScan.append(ms(clock.now - start))
             if let t = lastScanMainActorMs(launchVM) { launchMainActor.append(t) }
-            XCTAssertEqual(launchVM.allPhotos.count, 10_000)
+            XCTAssertEqual(launchVM.library.allPhotos.count, 10_000)
             retained.append(launchVM)
         }
         report(tag, "7v launch: setModelContext() with a library, fresh container (synchronous part)", launchSync)
@@ -414,13 +414,13 @@ final class DataPathBenchmarks: XCTestCase {
         try await waitForScan(vm)
         var mainActor: [Double] = []
         try await benchAsync(tag, "7w rescanCurrentLibrary() unchanged 10k library (until !isScanning)") {
-            vm.rescanCurrentLibrary()
+            vm.library.rescanCurrentLibrary()
             try await waitForScan(vm)
             if let t = lastScanMainActorMs(vm) { mainActor.append(t) }
         }
         reportIfAny(tag, "7w main-actor time of each rescan (scan task)", Array(mainActor.dropFirst()))
         let storedRows = (try? context.fetchCount(FetchDescriptor<PhotoAsset>())) ?? -1
-        print("BENCH|\(tag)|info|7w scanProgress=\(vm.scanProgress) stored rows=\(storedRows) allPhotos=\(vm.allPhotos.count)")
+        print("BENCH|\(tag)|info|7w scanProgress=\(vm.library.scanProgress) stored rows=\(storedRows) allPhotos=\(vm.library.allPhotos.count)")
     }
 
     // MARK: Scan of real JPEGs
@@ -477,13 +477,13 @@ final class DataPathBenchmarks: XCTestCase {
             ctx.insert(PhotoLibrary(rootFolderPath: photosDir.path))
             try ctx.save()
             vm.loadExistingData()
-            XCTAssertNotNil(vm.currentLibrary)
+            XCTAssertNotNil(vm.library.currentLibrary)
             let start = clock.now
-            vm.rescanCurrentLibrary()
+            vm.library.rescanCurrentLibrary()
             try await waitForScan(vm)
             firstSamples.append(ms(clock.now - start))
             if let t = lastScanMainActorMs(vm) { firstMainActor.append(t) }
-            print("BENCH|\(tag)|info|run\(run) scanProgress=\(vm.scanProgress) allPhotos=\(vm.allPhotos.count) tags=\(vm.allTags.count) tagged=\(vm.allPhotos.filter { !$0.tags.isEmpty }.count) rated=\(vm.allPhotos.filter { $0.rating > 0 }.count)")
+            print("BENCH|\(tag)|info|run\(run) scanProgress=\(vm.library.scanProgress) allPhotos=\(vm.library.allPhotos.count) tags=\(vm.library.allTags.count) tagged=\(vm.library.allPhotos.filter { !$0.tags.isEmpty }.count) rated=\(vm.library.allPhotos.filter { $0.rating > 0 }.count)")
             lastVM = vm
             lastCtx = ctx
         }
@@ -494,7 +494,7 @@ final class DataPathBenchmarks: XCTestCase {
         let ctx = lastCtx!
         var secondMainActor: [Double] = [] // (added by task 20)
         try await benchAsync(tag, "SECOND rescanCurrentLibrary() all-existing (until !isScanning)") {
-            vm.rescanCurrentLibrary()
+            vm.library.rescanCurrentLibrary()
             try await waitForScan(vm)
             if let t = lastScanMainActorMs(vm) { secondMainActor.append(t) }
         }
@@ -502,14 +502,14 @@ final class DataPathBenchmarks: XCTestCase {
 
         // 1000 calls = 500 tagged photos x 2 keywords; tags already exist → one fetch per call
         bench(tag, "findOrCreateTag x1000 (existing tags)") {
-            for i in 0..<1000 { _ = vm.findOrCreateTag(name: i % 2 == 0 ? "a" : "b", category: "cat", in: ctx) }
+            for i in 0..<1000 { _ = vm.library.findOrCreateTag(name: i % 2 == 0 ? "a" : "b", category: "cat", in: ctx) }
         }
-        let tagDict = Dictionary(uniqueKeysWithValues: vm.allTags.map { ($0.fullName, $0) })
+        let tagDict = Dictionary(uniqueKeysWithValues: vm.library.allTags.map { ($0.fullName, $0) })
         bench(tag, "dictionary tag lookup x1000 (alternative)") {
             for i in 0..<1000 { _ = tagDict[i % 2 == 0 ? "cat:a" : "cat:b"] }
         }
         bench(tag, "context.save() nothing dirty") { try? ctx.save() }
-        let all = vm.allPhotos
+        let all = vm.library.allPhotos
         bench(tag, "same-value reassign 4 fields on 1000 rows + save") {
             for p in all { p.jpgPath = p.jpgPath; p.rawPath = p.rawPath; p.fileSize = p.fileSize; p.isDeleted = false }
             try? ctx.save()

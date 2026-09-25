@@ -10,15 +10,15 @@ struct TagEditorView: View {
     @State private var searchText = ""
 
     private var isMultiSelection: Bool {
-        viewModel.selectedPhotos.count > 1
+        viewModel.selection.selectedPhotos.count > 1
     }
 
     private var filteredExistingTags: [Tag] {
         if searchText.isEmpty {
-            return viewModel.allTags
+            return viewModel.library.allTags
         }
         let query = searchText.lowercased()
-        return viewModel.allTags.filter {
+        return viewModel.library.allTags.filter {
             $0.name.lowercased().contains(query) || $0.category.lowercased().contains(query)
         }
     }
@@ -26,7 +26,7 @@ struct TagEditorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(isMultiSelection ? "Tags (\(viewModel.selectedPhotos.count) photos)" : "Tags")
+                Text(isMultiSelection ? "Tags (\(viewModel.selection.selectedPhotos.count) photos)" : "Tags")
                     .font(.headline)
                 Spacer()
                 Button {
@@ -50,7 +50,7 @@ struct TagEditorView: View {
                                 Text(tag.fullName)
                                     .font(.caption)
                                 Button(action: {
-                                    viewModel.removeTag(tag, from: photo)
+                                    viewModel.library.removeTag(tag, from: photo)
                                 }) {
                                     Image(systemName: "xmark.circle.fill")
                                         .font(.caption2)
@@ -138,9 +138,9 @@ struct TagEditorView: View {
             viewModel.addTagToSelection(name: tag.name, category: tag.category)
         } else if let photo {
             if photo.tags.contains(where: { $0.id == tag.id }) {
-                viewModel.removeTag(tag, from: photo)
+                viewModel.library.removeTag(tag, from: photo)
             } else {
-                viewModel.addTag(name: tag.name, category: tag.category, to: photo)
+                viewModel.library.addTag(name: tag.name, category: tag.category, to: photo)
             }
         }
     }
@@ -153,7 +153,7 @@ struct TagEditorView: View {
         if isMultiSelection {
             viewModel.addTagToSelection(name: name, category: category)
         } else if let photo {
-            viewModel.addTag(name: name, category: category, to: photo)
+            viewModel.library.addTag(name: name, category: category, to: photo)
         }
 
         newTagName = ""

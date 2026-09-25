@@ -123,8 +123,8 @@ final class MetadataRealFileTests: XCTestCase {
         let vm = PhotoLibraryViewModel()
         vm.setModelContext(context)
 
-        vm.setRating(3, for: photo)
-        vm.addTag(name: "ann", category: "people", to: photo)
+        vm.library.setRating(3, for: photo)
+        vm.library.addTag(name: "ann", category: "people", to: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(try embeddedRating(jpg), 3)

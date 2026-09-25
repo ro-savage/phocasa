@@ -2,31 +2,42 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
+/// The window: the library and detail view (`MainContentView`), with the toolbar (`LibraryToolbar`), the status bar
+/// (`StatusBarView`), search, the permanent-delete alert, the folder picker and the keyboard handling. The toolbar and
+/// the status bar are their own types, so selection changes don't re-evaluate this body.
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @State private var viewModel = PhotoLibraryViewModel()
+    @State private var viewModel: PhotoLibraryViewModel
     @FocusState private var isContentFocused: Bool
 
+    /// Body evaluations, for tests.
+    @MainActor static var bodyEvaluations = 0
+
+    init(viewModel: PhotoLibraryViewModel = PhotoLibraryViewModel()) {
+        _viewModel = State(initialValue: viewModel)
+    }
+
     var body: some View {
-        mainContent
+        let _ = Self.bodyEvaluations += 1
+        MainContentView(viewModel: viewModel)
             .focusable()
             .focused($isContentFocused)
             .focusEffectDisabled()
-            .toolbar { toolbarContent }
-            .searchable(text: $viewModel.searchText, prompt: "Search by tag or filename")
+            .toolbar { LibraryToolbar(viewModel: viewModel) }
+            .searchable(text: Bindable(viewModel.library).searchText, prompt: "Search by tag or filename")
             .searchSuggestions {
-                if !viewModel.searchText.isEmpty {
-                    ForEach(viewModel.searchSuggestions, id: \.self) { suggestion in
-                        Label(suggestion, systemImage: viewModel.tagCategories.contains(suggestion) ? "folder" : "tag")
+                if !viewModel.library.searchText.isEmpty {
+                    ForEach(viewModel.library.searchSuggestions, id: \.self) { suggestion in
+                        Label(suggestion, systemImage: viewModel.library.tagCategories.contains(suggestion) ? "folder" : "tag")
                             .searchCompletion(suggestion)
                     }
                 }
             }
-            .task(id: viewModel.searchText) {
+            .task(id: viewModel.library.searchText) {
                 // Debounce: a new keystroke cancels this task before it filters.
                 try? await Task.sleep(for: .milliseconds(150))
                 guard !Task.isCancelled else { return }
-                viewModel.applyCurrentFilter()
+                viewModel.library.applyCurrentFilter()
             }
             .onChange(of: viewModel.showingDetail) {
                 isContentFocused = true
@@ -48,10 +59,10 @@ struct ContentView: View {
                 allowsMultipleSelection: false
             ) { result in
                 if case .success(let urls) = result, let url = urls.first {
-                    viewModel.handleFolderSelected(url: url)
+                    viewModel.library.handleFolderSelected(url: url)
                 }
             }
-            .overlay(alignment: .bottom) { statusBar }
+            .overlay(alignment: .bottom) { StatusBarView(library: viewModel.library, selection: viewModel.selection) }
             .focusedSceneValue(\.openFolderAction) { viewModel.openFolder() }
             .onAppear {
                 viewModel.setModelContext(modelContext)
@@ -71,29 +82,6 @@ struct ContentView: View {
             }
     }
 
-    @ViewBuilder
-    private var mainContent: some View {
-        if viewModel.showingDetail, let photo = viewModel.selectedDetailPhoto {
-            HStack(spacing: 0) {
-                PhotoDetailView(viewModel: viewModel, photo: photo)
-                    .frame(minWidth: 600, minHeight: 600)
-
-                if let session = viewModel.editSession {
-                    Divider()
-                    EditSidebarView(session: session, viewModel: viewModel)
-                }
-            }
-        } else {
-            NavigationSplitView {
-                SidebarView(viewModel: viewModel)
-                    .frame(minWidth: 200)
-            } detail: {
-                PhotoGridView(viewModel: viewModel)
-                    .frame(minWidth: 400, minHeight: 300)
-            }
-        }
-    }
-
     private func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
         if viewModel.showGridTagEditor { return .ignored }
 
@@ -109,7 +97,7 @@ struct ContentView: View {
             } else if viewModel.showingDetail {
                 viewModel.closeDetail()
             } else {
-                viewModel.clearSelection()
+                viewModel.selection.clearSelection()
             }
             return .handled
 
@@ -132,7 +120,7 @@ struct ContentView: View {
             if viewModel.showingDetail {
                 viewModel.navigateDetail(direction: -1)
             } else {
-                viewModel.navigateGrid(direction: .left, extendSelection: shift)
+                viewModel.selection.navigateGrid(direction: .left, extendSelection: shift, columns: viewModel.gridColumns)
             }
             return .handled
 
@@ -140,7 +128,7 @@ struct ContentView: View {
             if viewModel.showingDetail {
                 viewModel.navigateDetail(direction: 1)
             } else {
-                viewModel.navigateGrid(direction: .right, extendSelection: shift)
+                viewModel.selection.navigateGrid(direction: .right, extendSelection: shift, columns: viewModel.gridColumns)
             }
             return .handled
 
@@ -148,7 +136,7 @@ struct ContentView: View {
             if viewModel.showingDetail {
                 viewModel.navigateDetail(direction: -1)
             } else {
-                viewModel.navigateGrid(direction: .up, extendSelection: shift)
+                viewModel.selection.navigateGrid(direction: .up, extendSelection: shift, columns: viewModel.gridColumns)
             }
             return .handled
 
@@ -156,7 +144,7 @@ struct ContentView: View {
             if viewModel.showingDetail {
                 viewModel.navigateDetail(direction: 1)
             } else {
-                viewModel.navigateGrid(direction: .down, extendSelection: shift)
+                viewModel.selection.navigateGrid(direction: .down, extendSelection: shift, columns: viewModel.gridColumns)
             }
             return .handled
 
@@ -170,7 +158,7 @@ struct ContentView: View {
 
         // Cmd+A: select all
         if command && keyPress.characters == "a" {
-            viewModel.selectAll()
+            viewModel.selection.selectAll()
             return .handled
         }
 
@@ -186,99 +174,6 @@ struct ContentView: View {
     }
 
     private var firstSelectedPhoto: PhotoAsset? {
-        viewModel.primarySelectedPhoto
-    }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button(action: { viewModel.openFolder() }) {
-                Label("Open Folder", systemImage: "folder.badge.plus")
-            }
-
-            if viewModel.currentLibrary != nil {
-                Button(action: { viewModel.rescanCurrentLibrary() }) {
-                    Label("Rescan", systemImage: "arrow.clockwise")
-                }
-            }
-        }
-
-        ToolbarItemGroup(placement: .automatic) {
-            Button(action: { viewModel.toggleSortOrder() }) {
-                Label(
-                    viewModel.sortNewestFirst ? "Newest First" : "Oldest First",
-                    systemImage: viewModel.sortNewestFirst ? "arrow.down" : "arrow.up"
-                )
-            }
-            .help(viewModel.sortNewestFirst ? "Sorted newest first" : "Sorted oldest first")
-
-            HStack(spacing: 4) {
-                Image(systemName: "minus.magnifyingglass")
-                    .font(.caption)
-                Slider(value: Binding(
-                    get: { Double(22 - viewModel.gridColumns) },
-                    set: { viewModel.gridColumns = 22 - Int($0) }
-                ), in: 2...20, step: 1)
-                .frame(width: 120)
-                Image(systemName: "plus.magnifyingglass")
-                    .font(.caption)
-            }
-        }
-
-        ToolbarItemGroup(placement: .automatic) {
-            if viewModel.viewingBin && !viewModel.selectedPhotos.isEmpty {
-                Button(action: { viewModel.restoreSelected() }) {
-                    Label("Restore", systemImage: "arrow.uturn.backward")
-                }
-            }
-
-            if !viewModel.selectedPhotos.isEmpty {
-                Button(role: .destructive, action: { viewModel.deleteSelected() }) {
-                    Label(viewModel.viewingBin ? "Delete Forever" : "Delete", systemImage: "trash")
-                }
-            }
-
-            if viewModel.viewingBin && viewModel.binCount > 0 {
-                Button(role: .destructive, action: { viewModel.emptyBin() }) {
-                    Label("Empty Bin", systemImage: "trash.slash")
-                }
-            }
-        }
-    }
-
-    private var statusBar: some View {
-        HStack {
-            if viewModel.isScanning {
-                ProgressView()
-                    .scaleEffect(0.6)
-                Text(viewModel.scanProgress)
-                    .font(.caption)
-            } else if viewModel.viewingBin {
-                Text("\(viewModel.binCount) in bin")
-                    .font(.caption)
-                if !viewModel.selectedPhotos.isEmpty {
-                    Text("• \(viewModel.selectedPhotos.count) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("\(viewModel.allPhotos.count) photos")
-                    .font(.caption)
-                if viewModel.photos.count != viewModel.allPhotos.count {
-                    Text("(\(viewModel.photos.count) shown)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if !viewModel.selectedPhotos.isEmpty {
-                    Text("• \(viewModel.selectedPhotos.count) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(.bar)
+        viewModel.selection.primarySelectedPhoto
     }
 }

@@ -144,7 +144,7 @@ final class DetailViewTests: XCTestCase {
         try context.save()
         let viewModel = PhotoLibraryViewModel()
         viewModel.setModelContext(context)
-        let photos = viewModel.photos
+        let photos = viewModel.library.photos
         XCTAssertEqual(photos.map(\.jpgPath), paths)
         viewModel.openDetail(for: photos[0])
 

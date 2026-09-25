@@ -218,11 +218,10 @@ struct PhotoDetailView: View {
         minimapThumbnail = thumbnail.flatMap(DisplayImage.init(nsImage:))
     }
 
-    /// Prefetches the photos either side, plus a second one in the direction of travel. One `firstIndex` per
-    /// navigation (task 30 swaps it for an index lookup).
+    /// Prefetches the photos either side, plus a second one in the direction of travel.
     private func prefetchNeighbours(of photo: PhotoAsset, viewport: CGSize) {
-        let photos = viewModel.photos
-        guard let index = photos.firstIndex(where: { $0.id == photo.id }) else { return }
+        let photos = viewModel.library.photos
+        guard let index = viewModel.library.index(of: photo.id) else { return }
         let step = (lastIndex.map { index < $0 } ?? false) ? -1 : 1
         lastIndex = index
         let paths = [index + step, index + 2 * step, index - step]
