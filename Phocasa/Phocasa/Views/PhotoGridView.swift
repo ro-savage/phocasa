@@ -2,46 +2,52 @@ import SwiftUI
 
 struct PhotoGridView: View {
     @Bindable var viewModel: PhotoLibraryViewModel
+    @Environment(\.displayScale) private var displayScale
+
+    nonisolated private static let spacing: CGFloat = 8
+    /// The default `.padding()` around the grid, on both sides.
+    nonisolated private static let horizontalPadding: CGFloat = 32
+    /// `PhotoGridItemView` pads its content by 6 on each side.
+    nonisolated private static let cellInset: CGFloat = 12
 
     var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 8), count: viewModel.gridColumns)
+        Array(repeating: GridItem(.flexible(), spacing: Self.spacing), count: viewModel.gridColumns)
+    }
+
+    /// The thumbnail size bucket for a grid layout, from the width of the thumbnail each cell draws.
+    /// It only changes when a resize or zoom crosses a bucket edge, so the cells' loads (keyed on it) don't restart
+    /// on every pixel of a window resize (spec §C4).
+    nonisolated static func thumbnailBucket(gridWidth: CGFloat, columns: Int, displayScale: CGFloat) -> Int {
+        let cols = CGFloat(max(columns, 1))
+        let cellWidth = (gridWidth - horizontalPadding - spacing * (cols - 1)) / cols
+        return ImageLoader.thumbnailBucket(forPixels: (cellWidth - cellInset) * displayScale)
     }
 
     var body: some View {
         GeometryReader { geometry in
-            let availableWidth = geometry.size.width - 32 // ScrollView padding
-            let spacing: CGFloat = 8
-            let cols = CGFloat(viewModel.gridColumns)
-            let cellWidth = (availableWidth - spacing * (cols - 1)) / cols
-            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-            let thumbSize = max(300, cellWidth * scale)
+            let bucket = Self.thumbnailBucket(
+                gridWidth: geometry.size.width, columns: viewModel.gridColumns, displayScale: displayScale
+            )
 
             ScrollViewReader { scrollProxy in
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 8) {
+                    LazyVGrid(columns: columns, spacing: Self.spacing) {
                         ForEach(viewModel.photos, id: \.id) { photo in
                             PhotoGridItemView(
                                 photo: photo,
                                 isSelected: viewModel.selectedPhotos.contains(photo.id),
-                                thumbnailSize: thumbSize,
+                                thumbnailBucket: bucket,
                                 onRate: { rating in
                                     viewModel.setRating(rating, for: photo)
+                                },
+                                onSelect: {
+                                    handleSelectionClick(photo)
+                                },
+                                onOpen: {
+                                    viewModel.openDetail(for: photo)
                                 }
                             )
                         .id(photo.id)
-                        .onTapGesture(count: 2) {
-                            viewModel.openDetail(for: photo)
-                        }
-                        .onTapGesture(count: 1) {
-                            let addToSelection = NSEvent.modifierFlags.contains(.command)
-                            let rangeSelect = NSEvent.modifierFlags.contains(.shift)
-
-                            if rangeSelect {
-                                viewModel.rangeSelect(to: photo)
-                            } else {
-                                viewModel.toggleSelection(for: photo, addToSelection: addToSelection)
-                            }
-                        }
                         .contextMenu {
                             contextMenu(for: photo)
                         }
@@ -82,6 +88,17 @@ struct PhotoGridView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func handleSelectionClick(_ photo: PhotoAsset) {
+        let addToSelection = NSEvent.modifierFlags.contains(.command)
+        let rangeSelect = NSEvent.modifierFlags.contains(.shift)
+
+        if rangeSelect {
+            viewModel.rangeSelect(to: photo)
+        } else {
+            viewModel.toggleSelection(for: photo, addToSelection: addToSelection)
         }
     }
 
