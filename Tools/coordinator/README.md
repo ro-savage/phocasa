@@ -7,6 +7,7 @@ target.
 | File | What it is |
 |---|---|
 | `CoordinatorBenchmarks.swift` | A/B benchmark test class. It uses only public app APIs, so the same file runs on `main` and on a task branch. Copy it into `Phocasa/PhocasaTests/` of the checkout you're measuring, and delete it afterwards. |
+| `CoordinatorEditBenchmarks.swift`, `CoordinatorEditBenchmarks-Session.swift` | The edit A/B tests (`CoordinatorEditBenchmarks`), in two variants with the same labels. Before task 22 copy the first (view-model editing API); from task 22 on copy the second (`EditSession`). Copy exactly one. |
 | `runtests.sh` | `runtests.sh <checkout> <label> [xcodebuild args…]`: runs `xcodebuild test` with its own DerivedData (`$TMPDIR/phocasa-dd-coord-<label>`), then prints the result, the test count, errors and source warnings. The log goes to `$TMPDIR/phocasa-coord-<label>.test.log`. |
 | `cmp.py` | `cmp.py before.txt after.txt [regex]`: compares `BENCH|`/`COORD|` lines and flags rises over 5%. |
 | `app-driver/*.swift` | Tiny CLIs for driving and inspecting the real app. `click x y [n]` posts real mouse clicks (screen points). `drag drag x1 y1 x2 y2 [steps]` / `drag scroll x y lines [n]` post drags and scroll-wheel events. `rating <files>` prints `xmp:Rating` via ImageIO. `orient <files>` lists files with EXIF orientation ≠ 1. Build each with `swiftc -O file.swift -o "$TMPDIR/<name>"`. |
@@ -23,10 +24,12 @@ export IMAGEBENCH_DIR="$TMPDIR/phocasa-imagebench-coord"
 (cd Tools/imagebench && swiftc -O -swift-version 5 imagebench.swift -o "$TMPDIR/imagebench-coord") \
   && "$TMPDIR/imagebench-coord" gen && "$TMPDIR/imagebench-coord" copies     # 200 × 24 MP JPEGs, ~3 GB
 cp Tools/coordinator/CoordinatorBenchmarks.swift "$B/Phocasa/PhocasaTests/"
+cp Tools/coordinator/CoordinatorEditBenchmarks-Session.swift "$B/Phocasa/PhocasaTests/"   # or CoordinatorEditBenchmarks.swift before task 22
 export TEST_RUNNER_PHOCASA_BENCH=1 \
        TEST_RUNNER_COORD_BENCH_DATA="$IMAGEBENCH_DIR/data" \
-       TEST_RUNNER_COORD_REAL_DIR="$HOME/PhocasaBenchRAW"
-Tools/coordinator/runtests.sh "$B" A-main -only-testing:PhocasaTests/DataPathBenchmarks -only-testing:PhocasaTests/CoordinatorBenchmarks
+       TEST_RUNNER_COORD_REAL_DIR="$HOME/PhocasaBenchRAW" \
+       TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR="$TMPDIR/phocasa-coord-thumbcache"   # task 21's disk cache (temp)
+Tools/coordinator/runtests.sh "$B" A-main -only-testing:PhocasaTests/DataPathBenchmarks -only-testing:PhocasaTests/CoordinatorBenchmarks -only-testing:PhocasaTests/CoordinatorEditBenchmarks
 grep -hE '^(BENCH|COORD)\|' "$TMPDIR/phocasa-coord-A-main.test.log" > A-main.txt
 # …check out the branch in $B, run the same tests, then:
 python3 Tools/coordinator/cmp.py A-main.txt B-branch.txt
@@ -39,10 +42,15 @@ python3 Tools/coordinator/cmp.py A-main.txt B-branch.txt
 - Gated benchmarks that live in task test files run with the same `TEST_RUNNER_PHOCASA_BENCH=1`:
   `ThumbnailSchedulerBenchmarks`, `DetailNavigationBenchmarks`, `ImageEditingServiceBenchmarks`, and whatever
   wave 2 adds.
-- **The edit tests (`testEdit*`) use the view model's editing API:** `startEditing`, `editParameters`,
-  `updateEditPreview`, `editedPreviewImage`, `fullResEditImage`, `stopEditing`. Task 22 moves that into
-  `EditSession`. Once it merges, update these tests to `vm.editSession?.parameters` / `previewImage` / `fullImage`,
-  and keep the pre-22 variant for the "before" side.
+- **The edit tests (`testEdit*`)** live in `CoordinatorEditBenchmarks`. Task 22 moved editing into `EditSession`, so
+  there are two variants: the view-model API (`startEditing`, `editParameters` + `updateEditPreview`,
+  `editedPreviewImage`, `fullResEditImage`) for code before task 22, and the session API (`vm.editSession`,
+  `session.parameters`, whose setter schedules the render, `previewImage`, `fullImage`) from task 22 on.
+- **Thumbnail disk cache (task 21 on).** With `PHOCASA_THUMBNAIL_CACHE_DIR` set, the test host's `ImageLoader.shared`
+  keeps its disk cache in that temp folder; without it, the test host has none. Cold thumbnail runs empty the folder
+  first (after its writes settle); `testThumbRelaunch` keeps it warm and empties only memory. Code without a disk
+  cache ignores the variable, so on `main` "relaunch" equals "cold". Check that nothing lands in
+  `~/Library/Caches/com.phocasa.app`.
 - `~/PhocasaBenchRAW` is the user's read-only folder of 190 real JPG+ARW pairs (16 MP; 12 rotated). The benchmarks
   only read it.
 
