@@ -29,11 +29,10 @@ struct PhotoGridItemView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            RatingView(rating: photo.rating, compact: true, onRate: onRate)
-                // The cell selects on a plain tap and opens on a simultaneous double-tap (below). Without this,
-                // a double-click on a star would rate twice (set, then clear). With it, the stars wait out
-                // double-click detection as they always have, and a double-click on them opens the photo.
-                .highPriorityGesture(TapGesture(count: 2).onEnded {})
+            // Keeps the rating row's place (every rating has the same size). The stars you click are in the
+            // overlay below.
+            RatingView(rating: 0, compact: true)
+                .hidden()
         }
         .padding(6)
         .background(
@@ -48,6 +47,13 @@ struct PhotoGridItemView: View {
         // A double-click therefore selects, then opens, like Finder.
         .onTapGesture(perform: onSelect)
         .simultaneousGesture(TapGesture(count: 2).onEnded(onOpen))
+        // The stars sit over the cell, outside its select and open gestures (a simultaneous double-tap on the
+        // cell would fire for a double-click anywhere inside it). So a click on a star rates at once and doesn't
+        // select, and a double-click on the stars rates instead of opening the photo (user decision, task 23).
+        .overlay(alignment: .bottom) {
+            RatingView(rating: photo.rating, compact: true, onRate: onRate)
+                .padding(.bottom, 6)
+        }
         .task(id: ThumbnailTaskID(path: path, bucket: thumbnailBucket)) {
             await loadThumbnail(path: path)
         }

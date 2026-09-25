@@ -55,19 +55,26 @@ final class PhotoGridThumbnailBucketTests: XCTestCase {
 
 // MARK: - Click handling (spec §C5)
 
-/// Drives the real `PhotoGridItemView` with synthesized mouse events in a key, non-activating panel.
+/// Drives the real `PhotoGridItemView` with synthesized mouse events in a borderless, non-activating panel.
+///
+/// The panel doesn't need to be key: a borderless panel hands the events straight to SwiftUI, with the same
+/// gesture results as a key window (checked for five gesture wirings, task 23). So these tests also run while
+/// the screen is locked or another app is frontmost, instead of skipping.
 @MainActor
 final class PhotoGridItemViewClickTests: XCTestCase {
 
     private final class Log {
         var events: [String] = []
         var ratings: [Int] = []
+        /// When each rating arrived (`systemUptime`, the clock the synthesized events use).
+        var ratingTimes: [TimeInterval] = []
         func count(_ name: String) -> Int { events.filter { $0 == name }.count }
     }
 
     private var container: ModelContainer!
     private var window: NSWindow!
     private var log: Log!
+    private var photo: PhotoAsset!
     private static let cellWidth: CGFloat = 160
 
     override func setUp() async throws {
@@ -79,6 +86,7 @@ final class PhotoGridItemViewClickTests: XCTestCase {
         // No file paths: the cell shows its placeholder and never touches the disk.
         let photo = PhotoAsset(fileName: "click.jpg", folderPath: "/nonexistent")
         context.insert(photo)
+        self.photo = photo
 
         let log = Log()
         self.log = log
@@ -86,7 +94,12 @@ final class PhotoGridItemViewClickTests: XCTestCase {
             photo: photo,
             isSelected: false,
             thumbnailBucket: 384,
-            onRate: { log.ratings.append($0) },
+            // Like the grid: the rating lands on the model, so the cell redraws with it.
+            onRate: { rating in
+                log.ratings.append(rating)
+                log.ratingTimes.append(ProcessInfo.processInfo.systemUptime)
+                photo.rating = rating
+            },
             onSelect: { log.events.append("select") },
             onOpen: { log.events.append("open") }
         )
@@ -98,22 +111,20 @@ final class PhotoGridItemViewClickTests: XCTestCase {
         XCTAssertGreaterThan(size.height, Self.cellWidth, "square thumbnail plus name and rating rows")
         hosting.sizingOptions = []
         let panel = NSPanel(contentRect: NSRect(origin: NSPoint(x: 200, y: 200), size: size),
-                            styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.becomesKeyOnlyIfNeeded = false
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.contentView = hosting
         hosting.layoutSubtreeIfNeeded()
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeKey()
+        panel.orderFrontRegardless()
         window = panel
         spin(0.2)
-        try XCTSkipUnless(panel.isKeyWindow, "The test panel couldn't become key, so it can't receive clicks")
         XCTAssertEqual(hosting.frame.size, size)
     }
 
     override func tearDown() async throws {
         window?.close()
         window = nil
+        photo = nil
         container = nil
         log = nil
     }
@@ -199,12 +210,60 @@ final class PhotoGridItemViewClickTests: XCTestCase {
         XCTAssertEqual(log.events, [], "rating from the grid doesn't change the selection")
     }
 
-    func testDoubleClickOnTheStarsOpensWithoutRating() {
+    // MARK: Star clicks are instant (user decision 3, task 23)
+
+    func testClickOnAStarRatesWithoutWaitingForDoubleClickDetection() {
+        let clicked = ProcessInfo.processInfo.systemUptime
+        click(middleStarPoint)
+        spin(until: { !log.ratings.isEmpty }, timeout: 1)
+
+        let latency = (log.ratingTimes.first ?? .infinity) - clicked
+        XCTAssertLessThan(latency, 0.05, "the rating must not wait out the double-click interval")
+        XCTAssertEqual(log.ratings, [3])
+        XCTAssertEqual(photo.rating, 3)
+    }
+
+    func testDoubleClickOnAStarLeavesThatRatingAndDoesNotOpen() {
         doubleClick(middleStarPoint)
-        spin(until: { log.count("open") > 0 })
         spin(settle)
 
-        XCTAssertEqual(log.ratings, [], "a double-click must not rate twice")
-        XCTAssertEqual(log.events, ["open"])
+        XCTAssertEqual(photo.rating, 3, "a double-click on ★3 gives 3, not 3 then cleared")
+        XCTAssertEqual(log.ratings.last, 3)
+        XCTAssertEqual(log.events, [], "rating isn't opening: no open, and no selection change")
+    }
+
+    func testDoubleClickOnTheCurrentStarKeepsIt() {
+        photo.rating = 3
+        spin(0.1)
+
+        doubleClick(middleStarPoint)
+        spin(settle)
+
+        XCTAssertEqual(photo.rating, 3)
+        XCTAssertEqual(log.events, [])
+    }
+
+    func testSingleClickOnTheCurrentStarClearsIt() {
+        photo.rating = 3
+        spin(0.1)
+
+        click(middleStarPoint)
+        spin(settle)
+
+        XCTAssertEqual(log.ratings, [0])
+        XCTAssertEqual(photo.rating, 0)
+        XCTAssertEqual(log.events, [])
+    }
+
+    func testClickOnTheStarJustSetClearsItOnceTheDoubleClickIntervalHasPassed() {
+        click(middleStarPoint)
+        spin(until: { photo.rating == 3 })
+        spin(settle)
+
+        click(middleStarPoint)
+        spin(settle)
+
+        XCTAssertEqual(log.ratings, [3, 0], "a deliberate second click, not part of a double-click, clears the rating")
+        XCTAssertEqual(photo.rating, 0)
     }
 }
