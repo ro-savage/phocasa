@@ -331,6 +331,15 @@ final class PhotoLibraryViewModel {
         }
     }
 
+    /// For code that changes a photo's rating, tags, file paths or file name directly rather than
+    /// through this view model's methods (for example, an export that gives a RAW-only photo a JPG):
+    /// updates the in-memory library, the grid and the counts to match the models.
+    func photosDidChange(_ changed: [PhotoAsset]) {
+        applyFactChanges(changed)
+        refreshVisiblePhotos()
+        sortTagCategories()
+    }
+
     /// Re-reads the facts of photos whose rating or tags changed (a few model reads each), and
     /// applies them to the counts and the grid.
     private func applyFactChanges(_ changed: [PhotoAsset]) {

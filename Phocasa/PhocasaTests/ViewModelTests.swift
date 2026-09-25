@@ -1019,6 +1019,23 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(ids(viewModel.photos), [late.id])
     }
 
+    func testPhotosDidChangePicksUpDirectModelChanges() {
+        let raw = PhotoAsset(fileName: "raw", rawPath: "/fake/raw.arw", folderPath: "/fake", creationDate: date(2000))
+        context.insert(raw)
+        let jpg = insertPhoto(name: "jpg", creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.applyFilter(.jpgOnly)
+        XCTAssertEqual(ids(viewModel.photos), [jpg.id])
+        XCTAssertEqual(viewModel.jpgCount, 1)
+
+        // As an export that writes a JPG next to a RAW-only photo does.
+        raw.jpgPath = "/fake/raw-raw-edit.jpg"
+        viewModel.photosDidChange([raw])
+
+        XCTAssertEqual(ids(viewModel.photos), [raw.id, jpg.id])
+        XCTAssertEqual(viewModel.jpgCount, 2)
+    }
+
     func testEmptyBinUsesInMemoryBin() {
         let a = insertPhoto(name: "a", isDeleted: true, creationDate: date(2000))
         let b = insertPhoto(name: "b", isDeleted: true, creationDate: date(1000))
