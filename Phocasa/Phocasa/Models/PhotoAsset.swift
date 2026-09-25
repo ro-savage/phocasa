@@ -10,7 +10,6 @@ final class PhotoAsset {
     var rating: Int
     var creationDate: Date?
     var fileSize: Int64
-    @Attribute(.externalStorage) var thumbnailData: Data?
     var folderPath: String
     /// In the bin. Renamed from `isDeleted`, which collided with SwiftData's own `isDeleted` (spec §H5);
     /// `originalName` migrates existing stores.
@@ -53,7 +52,6 @@ final class PhotoAsset {
         self.rating = 0
         self.creationDate = creationDate
         self.fileSize = fileSize
-        self.thumbnailData = nil
         self.folderPath = folderPath
         self.isInBin = false
         self.jpgEditParametersData = nil

@@ -66,13 +66,6 @@ struct SidebarView: View {
                                 Label(tag.name, systemImage: "tag")
                                     .padding(.leading, 16)
                             }
-
-                            ForEach(tag.children, id: \.id) { child in
-                                sidebarRow(filter: .tag(child.id), badge: library.tagCounts[child.id, default: 0]) {
-                                    Label(child.name, systemImage: "tag")
-                                        .padding(.leading, 32)
-                                }
-                            }
                         }
                     }
 
