@@ -148,7 +148,8 @@ struct ContentView: View {
             }
             return .handled
 
-        case .delete, .deleteForward:
+        // The ⌫ key sends U+007F, which isn't SwiftUI's `.delete` (U+0008); ⌦ sends `.deleteForward` (U+F728).
+        case .delete, .deleteForward, KeyEquivalent("\u{7F}"):
             viewModel.deleteSelected()
             return .handled
 
