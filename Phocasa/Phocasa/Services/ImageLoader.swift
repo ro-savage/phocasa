@@ -25,7 +25,12 @@ final class ThumbnailCacheKey: NSObject, Sendable {
 }
 
 final class ImageLoader: @unchecked Sendable {
-    static let shared = ImageLoader()
+    /// The app's loader. A test host (`XCTestConfigurationFilePath` set) gets no disk cache unless
+    /// `PHOCASA_THUMBNAIL_CACHE_DIR` names one, so tests never write into the real Caches folder.
+    static let shared = ImageLoader(
+        diskCache: diskCacheDirectory(environment: ProcessInfo.processInfo.environment)
+            .map { ThumbnailDiskCache(directory: $0) }
+    )
 
     /// Size buckets in pixels (long edge). Requests are rounded UP to the next bucket, so a
     /// cached thumbnail is never smaller than requested.
@@ -61,9 +66,32 @@ final class ImageLoader: @unchecked Sendable {
     private let generationLock = NSLock()
     private var cacheEpoch: UInt64 = 0
     private var pathGenerations: [String: UInt64] = [:]
+    /// Guarded by `generationLock`.
+    private var decodesFromOriginal = 0
 
-    private init() {
+    /// Thumbnails kept across launches. Read inside the scheduler's work, before decoding the original.
+    let diskCache: ThumbnailDiskCache?
+
+    /// How many thumbnails this loader has decoded from the original file (memory and disk misses).
+    var originalDecodeCount: Int {
+        generationLock.withLock { decodesFromOriginal }
+    }
+
+    init(diskCache: ThumbnailDiskCache?) {
+        self.diskCache = diskCache
         thumbnailCache.totalCostLimit = Self.thumbnailCacheCostLimit
+    }
+
+    /// Where `shared` keeps its disk cache. A test host uses `PHOCASA_THUMBNAIL_CACHE_DIR` if set and no disk cache
+    /// otherwise; a normal launch always uses `ThumbnailDiskCache.defaultDirectory`.
+    static func diskCacheDirectory(environment: [String: String]) -> URL? {
+        guard environment["XCTestConfigurationFilePath"] != nil else {
+            return ThumbnailDiskCache.defaultDirectory
+        }
+        guard let configured = environment["PHOCASA_THUMBNAIL_CACHE_DIR"], !configured.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: configured, isDirectory: true)
     }
 
     // MARK: - Thumbnails
@@ -90,14 +118,23 @@ final class ImageLoader: @unchecked Sendable {
         let request = ThumbnailRequest(path: path, bucket: bucket, generation: generation)
         let key = ThumbnailCacheKey(path: path, bucket: bucket)
         let preferEmbedded = Self.prefersEmbeddedPreview(path: path)
+        let diskCache = self.diskCache
 
         let cgImage = await thumbnailScheduler.value(for: request) { [self] in
+            // Read the file's size and date before decoding it: if it changes mid-decode, the thumbnail is filed under
+            // the old version and simply misses next time.
+            let diskKey = diskCache == nil ? nil : ThumbnailDiskCache.Key.current(path: path, bucket: bucket)
+            if let diskKey, let cached = diskCache?.image(for: diskKey) {
+                store(cached, for: key, generation: generation, diskKey: nil)
+                return cached
+            }
+            generationLock.withLock { decodesFromOriginal += 1 }
             guard let cgImage = Self.decodeThumbnail(at: path, maxPixels: bucket, preferEmbedded: preferEmbedded) else {
                 return nil
             }
             // Cache here rather than in the caller: if every caller was cancelled while this ran (the cell
             // scrolled away), the work isn't wasted when the cell comes back.
-            store(cgImage, for: key, generation: generation)
+            store(cgImage, for: key, generation: generation, diskKey: diskKey)
             return cgImage
         }
         guard let cgImage else { return nil }
@@ -110,7 +147,7 @@ final class ImageLoader: @unchecked Sendable {
         cachedThumbnail(for: path, bucket: Self.thumbnailBucket(forPixels: maxSize))
     }
 
-    /// Evicts every cached size of `path`. Task 21 wires this to the disk cache; task 30 calls it after exports.
+    /// Evicts every cached size of `path`, in memory and on disk. Task 30 calls it after exports.
     func invalidate(path: String) {
         generationLock.withLock {
             pathGenerations[path, default: 0] &+= 1
@@ -118,8 +155,11 @@ final class ImageLoader: @unchecked Sendable {
         for bucket in Self.thumbnailBuckets {
             thumbnailCache.removeObject(forKey: ThumbnailCacheKey(path: path, bucket: bucket))
         }
+        // Queued after the generation bump, so it also removes anything a decode stored before the bump.
+        diskCache?.removeAll(forPath: path)
     }
 
+    /// Empties the memory cache only. The disk cache stays, as it would across a relaunch.
     func clearCache() {
         generationLock.withLock {
             cacheEpoch &+= 1
@@ -206,13 +246,22 @@ final class ImageLoader: @unchecked Sendable {
         CacheGeneration(epoch: cacheEpoch, path: pathGenerations[path] ?? 0)
     }
 
-    private func store(_ cgImage: CGImage, for key: ThumbnailCacheKey, generation: CacheGeneration) {
+    /// Puts a thumbnail into the memory cache and, given a `diskKey`, queues it for the disk cache.
+    private func store(
+        _ cgImage: CGImage, for key: ThumbnailCacheKey, generation: CacheGeneration, diskKey: ThumbnailDiskCache.Key?
+    ) {
         let image = Self.makeImage(cgImage)
         let cost = cgImage.bytesPerRow * cgImage.height
         // Insert while holding the lock: invalidate/clear bump the generation first and evict afterwards, so the
         // image either lands before the eviction or is dropped here.
         generationLock.withLock {
-            guard generationLocked(for: key.path) == generation else { return }
+            let current = generationLocked(for: key.path)
+            // The disk only cares about invalidate(path:): clearCache() is memory-only. Queued under the lock, so
+            // the write is ordered before the removal of any later invalidate(path:).
+            if let diskKey, current.path == generation.path {
+                diskCache?.store(cgImage, for: diskKey)
+            }
+            guard current == generation else { return }
             thumbnailCache.setObject(image, forKey: key, cost: cost)
         }
     }
