@@ -150,7 +150,9 @@ final class DataPathBenchmarks: XCTestCase {
     private func runSuite(n: Int) async throws {
         let tag = "N=\(n)"
         let dir = try makeTempDir("seed\(n)")
-        let filesDir = try dir.appendingPathComponent("files", isDirectory: true).creatingDir()
+        // Canonical paths (task 32), so 7x rescans the n seeded rows. It used to seed `/var/…` paths, which the scan
+        // doesn't match, so its warm-up run inserted a second row per file (results/20.md, deviation 1).
+        let filesDir = try canonical(dir.appendingPathComponent("files", isDirectory: true).creatingDir())
         let storeURL = dir.appendingPathComponent("bench.store")
         let container = try makeContainer(storeURL: storeURL)
         let context = container.mainContext
@@ -361,9 +363,9 @@ final class DataPathBenchmarks: XCTestCase {
             if let t = lastScanMainActorMs(vm) { rescanMainActor.append(t) }
         }
         print("BENCH|\(tag)|info|scanProgress=\(vm.library.scanProgress)")
-        // (added by task 20) The seed's `/var/…` paths aren't the `/private/var/…` ones the folder enumerator
-        // reports, so 7x's warm-up run inserts a second row per file and its timed runs rescan twice the rows.
-        // 7w (testRescanUnchanged10k) is the true unchanged-library rescan.
+        // (added by task 20) Until task 32 the seed's `/var/…` paths weren't the `/private/var/…` ones the folder
+        // enumerator reports, so 7x's warm-up run inserted a second row per file and its timed runs rescanned twice the
+        // rows. The seed is canonical now (re-baselined): stored rows = n.
         let storedRows = (try? context.fetchCount(FetchDescriptor<PhotoAsset>())) ?? -1
         print("BENCH|\(tag)|info|7x stored rows=\(storedRows) allPhotos=\(vm.library.allPhotos.count)")
         reportIfAny(tag, "7x main-actor time of each rescan (scan task)", Array(rescanMainActor.dropFirst()))
@@ -421,6 +423,26 @@ final class DataPathBenchmarks: XCTestCase {
         reportIfAny(tag, "7w main-actor time of each rescan (scan task)", Array(mainActor.dropFirst()))
         let storedRows = (try? context.fetchCount(FetchDescriptor<PhotoAsset>())) ?? -1
         print("BENCH|\(tag)|info|7w scanProgress=\(vm.library.scanProgress) stored rows=\(storedRows) allPhotos=\(vm.library.allPhotos.count)")
+
+        // 7u (added by task 32): a rescan that finds 10 new files (empty, like the seed's) in the 10k library. Each run
+        // adds 10 more, untimed, before its rescan; the first run is a warm-up.
+        var addWall: [Double] = [], addMainActor: [Double] = []
+        for run in 0..<6 {
+            for i in 0..<10 {
+                FileManager.default.createFile(
+                    atPath: filesDir.appendingPathComponent(String(format: "NEW_%02d_%02d.jpg", run, i)).path, contents: nil)
+            }
+            let start = clock.now
+            vm.library.rescanCurrentLibrary()
+            try await waitForScan(vm)
+            guard run > 0 else { continue }
+            addWall.append(ms(clock.now - start))
+            if let t = lastScanMainActorMs(vm) { addMainActor.append(t) }
+        }
+        report(tag, "7u rescanCurrentLibrary() finding 10 new files in a 10k library (until !isScanning)", addWall)
+        reportIfAny(tag, "7u main-actor time of each rescan (scan task)", addMainActor)
+        print("BENCH|\(tag)|info|7u scanProgress=\(vm.library.scanProgress) reloaded=\(vm.library.lastScanReport?.reloaded ?? false) allPhotos=\(vm.library.allPhotos.count)")
+        XCTAssertEqual(vm.library.allPhotos.count, 10_060)
     }
 
     // MARK: Scan of real JPEGs

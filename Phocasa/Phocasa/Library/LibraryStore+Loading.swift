@@ -7,6 +7,9 @@ extension LibraryStore {
         /// Set by `refreshAvailability()`, so the next `loadExistingData()` checks every photo's files. Launch and
         /// scans don't need it: each scan works out the missing set itself, off the main thread.
         var needsAvailabilityCheck = false
+        /// Bumped by every `loadExistingData()`. Work that started before a load and patches the in-memory library
+        /// afterwards (a scan adding its new photos) checks it: the load already has what it would add.
+        var generation = 0
     }
 
     // MARK: - Launch
@@ -25,6 +28,7 @@ extension LibraryStore {
     /// on the in-memory state this builds.
     func loadExistingData() {
         guard let context = modelContext else { return }
+        loading.generation += 1
 
         let tags = (try? context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))) ?? []
         tagFacts = TagFactsCache(tags: tags)

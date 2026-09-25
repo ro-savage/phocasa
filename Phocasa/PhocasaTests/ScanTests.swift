@@ -114,6 +114,64 @@ final class ScanTests: XCTestCase {
             .map(\.fileName).sorted()
     }
 
+    /// Sets the file's creation date (the photo order's key), so new photos land among the existing ones.
+    private func setCreated(_ url: URL, _ secondsSince1970: TimeInterval) throws {
+        try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: secondsSince1970)],
+                                              ofItemAtPath: url.path)
+    }
+
+    /// The library's in-memory state must equal what a full `loadExistingData()` of the same store gives, with the
+    /// same filters, search, sort and missing set (task 10's oracle, plus the facts and the bin).
+    private func assertMatchesFreshLoad(_ vm: PhotoLibraryViewModel, _ step: String,
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        let library = vm.library
+        let oracle = LibraryStore()
+        oracle.modelContext = library.modelContext
+        oracle.sort = library.sort
+        oracle.activeFilters = library.activeFilters
+        oracle.viewingBin = library.viewingBin
+        oracle.searchText = library.searchText
+        oracle.missingPhotoIDs = library.missingPhotoIDs
+        oracle.loadExistingData()
+        func ids(_ photos: [PhotoAsset]) -> [UUID] { photos.map(\.id) }
+        // A photo's `tags` have no stable order, so neither do the tag lines of its search key (search matches line by
+        // line, so that order never matters): compare the key's lines as a set.
+        func comparable(_ facts: [PhotoFacts]) -> [PhotoFacts] {
+            facts.map { f in
+                var lines = f.searchKey.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                let name = lines.removeFirst()
+                var copy = f
+                copy.searchKey = ([name] + lines.sorted()).joined(separator: "\n")
+                return copy
+            }
+        }
+        XCTAssertEqual(ids(library.photos), ids(oracle.photos), "photos after \(step)", file: file, line: line)
+        XCTAssertEqual(ids(library.allPhotos), ids(oracle.allPhotos), "allPhotos after \(step)", file: file, line: line)
+        XCTAssertEqual(ids(library.binPhotos), ids(oracle.binPhotos), "binPhotos after \(step)", file: file, line: line)
+        XCTAssertEqual(comparable(library.allFacts), comparable(oracle.allFacts), "allFacts after \(step)",
+                       file: file, line: line)
+        XCTAssertEqual(comparable(library.binFacts), comparable(oracle.binFacts), "binFacts after \(step)",
+                       file: file, line: line)
+        XCTAssertEqual(library.shownIDs, ids(library.photos), "shownIDs after \(step)", file: file, line: line)
+        XCTAssertEqual(library.binCount, oracle.binCount, "binCount after \(step)", file: file, line: line)
+        XCTAssertEqual(library.ratingCounts, oracle.ratingCounts, "ratingCounts after \(step)", file: file, line: line)
+        XCTAssertEqual(library.tagCounts, oracle.tagCounts, "tagCounts after \(step)", file: file, line: line)
+        XCTAssertEqual(library.categoryCounts, oracle.categoryCounts, "categoryCounts after \(step)", file: file, line: line)
+        XCTAssertEqual(library.jpgCount, oracle.jpgCount, "jpgCount after \(step)", file: file, line: line)
+        XCTAssertEqual(library.rawCount, oracle.rawCount, "rawCount after \(step)", file: file, line: line)
+        XCTAssertEqual(library.libraryCounts, oracle.libraryCounts, "libraryCounts after \(step)", file: file, line: line)
+        XCTAssertEqual(library.allTags.map(\.id), oracle.allTags.map(\.id), "allTags after \(step)", file: file, line: line)
+        XCTAssertEqual(library.tagCategories, oracle.tagCategories, "tagCategories after \(step)", file: file, line: line)
+        XCTAssertEqual(library.uncategorizedTags.map(\.id), oracle.uncategorizedTags.map(\.id),
+                       "uncategorizedTags after \(step)", file: file, line: line)
+        XCTAssertEqual(library.tagsByCategory.mapValues { $0.map(\.id) }, oracle.tagsByCategory.mapValues { $0.map(\.id) },
+                       "tagsByCategory after \(step)", file: file, line: line)
+        XCTAssertEqual(library.photos.indices.map { library.index(of: library.photos[$0].id) },
+                       library.photos.indices.map { $0 }, "index(of:) after \(step)", file: file, line: line)
+        XCTAssertEqual(library.currentLibrary?.id, oracle.currentLibrary?.id, "currentLibrary after \(step)",
+                       file: file, line: line)
+    }
+
     // MARK: - Import
 
     func testScanImportsRatingsAndKeywords() async throws {
@@ -270,7 +328,7 @@ final class ScanTests: XCTestCase {
 
         let report = try XCTUnwrap(vm.library.lastScanReport)
         XCTAssertEqual(report.inserted, 3)
-        XCTAssertTrue(report.reloaded)
+        XCTAssertFalse(report.reloaded, "new photos are added in memory")
         XCTAssertGreaterThan(report.mainActorTime, .zero)
     }
 
@@ -514,6 +572,125 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["first", "late"])
     }
 
+    // MARK: - Incremental updates after scans
+
+    /// A library of six photos a day apart (days 1–6), two tagged and some rated, rescanned once loaded.
+    private func openDatedLibrary() async throws -> (PhotoLibraryViewModel, URL, ModelContainer) {
+        let photos = try makeTempDir("photos")
+        for day in 1...6 {
+            let url = try makeJPEG("old\(day).jpg", in: photos, rating: day % 3 == 0 ? 3 : nil,
+                                   keywords: day % 2 == 0 ? ["people:ann"] : [])
+            try setCreated(url, Double(day) * 86_400)
+        }
+        let (vm, _, container) = try await openLibrary(at: photos)
+        XCTAssertEqual(vm.library.allPhotos.count, 6)
+        return (vm, photos, container)
+    }
+
+    /// A few new photos (the patch path): each goes where a reload would put it, with its tags and counts, and the
+    /// library isn't reloaded.
+    func testScanAddingAFewPhotosUpdatesTheLibraryLikeAFreshLoad() async throws {
+        let (vm, photos, _) = try await openDatedLibrary()
+        try setCreated(try makeJPEG("new-a.jpg", in: photos, rating: 3, keywords: ["people:ann"]), 2.5 * 86_400)
+        try setCreated(try makeJPEG("new-b.jpg", in: photos, keywords: ["places:home", "loose"]), 9 * 86_400)
+        try setCreated(try makeJPEG("new-c.jpg", in: photos), 0.5 * 86_400)
+
+        try await rescan(vm)
+
+        let report = try XCTUnwrap(vm.library.lastScanReport)
+        XCTAssertEqual(report.inserted, 3)
+        XCTAssertFalse(report.reloaded)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName),
+                       ["new-b", "old6", "old5", "old4", "old3", "new-a", "old2", "old1", "new-c"])
+        XCTAssertEqual(vm.library.tagCategories.first, "people")
+        XCTAssertTrue(vm.library.uncategorizedTags.map(\.name).contains("loose"))
+        assertMatchesFreshLoad(vm, "a scan adding 3 photos")
+    }
+
+    /// Many new photos (the merge path), with a filter and search active and the sort reversed.
+    func testScanAddingManyPhotosUpdatesTheLibraryLikeAFreshLoad() async throws {
+        let (vm, photos, _) = try await openDatedLibrary()
+        vm.library.toggleSortOrder()
+        vm.library.applyFilter(.rated(3))
+        vm.library.searchText = "new"
+        vm.library.applySearch()
+        for i in 0..<12 {
+            let url = try makeJPEG("new\(i).jpg", in: photos, rating: i % 2 == 0 ? 3 : 1,
+                                   keywords: i % 3 == 0 ? ["people:bo"] : [])
+            try setCreated(url, Double(i) * 43_200)
+        }
+
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.lastScanReport?.inserted, 12)
+        XCTAssertEqual(vm.library.lastScanReport?.reloaded, false)
+        XCTAssertEqual(vm.library.photos.count, 6)
+        assertMatchesFreshLoad(vm, "a scan adding 12 photos, filtered, oldest first")
+        vm.library.searchText = ""
+        vm.library.applyFilter(.all)
+        assertMatchesFreshLoad(vm, "then clearing the filter and search")
+    }
+
+    /// Photos added while the bin is shown join the library, not the grid.
+    func testScanAddingPhotosWhileTheBinIsShownKeepsShowingTheBin() async throws {
+        let (vm, photos, _) = try await openDatedLibrary()
+        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first))
+        vm.library.applyFilter(.bin)
+        for i in 0..<3 { try makeJPEG("new\(i).jpg", in: photos) }
+
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.photos.map(\.fileName), ["old6"])
+        assertMatchesFreshLoad(vm, "a scan while the bin is shown")
+        vm.library.applyFilter(.all)
+        XCTAssertEqual(vm.library.photos.count, 8)
+        assertMatchesFreshLoad(vm, "back to the library")
+    }
+
+    /// Photos whose files go missing leave the library in memory, and come back the same way.
+    func testPhotosGoingMissingAndComingBackUpdateTheLibraryInMemory() async throws {
+        let (vm, photos, _) = try await openDatedLibrary()
+        let parked = try makeTempDir("parked")
+        for day in [2, 5] {
+            try FileManager.default.moveItem(at: photos.appendingPathComponent("old\(day).jpg"),
+                                             to: parked.appendingPathComponent("old\(day).jpg"))
+        }
+
+        try await rescan(vm)
+        XCTAssertEqual(vm.library.lastScanReport?.missing, 2)
+        XCTAssertEqual(vm.library.lastScanReport?.reloaded, false)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["old6", "old4", "old3", "old1"])
+        assertMatchesFreshLoad(vm, "two photos gone")
+
+        for day in [2, 5] {
+            try FileManager.default.moveItem(at: parked.appendingPathComponent("old\(day).jpg"),
+                                             to: photos.appendingPathComponent("old\(day).jpg"))
+        }
+        try await rescan(vm)
+        XCTAssertEqual(vm.library.lastScanReport?.missing, 0)
+        XCTAssertEqual(vm.library.lastScanReport?.inserted, 0)
+        XCTAssertEqual(vm.library.lastScanReport?.reloaded, false)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["old6", "old5", "old4", "old3", "old2", "old1"])
+        assertMatchesFreshLoad(vm, "both back")
+    }
+
+    /// A full load while a scan is inserting (here from the scan's own hook, after its inserts) already has the new
+    /// photos, so the scan must not add them again.
+    func testLoadDuringAScanDoesNotDuplicateItsNewPhotos() async throws {
+        let (vm, photos, _) = try await openDatedLibrary()
+        try makeJPEG("tagged.jpg", in: photos, keywords: ["people:cy"])
+        try makeJPEG("plain.jpg", in: photos)
+        vm.library.scanWillSave = { _ in vm.library.loadExistingData() }
+
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.lastScanReport?.inserted, 2)
+        XCTAssertEqual(vm.library.allPhotos.count, 8)
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.id)).count, 8)
+        vm.library.scanWillSave = nil
+        assertMatchesFreshLoad(vm, "a load during the scan")
+    }
+
     // MARK: - Scan plan (pure)
 
     private func found(_ name: String, folder: String = "/f", jpg: Bool = true, raw: Bool = false,
@@ -596,6 +773,21 @@ final class ScanTests: XCTestCase {
                                       "/old/elsewhere.jpg"])
     }
 
+    /// Library rows that were missing and aren't any more (found, or their file exists again) are shown again; ones
+    /// still missing, and binned ones, aren't.
+    func testPlanFoundAgainAreLibraryRowsNoLongerMissing() {
+        let found = stored("found")
+        let fileBack = stored("elsewhere", folder: "/old")
+        let stillGone = stored("gone")
+        let binned = stored("binned", inBin: true)
+        let plan = ScanPlan(stored: [found, fileBack, stillGone, binned],
+                            discovered: [self.found("found"), self.found("binned")],
+                            previouslyMissing: [found.id, fileBack.id, stillGone.id, binned.id],
+                            fileExists: { $0 == "/old/elsewhere.jpg" })
+        XCTAssertEqual(plan.missingIDs, [stillGone.id])
+        XCTAssertEqual(plan.foundAgainIDs, [found.id, fileBack.id])
+    }
+
     func testPlanNewPhotosAreTheUnknownKeysInDiscoveryOrder() {
         let plan = ScanPlan(stored: [stored("b")], discovered: [found("c"), found("b"), found("a")])
         XCTAssertEqual(plan.newPhotos.map(\.fileName), ["c", "a"])
@@ -614,8 +806,9 @@ final class ScanTests: XCTestCase {
         let container = try makeContainer()
         let inserted = await ScanPlan.insertInBackground(
             [found("a"), found("b", keywords: ["cat:x"]), found("c", keywords: [])], into: container)
-        XCTAssertEqual(inserted, 2)
+        XCTAssertEqual(inserted.count, 2)
         XCTAssertEqual(Set(try storedPhotos(container).map(\.fileName)), ["a", "c"])
+        XCTAssertEqual(Set(try storedPhotos(container).map(\.id)), Set(inserted), "it returns the saved rows' ids")
         XCTAssertTrue(try storedTags(container).isEmpty)
     }
 

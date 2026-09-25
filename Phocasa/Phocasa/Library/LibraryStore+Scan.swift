@@ -102,8 +102,9 @@ extension LibraryStore {
 
     /// One scan. The file system walk, the read of the stored rows, the diff, the stat of photos the scan
     /// didn't find and the metadata reads all run off the main actor. The main actor only writes: it changes
-    /// the rows that differ, inserts the new photos and saves. An unchanged rescan writes no photo row and
-    /// doesn't reload the library (spec §B1, §B2).
+    /// the rows that differ, inserts the new photos and saves. Then it patches the in-memory library with what
+    /// changed (`updateLibrary(adding:facts:removing:)`) instead of reloading it, so an unchanged rescan costs
+    /// nothing and one that adds k photos costs O(k log n) (spec §B1, §B2).
     private func performScan(of url: URL) async {
         guard let context = modelContext else { return }
         let clock = ContinuousClock()
@@ -115,6 +116,9 @@ extension LibraryStore {
         if context.hasChanges { try? context.save() }
         let container = context.container
         let scanner = self.scanner
+        // What the library shows now, which the end of the scan patches.
+        let generation = loading.generation
+        let previouslyMissing = missingPhotoIDs
         report.mainActorTime += clock.now - sectionStart
 
         // Off the main actor: the store and the file system are read at the same time.
@@ -122,7 +126,7 @@ extension LibraryStore {
         async let foundPhotos = scanner.scan(folderURL: url)
         let stored = await storedRows
         let discovered = await foundPhotos
-        var plan = await ScanPlan.make(stored: stored, discovered: discovered)
+        var plan = await ScanPlan.make(stored: stored, discovered: discovered, previouslyMissing: previouslyMissing)
         report.discovered = plan.discoveredCount
 
         if !plan.newPhotos.isEmpty {
@@ -140,17 +144,21 @@ extension LibraryStore {
         // New photos without keywords go in through a background context (see `ScanPlan.canInsertInBackground`).
         let viaBackground = plan.newPhotos.filter(ScanPlan.canInsertInBackground)
         let withKeywords = plan.newPhotos.filter { !ScanPlan.canInsertInBackground($0) }
+        var insertedInBackground: [UUID] = []
         if !viaBackground.isEmpty {
             sectionStart = clock.now
             scanProgress = "Adding \(plan.newPhotos.count) new photos..."
             report.mainActorTime += clock.now - sectionStart
-            report.inserted += await ScanPlan.insertInBackground(viaBackground, into: container)
+            insertedInBackground = await ScanPlan.insertInBackground(viaBackground, into: container)
+            report.inserted += insertedInBackground.count
         }
 
         sectionStart = clock.now
         let changed = applyScanUpdates(plan.updates, in: context)
         report.updated = changed.count
 
+        var insertedHere: [PhotoAsset] = []
+        var createdTags = false
         if !withKeywords.isEmpty {
             scanProgress = "Adding \(plan.newPhotos.count) new photos..."
             var start = 0
@@ -163,14 +171,15 @@ extension LibraryStore {
                     sectionStart = clock.now
                 }
                 let end = min(start + Self.scanInsertChunkSize, withKeywords.count)
-                insertScannedPhotos(withKeywords[start..<end], into: context)
+                let inserted = insertScannedPhotos(withKeywords[start..<end], into: context)
+                insertedHere += inserted.photos
+                createdTags = createdTags || inserted.createdTags
                 start = end
             }
             report.inserted += withKeywords.count
         }
 
         // What the scan found is available; see `ScanPlan.missingIDs` for what it didn't find.
-        let missingChanged = plan.missingIDs != missingPhotoIDs
         missingPhotoIDs = plan.missingIDs
         report.missing = plan.missingIDs.count
 
@@ -178,18 +187,46 @@ extension LibraryStore {
         currentLibrary?.lastScanDate = Date()
         if context.hasChanges { try? context.save() }
 
-        // The in-memory library is already right after an unchanged rescan, so skip the reload (~300 ms at 10k).
-        if report.inserted > 0 || missingChanged {
+        // Patch the in-memory library with what changed. An unchanged rescan changes nothing.
+        let fetchIDs = insertedInBackground + plan.foundAgainIDs
+        var added = insertedHere
+        var start = 0
+        while start < fetchIDs.count, loading.generation == generation {
+            if start > 0 {
+                report.mainActorTime += clock.now - sectionStart
+                await Task.yield()
+                sectionStart = clock.now
+            }
+            let chunk = Array(fetchIDs[start..<min(start + Self.scanFetchChunkSize, fetchIDs.count)])
+            added += (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { chunk.contains($0.id) })))
+                ?? []
+            start += chunk.count
+        }
+        if loading.generation != generation {
+            // A full load ran during the scan and may already hold some of the new photos: load again, don't patch.
             loadExistingData()
             report.reloaded = true
-        } else if !changed.isEmpty {
-            photosDidChange(changed)
+        } else {
+            if createdTags {
+                setTagLists((try? context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))) ?? allTags)
+            }
+            let leaving = plan.missingIDs.subtracting(previouslyMissing)
+            if added.isEmpty && leaving.isEmpty {
+                if !changed.isEmpty { photosDidChange(changed) }
+            } else {
+                applyFactChanges(changed)
+                updateLibrary(adding: added, facts: makeFacts(for: added), removing: leaving)
+            }
         }
 
         scanProgress = "Found \(plan.discoveredCount) photos (\(report.inserted) new)"
         report.mainActorTime += clock.now - sectionStart
         lastScanReport = report
     }
+
+    /// Rows fetched per main-actor turn when a scan brings its new photos into the in-memory library: about 14 ms
+    /// each (measured, 10k library), so a big import never holds the main actor for long.
+    private static let scanFetchChunkSize = 500
 
     private func showMetadataProgress(done: Int, total: Int) {
         guard scanning.metadataProgressTotal == total else { return } // that phase is over
@@ -222,8 +259,13 @@ extension LibraryStore {
     }
 
     /// Inserts new photos with the rating and keywords read from their files. Tags are looked up in one
-    /// dictionary built from a single fetch (no fetch per keyword; spec §B2), and created when missing.
-    private func insertScannedPhotos(_ newPhotos: ArraySlice<DiscoveredPhoto>, into context: ModelContext) {
+    /// dictionary built from a single fetch (no fetch per keyword; spec §B2), and created when missing. Returns the
+    /// photos inserted, and whether any tag was created.
+    private func insertScannedPhotos(_ newPhotos: ArraySlice<DiscoveredPhoto>, into context: ModelContext)
+        -> (photos: [PhotoAsset], createdTags: Bool)
+    {
+        var inserted: [PhotoAsset] = []
+        var createdTags = false
         // Fetched per chunk: a tag may have been added between chunks (from the tag editor, say).
         var tagsByKey: [TagKey: Tag] = [:]
         if newPhotos.contains(where: { !($0.metadata?.keywords.isEmpty ?? true) }) {
@@ -242,6 +284,7 @@ extension LibraryStore {
             )
             asset.rating = found.metadata?.rating ?? 0
             context.insert(asset)
+            inserted.append(asset)
 
             guard let keywords = found.metadata?.keywords, !keywords.isEmpty else { continue }
             var tags: [Tag] = []
@@ -257,10 +300,12 @@ extension LibraryStore {
                     context.insert(tag)
                     tagsByKey[key] = tag
                     tags.append(tag)
+                    createdTags = true
                 }
             }
             // One assignment after the insert: much cheaper than appending before it.
             asset.tags = tags
         }
+        return (inserted, createdTags)
     }
 }

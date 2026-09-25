@@ -70,11 +70,14 @@ struct ScanPlan: Sendable {
     /// found is available. A photo it didn't find whose file still exists (for example under an earlier library
     /// root) stays visible, as with a full availability check.
     var missingIDs: Set<UUID> = []
+    /// Library photos in `previouslyMissing` that aren't missing any more: the library shows them again.
+    var foundAgainIDs: Set<UUID> = []
     /// How many photos the scan found.
     var discoveredCount = 0
 
-    /// `fileExists` is called only for rows the scan didn't find; after an unchanged rescan, never.
-    init(stored: [StoredPhoto], discovered: [DiscoveredPhoto],
+    /// `previouslyMissing` is the missing set the library shows now (`LibraryStore.missingPhotoIDs`). `fileExists` is
+    /// called only for rows the scan didn't find; after an unchanged rescan, never.
+    init(stored: [StoredPhoto], discovered: [DiscoveredPhoto], previouslyMissing: Set<UUID> = [],
          fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
         discoveredCount = discovered.count
         let foundByKey = Dictionary(discovered.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
@@ -91,15 +94,20 @@ struct ScanPlan: Sendable {
                 let rawExists = row.rawPath.map(fileExists) ?? false
                 if !jpgExists && !rawExists { missingIDs.insert(row.id) }
             }
+            if !row.isInBin && previouslyMissing.contains(row.id) && !missingIDs.contains(row.id) {
+                foundAgainIDs.insert(row.id)
+            }
         }
         newPhotos = discovered.filter { !knownKeys.contains($0.key) }
     }
 
     /// Computes the plan off the main thread.
-    static func make(stored: [StoredPhoto], discovered: [DiscoveredPhoto]) async -> ScanPlan {
+    static func make(stored: [StoredPhoto], discovered: [DiscoveredPhoto],
+                     previouslyMissing: Set<UUID> = []) async -> ScanPlan {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: ScanPlan(stored: stored, discovered: discovered))
+                continuation.resume(returning: ScanPlan(stored: stored, discovered: discovered,
+                                                        previouslyMissing: previouslyMissing))
             }
         }
     }
@@ -119,16 +127,17 @@ struct ScanPlan: Sendable {
     private static let backgroundSaveChunkSize = 500
 
     /// Inserts the new photos that pass `canInsertInBackground` (and skips the others) through a new context on
-    /// `container`, off the main thread, saving every few hundred rows. Returns how many rows were saved.
-    static func insertInBackground(_ photos: [DiscoveredPhoto], into container: ModelContainer) async -> Int {
+    /// `container`, off the main thread, saving every few hundred rows. Returns the ids of the rows saved.
+    static func insertInBackground(_ photos: [DiscoveredPhoto], into container: ModelContainer) async -> [UUID] {
         let photos = photos.filter(canInsertInBackground)
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let context = ModelContext(container)
-                var saved = 0
+                var saved: [UUID] = []
                 var start = 0
                 while start < photos.count {
                     let end = min(start + backgroundSaveChunkSize, photos.count)
+                    var chunk: [UUID] = []
                     for found in photos[start..<end] {
                         let asset = PhotoAsset(
                             fileName: found.fileName,
@@ -140,10 +149,11 @@ struct ScanPlan: Sendable {
                         )
                         asset.rating = found.metadata?.rating ?? 0
                         context.insert(asset)
+                        chunk.append(asset.id)
                     }
                     do {
                         try context.save()
-                        saved += end - start
+                        saved += chunk
                     } catch {
                         context.rollback() // leave these for the next scan, which will find them new again
                     }
