@@ -84,7 +84,8 @@ Phocasa/
 │   └── Services/
 │       ├── FolderScanner           — walks a folder, pairs JPG+RAW, reads new photos' metadata concurrently
 │       ├── MetadataService         — stateless, thread-safe metadata reads and writes (JPEG splice, sidecars)
-│       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through
+│       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through (re-keys cached
+│       │                             thumbnails after JPEG metadata rewrites)
 │       ├── ImageLoader             — grid thumbnails: size buckets, memory cache, disk cache, invalidation
 │       ├── ThumbnailScheduler      — bounded, newest-first, cancellable work scheduler
 │       ├── ThumbnailDiskCache      — thumbnails on disk across launches (one JPEG per photo and bucket, LRU)
@@ -117,6 +118,9 @@ Tools/
 - **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
   rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
   photos, so an unchanged rescan writes nothing and doesn't reload.
+- **Thumbnail disk cache** (`Services/ThumbnailDiskCache.swift`): one JPEG per photo and size bucket under
+  `Caches/<bundle id>/Thumbnails/v1/<h0h1>/<sha256(path)>/<bucket>-<size>-<mtime>.jpg`, LRU by mtime, 1 GB. The test
+  host has none unless `PHOCASA_THUMBNAIL_CACHE_DIR` is set.
 - **Grid under the detail view:** `MainContentView` keeps the grid in the hierarchy, hidden, while the detail view is
   open, so it keeps its scroll position; its cells start no thumbnail loads meanwhile.
 - **Edit parameters:** stored as JSON-encoded `EditParameters` — in SwiftData for JPGs, in the XMP sidecar
@@ -191,6 +195,21 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - JPEG writes splice only ImageIO's new XMP/IPTC segments into the original bytes (the camera's MakerNote and other
   segments survive), falling back to ImageIO's full rewrite for files the splice can't handle. Writes go through a
   temp file and `replaceItemAt`.
+
+### Thumbnail cache
+
+- **Re-key rule:** rating and keyword writes into an image file go through `MetadataWriter` (never call
+  `MetadataService.writeMetadata` directly). It runs each one inside `MetadataRewriteObserver`
+  (`MetadataWriter.shared` → `ImageLoader.shared`), which renames the photo's cached thumbnails to the file's new size,
+  because the pixels didn't change. Anything that changes a file's pixels (exports, "apply permanently") must call
+  `ImageLoader.shared.invalidate(path:)`, and must never go through that hook or call `ThumbnailDiskCache.rekey`.
+  The re-key needs metadata writes to restore the file's modification date (to within 10 µs), as
+  `restoreFileDates` does.
+- **Bucket reuse:** a thumbnail request is served from its bucket or one up to 2× larger: in memory as is, on disk
+  decoded down to the requested size (nothing new is stored).
+- **Byte total:** the disk cache keeps its running byte total in `<cache dir>/byte-total`, updated on every change.
+  It is trusted on launch if intact and a full scan confirmed it within 7 days; otherwise the first trim rescans.
+  Deleting the file forces a rescan. One `ThumbnailDiskCache` instance per directory.
 
 ### Testing
 
