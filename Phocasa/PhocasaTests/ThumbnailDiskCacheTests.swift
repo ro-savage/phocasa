@@ -69,8 +69,12 @@ final class ThumbnailDiskCacheTests: XCTestCase {
 
     private var tempDir: URL!
     private var cacheDir: URL!
+    /// Every cache a test made, drained in tearDown: a store still queued would otherwise recreate folders while
+    /// the temp directory is being deleted.
+    private var caches: [ThumbnailDiskCache] = []
 
     override func setUpWithError() throws {
+        caches = []
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ThumbnailDiskCacheTests-\(UUID().uuidString)", isDirectory: true)
         cacheDir = tempDir.appendingPathComponent("cache", isDirectory: true)
@@ -78,15 +82,23 @@ final class ThumbnailDiskCacheTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        caches.forEach { $0.waitForPendingWork() }
+        caches = []
         if let tempDir {
-            try? FileManager.default.removeItem(at: tempDir)
+            // Fails if a queued store recreated a folder while the tree was being deleted.
+            XCTAssertNoThrow(try FileManager.default.removeItem(at: tempDir), "leaked \(tempDir.lastPathComponent)")
         }
     }
 
     // MARK: - Helpers
 
-    private func makeCache(byteLimit: Int = 1 << 30, trimInterval: Int = 100) -> ThumbnailDiskCache {
-        ThumbnailDiskCache(directory: cacheDir, byteLimit: byteLimit, trimInterval: trimInterval)
+    private func makeCache(
+        byteLimit: Int = 1 << 30, trimInterval: Int = 100, maxPendingBytes: Int = 64 << 20, in directory: URL? = nil
+    ) -> ThumbnailDiskCache {
+        let cache = ThumbnailDiskCache(directory: directory ?? cacheDir, byteLimit: byteLimit,
+                                       trimInterval: trimInterval, maxPendingBytes: maxPendingBytes)
+        caches.append(cache)
+        return cache
     }
 
     private func key(_ path: String, bucket: Int = 384, size: Int64 = 1000, date: TimeInterval = 1_700_000_000)
@@ -286,7 +298,7 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         // Pending stores hold decoded images; a backlog must not grow into a second, unbounded memory cache.
         let big = try image(1024, 768)
         let imageBytes = big.bytesPerRow * big.height
-        let cache = ThumbnailDiskCache(directory: cacheDir, maxPendingBytes: imageBytes * 2)
+        let cache = makeCache(maxPendingBytes: imageBytes * 2)
 
         for i in 0..<50 {
             cache.store(big, for: key("/photos/\(i).jpg"))
@@ -355,7 +367,7 @@ final class ThumbnailDiskCacheTests: XCTestCase {
     /// The allocated size of one cached test thumbnail, measured through a throwaway cache.
     private func cachedFileBytes(for image: CGImage) throws -> Int {
         let probeDir = tempDir.appendingPathComponent("probe", isDirectory: true)
-        let probe = ThumbnailDiskCache(directory: probeDir)
+        let probe = makeCache(in: probeDir)
         let k = key("/probe.jpg")
         probe.store(image, for: k)
         probe.waitForPendingWork()
@@ -725,6 +737,7 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
             XCTAssertNotNil(image)
             XCTAssertEqual(relaunched.originalDecodeCount, 0)
         }
+        disk.waitForPendingWork()
 
         report("100 x 6000x4000 JPEG @512, one at a time: cold decode from the original", cold)
         report("100 x 6000x4000 JPEG @512, one at a time: warm disk cache, empty memory", warm)
