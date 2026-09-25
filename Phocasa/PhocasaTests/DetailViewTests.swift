@@ -391,12 +391,356 @@ final class DetailViewTests: XCTestCase {
     }
 }
 
+// MARK: - Saved edits and edit renders at viewport size (task 35)
+
+/// Saved edits render at the size that fills the viewport at fit, and at native resolution once the view is zoomed
+/// in; the edit session's passes follow the same rule inside the detail view.
+@MainActor
+final class DetailEditRenderSizeTests: XCTestCase {
+    private var dir: URL!
+    private var container: ModelContainer!
+    private var context: ModelContext!
+    private var windows: [NSWindow] = []
+    private var viewModels: [PhotoLibraryViewModel] = []
+
+    override func setUp() async throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("phocasa-35-DetailEditRenderSize-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        container = try ModelContainer(for: PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self,
+                                       configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        context = ModelContext(container)
+        context.autosaveEnabled = false
+    }
+
+    override func tearDown() async throws {
+        for viewModel in viewModels { viewModel.stopEditing(save: false) }
+        for window in windows { window.close() }
+        windows = []
+        viewModels = []
+        FullImageLoader.shared.clear()
+        await MetadataWriter.shared.flush()
+        context = nil
+        container = nil
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    private func exposure(_ value: Double) -> EditParameters {
+        var params = EditParameters()
+        params.exposure = value
+        return params
+    }
+
+    private func pixelSize(_ image: NSImage?) -> CGSize? {
+        image.flatMap(EditTestImages.cgImage).map { CGSize(width: $0.width, height: $0.height) }
+    }
+
+    /// A 2400×1600 JPG with a saved JPG edit (exposure +1), or none.
+    private func insertPhoto(savedEdit: EditParameters? = nil, name: String = "photo.jpg") throws -> PhotoAsset {
+        let url = dir.appendingPathComponent(name)
+        try EditTestImages.writeJPEG(to: url, width: 2400, height: 1600, orientation: 1)
+        let photo = PhotoAsset(fileName: name, jpgPath: url.path, folderPath: dir.path, creationDate: Date())
+        photo.jpgEditParameters = savedEdit
+        context.insert(photo)
+        try context.save()
+        return photo
+    }
+
+    private func waitFor<T>(_ seconds: Double = 5, _ body: () -> T?) async -> T? {
+        let deadline = ContinuousClock.now + .milliseconds(Int(seconds * 1000))
+        while ContinuousClock.now < deadline {
+            if let value = body() { return value }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        return body()
+    }
+
+    // MARK: SavedEdit.render
+
+    func testSavedEditRendersToFitTheViewport() async throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let url = URL(fileURLWithPath: try XCTUnwrap(photo.jpgPath))
+
+        let fitRender = await SavedEdit.render(for: photo, fitting: CGSize(width: 1200, height: 1000))
+        let fit = try XCTUnwrap(fitRender)
+
+        XCTAssertEqual(pixelSize(fit.image), CGSize(width: 1200, height: 800))
+        XCTAssertEqual(fit.fittedMaxSize, CGSize(width: 1200, height: 800))
+        XCTAssertEqual(fit.nativePixelSize, CGSize(width: 2400, height: 1600))
+        let expected = await ImageEditingService.shared.processStandard(url: url, parameters: exposure(1),
+                                                                        maxSize: CGSize(width: 1200, height: 800), lane: .full)
+        let difference = EditTestImages.maxChannelDifference(try XCTUnwrap(EditTestImages.cgImage(fit.image)),
+                                                             try XCTUnwrap(expected.flatMap(EditTestImages.cgImage)))
+        XCTAssertLessThanOrEqual(difference ?? 255, 1, "the service's render at that size")
+
+        let nativeRender = await SavedEdit.render(for: photo, fitting: nil)
+        let native = try XCTUnwrap(nativeRender)
+        XCTAssertEqual(pixelSize(native.image), CGSize(width: 2400, height: 1600))
+        XCTAssertNil(native.fittedMaxSize)
+    }
+
+    /// A session's pass is reused when it covers the size wanted; a smaller one is rendered again.
+    func testSavedEditReusesAHandoffThatCoversTheViewport() async throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let passImage = NSImage(size: NSSize(width: 1200, height: 800))
+        let handoff = SavedEditHandoff(photoID: photo.id, saved: SavedEditKey(isRAW: false, parameters: exposure(1)),
+                                       image: passImage, imageParameters: exposure(1), isFullResolution: false,
+                                       fittedMaxSize: CGSize(width: 1200, height: 800))
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        let reused = await SavedEdit.render(for: photo, fitting: CGSize(width: 1200, height: 1000), reusing: handoff)
+        XCTAssertTrue(reused?.image === passImage)
+        XCTAssertEqual(ImageEditingService.shared.renderCount, rendersBefore, "no render")
+
+        let larger = await SavedEdit.render(for: photo, fitting: CGSize(width: 1800, height: 1500), reusing: handoff)
+        XCTAssertFalse(larger?.image === passImage)
+        XCTAssertEqual(pixelSize(larger?.image), CGSize(width: 1800, height: 1200))
+    }
+
+    // MARK: SavedEditState
+
+    func testSavedEditStateRendersNativeWhenZoomedIn() async throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        await state.resolve(for: photo, fitting: viewport, reusing: nil)
+        XCTAssertEqual(pixelSize(state.render?.image), CGSize(width: 1200, height: 800), "fit first")
+
+        state.needsMorePixels(for: photo, zoomedIn: false, fitting: viewport)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(state.render?.fittedMaxSize, CGSize(width: 1200, height: 800), "at fit, the fit render is enough")
+
+        state.needsMorePixels(for: photo, zoomedIn: true, fitting: viewport)
+
+        let native = await waitFor { state.render?.fittedMaxSize == nil ? state.render : nil }
+        XCTAssertEqual(pixelSize(native?.image), CGSize(width: 2400, height: 1600), "native after zooming in")
+    }
+
+    func testSavedEditStateRefitsWhenTheViewportGrows() async throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let state = SavedEditState()
+        await state.resolve(for: photo, fitting: CGSize(width: 1200, height: 1000), reusing: nil)
+
+        state.needsMorePixels(for: photo, zoomedIn: false, fitting: CGSize(width: 1800, height: 1500))
+
+        let refit = await waitFor { state.render?.fittedMaxSize == CGSize(width: 1800, height: 1200) ? state.render : nil }
+        XCTAssertEqual(pixelSize(refit?.image), CGSize(width: 1800, height: 1200))
+    }
+
+    /// The viewport grew past the photo's own size: the fitted render gives way to the native one.
+    func testSavedEditStateRendersNativeWhenTheViewportOutgrowsThePhoto() async throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let state = SavedEditState()
+        await state.resolve(for: photo, fitting: CGSize(width: 1200, height: 1000), reusing: nil)
+
+        state.needsMorePixels(for: photo, zoomedIn: false, fitting: CGSize(width: 3000, height: 2500))
+
+        let native = await waitFor { state.render?.fittedMaxSize == nil ? state.render : nil }
+        XCTAssertEqual(pixelSize(native?.image), CGSize(width: 2400, height: 1600))
+    }
+
+    /// Navigating away drops an upgrade still running for the previous photo.
+    func testSavedEditStateUpgradeDoesNotLandOnTheNextPhoto() async throws {
+        let first = try insertPhoto(savedEdit: exposure(1), name: "first.jpg")
+        let second = try insertPhoto(savedEdit: exposure(-1), name: "second.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        await state.resolve(for: first, fitting: viewport, reusing: nil)
+
+        state.needsMorePixels(for: first, zoomedIn: true, fitting: viewport)
+        state.invalidate()
+        state.clear()
+        await state.resolve(for: second, fitting: viewport, reusing: nil)
+        try await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertEqual(state.render?.key.parameters, exposure(-1))
+        XCTAssertEqual(state.render?.fittedMaxSize, CGSize(width: 1200, height: 800), "the first photo's native render didn't land")
+    }
+
+    // MARK: SavedEditState prefetch
+
+    /// Navigating to the prefetched photo shows its saved edit without rendering it again (it joins the prefetch
+    /// if that is still running).
+    func testPrefetchedSavedEditIsShownWithoutRenderingAgain() async throws {
+        let next = try insertPhoto(savedEdit: exposure(1), name: "next.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        state.prefetch([next], fitting: viewport)
+        let started = await waitFor { ImageEditingService.shared.renderCount > rendersBefore ? true : nil }
+        XCTAssertNotNil(started, "the prefetch renders before the photo is shown")
+        state.invalidate()   // navigating to it
+        state.clear()
+        await state.resolve(for: next, fitting: viewport, reusing: nil)
+
+        XCTAssertEqual(state.render?.key.parameters, exposure(1))
+        XCTAssertEqual(pixelSize(state.render?.image), CGSize(width: 1200, height: 800))
+        XCTAssertEqual(ImageEditingService.shared.renderCount - rendersBefore, 1, "only the prefetch rendered")
+    }
+
+    /// A prefetched render whose saved edit changed since is not shown.
+    func testPrefetchedRenderOfAChangedEditIsRenderedAgain() async throws {
+        let next = try insertPhoto(savedEdit: exposure(1), name: "next.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        state.prefetch([next], fitting: viewport)
+
+        next.jpgEditParameters = exposure(-1)
+        await state.resolve(for: next, fitting: viewport, reusing: nil)
+
+        XCTAssertEqual(state.render?.key.parameters, exposure(-1))
+    }
+
+    /// A prefetched render too small for the viewport now (the window grew) is not shown.
+    func testPrefetchedRenderTooSmallForTheViewportIsRenderedAgain() async throws {
+        let next = try insertPhoto(savedEdit: exposure(1), name: "next.jpg")
+        let state = SavedEditState()
+        state.prefetch([next], fitting: CGSize(width: 1200, height: 1000))
+
+        await state.resolve(for: next, fitting: CGSize(width: 1800, height: 1500), reusing: nil)
+
+        XCTAssertEqual(pixelSize(state.render?.image), CGSize(width: 1800, height: 1200))
+    }
+
+    func testPrefetchSkipsPhotosWithoutSavedEdits() async throws {
+        let plain = try insertPhoto(name: "plain.jpg")
+        let state = SavedEditState()
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        state.prefetch([plain], fitting: CGSize(width: 1200, height: 1000))
+        try await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertEqual(ImageEditingService.shared.renderCount, rendersBefore)
+    }
+
+    /// A new prefetch set drops renders of photos no longer next.
+    func testANewPrefetchSetDropsTheOldOne() async throws {
+        let first = try insertPhoto(savedEdit: exposure(1), name: "first.jpg")
+        let second = try insertPhoto(savedEdit: exposure(0.5), name: "second.jpg")
+        let state = SavedEditState()
+        let viewport = CGSize(width: 1200, height: 1000)
+        state.prefetch([first], fitting: viewport)
+        state.prefetch([second], fitting: viewport)
+        try await Task.sleep(for: .milliseconds(300))
+        let rendersBefore = ImageEditingService.shared.renderCount
+
+        await state.resolve(for: first, fitting: viewport, reusing: nil)
+
+        XCTAssertEqual(ImageEditingService.shared.renderCount - rendersBefore, 1, "the first photo renders again")
+        XCTAssertEqual(state.prefetchedPhotoIDs, Set([second.id]))
+    }
+
+    // MARK: In the detail view (hosted)
+
+    /// The detail view prefetches the next photo's saved edit, so navigating to it renders nothing more.
+    func testDetailViewPrefetchesTheNextSavedEdit() throws {
+        let first = try insertPhoto(name: "a.jpg")
+        first.creationDate = Date()
+        let second = try insertPhoto(savedEdit: exposure(1), name: "b.jpg")
+        second.creationDate = Date().addingTimeInterval(-60)
+        try context.save()
+        let state = SavedEditState()
+        let rendersBefore = ImageEditingService.shared.renderCount
+        let (viewModel, _) = host(first, zoom: ZoomPanState(), savedEdit: state)
+        XCTAssertEqual(viewModel.library.photos.map(\.id), [first.id, second.id])
+
+        XCTAssertNotNil(spin(until: { state.prefetchedPhotoIDs == Set([second.id]) ? true : nil }), "the next photo's edit is prefetched")
+        XCTAssertNotNil(spin(until: { ImageEditingService.shared.renderCount > rendersBefore ? true : nil }))
+        _ = spin(seconds: 0.5, until: { nil as Bool? })
+        let rendersAfterPrefetch = ImageEditingService.shared.renderCount
+
+        viewModel.navigateDetail(direction: 1)
+
+        let shown = spin(until: { state.render?.key.parameters == exposure(1) ? state.render : nil })
+        XCTAssertNotNil(shown, "the next photo's saved edit is shown")
+        XCTAssertEqual(ImageEditingService.shared.renderCount, rendersAfterPrefetch, "from the prefetch, no render")
+    }
+
+    /// Hosts the detail view in a 400×300 pt window with the given zoom and saved-edit state.
+    private func host(_ photo: PhotoAsset, zoom: ZoomPanState, savedEdit: SavedEditState) -> (PhotoLibraryViewModel, CGSize) {
+        let viewModel = PhotoLibraryViewModel()
+        viewModel.setModelContext(context)
+        viewModels.append(viewModel)
+        viewModel.openDetail(for: photo)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        windows.append(window)
+        window.contentView = NSHostingView(rootView: InjectedDetailHost(viewModel: viewModel, zoom: zoom,
+                                                                        savedEdit: savedEdit))
+        let scale = window.backingScaleFactor
+        return (viewModel, CGSize(width: 400 * scale, height: 300 * scale))
+    }
+
+    private func spin<T>(seconds: TimeInterval = 5, until body: () -> T?) -> T? {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let value = body() { return value }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        return body()
+    }
+
+    /// Navigating to a photo with a saved edit renders it to fill the viewport; zooming in renders it natively.
+    func testDetailViewShowsTheSavedEditAtViewportSizeThenNativeWhenZoomed() throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let zoom = ZoomPanState()
+        let state = SavedEditState()
+        let (_, viewport) = host(photo, zoom: zoom, savedEdit: state)
+        let expected = EditRenderSize.fitMaxSize(native: CGSize(width: 2400, height: 1600), parameters: exposure(1),
+                                                 viewport: viewport)
+        XCTAssertNotNil(expected, "the window is smaller than the photo")
+
+        let fit = spin(until: { state.render })
+        XCTAssertEqual(fit?.fittedMaxSize, expected, "viewport-sized, not native")
+        XCTAssertLessThan(pixelSize(fit?.image)?.width ?? .infinity, 2400)
+
+        zoom.zoomTo(3)
+
+        let native = spin(until: { state.render?.fittedMaxSize == nil ? state.render : nil })
+        XCTAssertEqual(pixelSize(native?.image), CGSize(width: 2400, height: 1600), "native once zoomed in")
+    }
+
+    /// While editing, the view gives the session its viewport, and zooming in asks for the native pass.
+    func testEditingInTheDetailViewRendersAtViewportSizeThenNativeWhenZoomed() throws {
+        let photo = try insertPhoto()
+        let zoom = ZoomPanState()
+        let (viewModel, viewport) = host(photo, zoom: zoom, savedEdit: SavedEditState())
+        _ = spin(seconds: 0.5, until: { nil as Bool? })
+        viewModel.startEditing(photo: photo, isRAW: false)
+        let session = try XCTUnwrap(viewModel.editSession)
+        session.parameters.exposure = 1
+
+        let fit = spin(until: { session.fullImage })
+        XCTAssertEqual(session.viewportPixelSize, viewport)
+        XCTAssertFalse(session.fullImageIsNative)
+        XCTAssertLessThan(pixelSize(fit)?.width ?? .infinity, 2400)
+
+        zoom.zoomTo(3)
+
+        let native = spin(until: { session.fullImageIsNative ? session.fullImage : nil })
+        XCTAssertEqual(pixelSize(native), CGSize(width: 2400, height: 1600), "native once zoomed in")
+    }
+}
+
 /// Shows the detail view for the view model's current detail photo, as `ContentView` does.
 private struct DetailHost: View {
     let viewModel: PhotoLibraryViewModel
     var body: some View {
         if let photo = viewModel.selectedDetailPhoto {
             PhotoDetailView(viewModel: viewModel, photo: photo)
+        }
+    }
+}
+
+/// `DetailHost` with the zoom and saved-edit state given, so a test can drive and observe them.
+private struct InjectedDetailHost: View {
+    let viewModel: PhotoLibraryViewModel
+    let zoom: ZoomPanState
+    let savedEdit: SavedEditState
+    var body: some View {
+        if let photo = viewModel.selectedDetailPhoto {
+            PhotoDetailView(viewModel: viewModel, photo: photo, zoom: zoom, savedEdit: savedEdit)
         }
     }
 }
