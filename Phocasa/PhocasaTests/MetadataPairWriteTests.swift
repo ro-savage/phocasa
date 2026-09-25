@@ -94,7 +94,7 @@ final class MetadataPairWriteTests: XCTestCase {
         let (photo, jpg, raw) = try makePair("DSC0001")
         let vm = try makeViewModel(with: [photo])
 
-        vm.setRating(4, for: photo)
+        vm.library.setRating(4, for: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(try embedded(jpg).rating, 4, "the JPG gets the rating, as before")
@@ -106,9 +106,9 @@ final class MetadataPairWriteTests: XCTestCase {
         let (photo, jpg, raw) = try makePair("DSC0002")
         let vm = try makeViewModel(with: [photo])
 
-        vm.setRating(2, for: photo)
-        vm.addTag(name: "ann", category: "people", to: photo)
-        vm.addTag(name: "beach", category: "", to: photo)
+        vm.library.setRating(2, for: photo)
+        vm.library.addTag(name: "ann", category: "people", to: photo)
+        vm.library.addTag(name: "beach", category: "", to: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(Set(try embedded(jpg).keywords), ["people:ann", "beach"])
@@ -117,7 +117,7 @@ final class MetadataPairWriteTests: XCTestCase {
         XCTAssertEqual(try sidecar(of: raw)?.rating, 2)
 
         let tag = try XCTUnwrap(photo.tags.first { $0.name == "beach" })
-        vm.removeTag(tag, from: photo)
+        vm.library.removeTag(tag, from: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(try embedded(jpg).keywords, ["people:ann"])
@@ -128,7 +128,7 @@ final class MetadataPairWriteTests: XCTestCase {
         let pairs = try (0..<3).map { try makePair("BATCH_\($0)") }
         let vm = try makeViewModel(with: pairs.map(\.0))
 
-        vm.selectAll()
+        vm.selection.selectAll()
         vm.setRatingForSelection(5)
         await MetadataWriter.shared.flush()
 
@@ -144,8 +144,8 @@ final class MetadataPairWriteTests: XCTestCase {
         photo.hasRawEdits = true
         let vm = try makeViewModel(with: [photo])
 
-        vm.setRating(5, for: photo)
-        vm.addTag(name: "x", category: "", to: photo)
+        vm.library.setRating(5, for: photo)
+        vm.library.addTag(name: "x", category: "", to: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(MetadataService.shared.readEditParameters(forRAWAt: raw.path)?.exposure, 0.7)
@@ -161,7 +161,7 @@ final class MetadataPairWriteTests: XCTestCase {
         let before = SidecarFixtures.unrelated(try SidecarFixtures.properties(ofXMPAt: raw.xmpSidecarURL))
         let vm = try makeViewModel(with: [photo])
 
-        vm.setRating(3, for: photo)
+        vm.library.setRating(3, for: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(try sidecar(of: raw)?.rating, 3)
@@ -175,8 +175,8 @@ final class MetadataPairWriteTests: XCTestCase {
         let vm = try makeViewModel(with: [photo])
         let service = MetadataService.shared
 
-        vm.setRating(4, for: photo)
-        vm.addTag(name: "ann", category: "people", to: photo)
+        vm.library.setRating(4, for: photo)
+        vm.library.addTag(name: "ann", category: "people", to: photo)
         await MetadataWriter.shared.flush()
 
         for path in [jpg.path, raw.path] {
@@ -185,8 +185,8 @@ final class MetadataPairWriteTests: XCTestCase {
         }
 
         // Clearing both comes back as cleared from either file too.
-        vm.setRating(0, for: photo)
-        vm.removeTag(try XCTUnwrap(photo.tags.first), from: photo)
+        vm.library.setRating(0, for: photo)
+        vm.library.removeTag(try XCTUnwrap(photo.tags.first), from: photo)
         await MetadataWriter.shared.flush()
 
         for path in [jpg.path, raw.path] {
@@ -203,8 +203,8 @@ final class MetadataPairWriteTests: XCTestCase {
         let photo = PhotoAsset(fileName: "RAWONLY", rawPath: raw.path, folderPath: dir.path)
         let vm = try makeViewModel(with: [photo])
 
-        vm.setRating(3, for: photo)
-        vm.addTag(name: "k", category: "", to: photo)
+        vm.library.setRating(3, for: photo)
+        vm.library.addTag(name: "k", category: "", to: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(try sidecar(of: raw)?.rating, 3)
@@ -218,8 +218,8 @@ final class MetadataPairWriteTests: XCTestCase {
         let photo = PhotoAsset(fileName: "JPGONLY", jpgPath: jpg.path, folderPath: dir.path)
         let vm = try makeViewModel(with: [photo])
 
-        vm.setRating(3, for: photo)
-        vm.addTag(name: "k", category: "", to: photo)
+        vm.library.setRating(3, for: photo)
+        vm.library.addTag(name: "k", category: "", to: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(try embedded(jpg).rating, 3)

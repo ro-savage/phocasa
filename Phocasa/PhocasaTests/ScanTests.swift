@@ -78,7 +78,7 @@ final class ScanTests: XCTestCase {
 
     private func waitForScan(_ vm: PhotoLibraryViewModel, timeout: Duration = .seconds(30)) async throws {
         let deadline = ContinuousClock.now + timeout
-        while vm.isScanning {
+        while vm.library.isScanning {
             if ContinuousClock.now > deadline {
                 XCTFail("scan did not finish within \(timeout)")
                 return
@@ -88,8 +88,8 @@ final class ScanTests: XCTestCase {
     }
 
     private func rescan(_ vm: PhotoLibraryViewModel) async throws {
-        vm.rescanCurrentLibrary()
-        XCTAssertTrue(vm.isScanning, "rescanCurrentLibrary() must set isScanning before it returns")
+        vm.library.rescanCurrentLibrary()
+        XCTAssertTrue(vm.library.isScanning, "rescanCurrentLibrary() must set isScanning before it returns")
         try await waitForScan(vm)
     }
 
@@ -112,15 +112,15 @@ final class ScanTests: XCTestCase {
 
         let (vm, _, container) = try await openLibrary(at: photos)
 
-        XCTAssertEqual(vm.allPhotos.count, 2)
-        let tagged = try XCTUnwrap(vm.allPhotos.first { $0.fileName == "tagged" })
+        XCTAssertEqual(vm.library.allPhotos.count, 2)
+        let tagged = try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "tagged" })
         XCTAssertEqual(tagged.rating, 3)
         XCTAssertEqual(Set(tagged.tags.map(\.fullName)), ["cat:a", "b"])
-        let plain = try XCTUnwrap(vm.allPhotos.first { $0.fileName == "plain" })
+        let plain = try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "plain" })
         XCTAssertEqual(plain.rating, 0)
         XCTAssertTrue(plain.tags.isEmpty)
         XCTAssertEqual(Set(try storedTags(container).map(\.fullName)), ["cat:a", "b"])
-        XCTAssertEqual(vm.scanProgress, "Found 2 photos (2 new)")
+        XCTAssertEqual(vm.library.scanProgress, "Found 2 photos (2 new)")
     }
 
     func testNewPhotosReuseExistingTagsAndCreateEachNewTagOnce() async throws {
@@ -137,10 +137,10 @@ final class ScanTests: XCTestCase {
         let tags = try storedTags(container)
         XCTAssertEqual(tags.map(\.fullName).sorted(), ["cat:a", "new:x"])
         XCTAssertEqual(tags.first { $0.fullName == "cat:a" }?.id, existing.id)
-        for photo in vm.allPhotos {
+        for photo in vm.library.allPhotos {
             XCTAssertEqual(photo.tags.map(\.fullName).sorted(), ["cat:a", "new:x"], photo.fileName)
         }
-        XCTAssertEqual(vm.tagCounts[existing.id], 2)
+        XCTAssertEqual(vm.library.tagCounts[existing.id], 2)
     }
 
     /// New photos without keywords go in through a background context. Later edits in the view model's context
@@ -150,23 +150,23 @@ final class ScanTests: XCTestCase {
         let photos = try makeTempDir("photos")
         try makeJPEG("tagged.jpg", in: photos, keywords: ["cat:a"])
         let (vm, _, container) = try await openLibrary(at: photos)
-        let catA = try XCTUnwrap(vm.allTags.first { $0.fullName == "cat:a" })
+        let catA = try XCTUnwrap(vm.library.allTags.first { $0.fullName == "cat:a" })
         XCTAssertEqual(catA.photos.count, 1) // loads the inverse in the view model's context
 
         for i in 0..<3 { try makeJPEG("plain\(i).jpg", in: photos, rating: i == 0 ? 5 : nil) }
         try makeJPEG("tagged2.jpg", in: photos, keywords: ["cat:a"]) // links to the loaded tag
         try await rescan(vm)
-        XCTAssertEqual(vm.lastScanReport?.inserted, 4)
-        let plain0 = try XCTUnwrap(vm.allPhotos.first { $0.fileName == "plain0" })
-        let plain1 = try XCTUnwrap(vm.allPhotos.first { $0.fileName == "plain1" })
+        XCTAssertEqual(vm.library.lastScanReport?.inserted, 4)
+        let plain0 = try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "plain0" })
+        let plain1 = try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "plain1" })
         XCTAssertEqual(plain0.rating, 5)
 
-        vm.addTag(name: "a", category: "cat", to: plain0)
-        vm.setRating(2, for: plain1)
-        vm.addTag(name: "b", category: "new", to: plain1)
+        vm.library.addTag(name: "a", category: "cat", to: plain0)
+        vm.library.setRating(2, for: plain1)
+        vm.library.addTag(name: "b", category: "new", to: plain1)
         await MetadataWriter.shared.flush()
 
-        XCTAssertEqual(vm.tagCounts[catA.id], 3)
+        XCTAssertEqual(vm.library.tagCounts[catA.id], 3)
         let stored = try storedPhotos(container)
         XCTAssertEqual(stored.count, 5)
         let byName = Dictionary(uniqueKeysWithValues: stored.map { ($0.fileName, $0) })
@@ -186,33 +186,33 @@ final class ScanTests: XCTestCase {
         let photos = try makeTempDir("photos")
         for i in 0..<5 { try makeJPEG("p\(i).jpg", in: photos, rating: 2, keywords: ["k:\(i % 2)"]) }
         let (vm, context, _) = try await openLibrary(at: photos)
-        XCTAssertEqual(vm.allPhotos.count, 5)
+        XCTAssertEqual(vm.library.allPhotos.count, 5)
         XCTAssertFalse(context.hasChanges)
-        let before = vm.allPhotos.map { ($0.persistentModelID, $0.jpgPath, $0.fileSize, $0.rating) }
+        let before = vm.library.allPhotos.map { ($0.persistentModelID, $0.jpgPath, $0.fileSize, $0.rating) }
 
         var pendingBeforeSave: Bool?
-        vm.scanWillSave = { pendingBeforeSave = $0.hasChanges }
+        vm.library.scanWillSave = { pendingBeforeSave = $0.hasChanges }
         try await rescan(vm)
 
         XCTAssertEqual(pendingBeforeSave, false, "an unchanged rescan must not touch any row")
-        let report = try XCTUnwrap(vm.lastScanReport)
+        let report = try XCTUnwrap(vm.library.lastScanReport)
         XCTAssertEqual(report.discovered, 5)
         XCTAssertEqual(report.inserted, 0)
         XCTAssertEqual(report.updated, 0)
         XCTAssertFalse(report.reloaded, "nothing changed, so no reload")
-        let after = vm.allPhotos.map { ($0.persistentModelID, $0.jpgPath, $0.fileSize, $0.rating) }
+        let after = vm.library.allPhotos.map { ($0.persistentModelID, $0.jpgPath, $0.fileSize, $0.rating) }
         XCTAssertEqual(after.map(\.0), before.map(\.0))
         XCTAssertEqual(after.map(\.1), before.map(\.1))
         XCTAssertEqual(after.map(\.2), before.map(\.2))
         XCTAssertEqual(after.map(\.3), before.map(\.3))
-        XCTAssertEqual(vm.scanProgress, "Found 5 photos (0 new)")
+        XCTAssertEqual(vm.library.scanProgress, "Found 5 photos (0 new)")
 
         // Control: a real change is pending at the same point.
         try Data(repeating: 1, count: 10).write(to: photos.appendingPathComponent("p0.jpg"))
         try await rescan(vm)
         XCTAssertEqual(pendingBeforeSave, true)
-        XCTAssertEqual(vm.lastScanReport?.updated, 1)
-        XCTAssertEqual(vm.allPhotos.first { $0.fileName == "p0" }?.fileSize, 10)
+        XCTAssertEqual(vm.library.lastScanReport?.updated, 1)
+        XCTAssertEqual(vm.library.allPhotos.first { $0.fileName == "p0" }?.fileSize, 10)
     }
 
     func testLaunchShowsStoredPhotosWithoutCheckingFilesThenScanHidesMissingOnes() async throws {
@@ -231,12 +231,12 @@ final class ScanTests: XCTestCase {
         vm.setModelContext(context)
 
         // Straight from the store, trusting the last scan (no stat pass on the main actor)...
-        XCTAssertEqual(Set(vm.allPhotos.map(\.fileName)), ["present", "gone"])
-        XCTAssertTrue(vm.isScanning)
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["present", "gone"])
+        XCTAssertTrue(vm.library.isScanning)
         // ...until the launch rescan has found which files are missing.
         try await waitForScan(vm)
-        XCTAssertEqual(vm.allPhotos.map(\.fileName), ["present"])
-        XCTAssertEqual(vm.lastScanReport?.missing, 1)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["present"])
+        XCTAssertEqual(vm.library.lastScanReport?.missing, 1)
     }
 
     func testRefreshAvailabilityStillChecksEveryFile() async throws {
@@ -244,12 +244,12 @@ final class ScanTests: XCTestCase {
         try makeJPEG("a.jpg", in: photos)
         let b = try makeJPEG("b.jpg", in: photos)
         let (vm, _, _) = try await openLibrary(at: photos)
-        XCTAssertEqual(vm.allPhotos.count, 2)
+        XCTAssertEqual(vm.library.allPhotos.count, 2)
 
         try FileManager.default.removeItem(at: b)
-        vm.refreshAvailability()
+        vm.library.refreshAvailability()
 
-        XCTAssertEqual(vm.allPhotos.map(\.fileName), ["a"])
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["a"])
     }
 
     func testScanReportsMainActorTime() async throws {
@@ -257,7 +257,7 @@ final class ScanTests: XCTestCase {
         for i in 0..<3 { try makeJPEG("p\(i).jpg", in: photos) }
         let (vm, _, _) = try await openLibrary(at: photos)
 
-        let report = try XCTUnwrap(vm.lastScanReport)
+        let report = try XCTUnwrap(vm.library.lastScanReport)
         XCTAssertEqual(report.inserted, 3)
         XCTAssertTrue(report.reloaded)
         XCTAssertGreaterThan(report.mainActorTime, .zero)
@@ -274,16 +274,16 @@ final class ScanTests: XCTestCase {
         try context.save()
         vm.loadExistingData()
 
-        vm.rescanCurrentLibrary()
-        vm.rescanCurrentLibrary()
-        vm.rescanCurrentLibrary()
+        vm.library.rescanCurrentLibrary()
+        vm.library.rescanCurrentLibrary()
+        vm.library.rescanCurrentLibrary()
         try await waitForScan(vm)
 
         let stored = try storedPhotos(container)
         XCTAssertEqual(stored.count, 20)
         XCTAssertEqual(Set(stored.map(\.fileName)).count, 20)
         XCTAssertEqual(try storedTags(container).count, 3)
-        XCTAssertEqual(vm.allPhotos.count, 20)
+        XCTAssertEqual(vm.library.allPhotos.count, 20)
     }
 
     func testScanToleratesExistingDuplicates() async throws {
@@ -302,7 +302,7 @@ final class ScanTests: XCTestCase {
         let stored = try storedPhotos(container)
         XCTAssertEqual(stored.count, 2, "the scan neither inserts a third row nor deletes one")
         XCTAssertTrue(stored.contains { $0.fileSize == size }, "one of them is kept up to date")
-        XCTAssertEqual(vm.scanProgress, "Found 1 photos (0 new)")
+        XCTAssertEqual(vm.library.scanProgress, "Found 1 photos (0 new)")
 
         try await rescan(vm) // and the next scan doesn't trap either
         XCTAssertEqual(try storedPhotos(container).count, 2)
@@ -313,13 +313,13 @@ final class ScanTests: XCTestCase {
         try makeJPEG("keep.jpg", in: photos)
         let gone = try makeJPEG("gone.jpg", in: photos)
         let (vm, _, _) = try await openLibrary(at: photos)
-        XCTAssertEqual(vm.allPhotos.count, 2)
+        XCTAssertEqual(vm.library.allPhotos.count, 2)
 
         try FileManager.default.removeItem(at: gone)
         try await rescan(vm)
 
-        XCTAssertEqual(vm.allPhotos.map(\.fileName), ["keep"])
-        XCTAssertEqual(vm.photos.map(\.fileName), ["keep"])
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["keep"])
+        XCTAssertEqual(vm.library.photos.map(\.fileName), ["keep"])
     }
 
     func testFileThatComesBackIsShownAgainWithoutDuplicate() async throws {
@@ -327,20 +327,20 @@ final class ScanTests: XCTestCase {
         try makeJPEG("keep.jpg", in: photos)
         let away = try makeJPEG("away.jpg", in: photos)
         let (vm, _, container) = try await openLibrary(at: photos)
-        let original = try XCTUnwrap(vm.allPhotos.first { $0.fileName == "away" })
-        vm.setRating(4, for: original)
+        let original = try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "away" })
+        vm.library.setRating(4, for: original)
         await MetadataWriter.shared.flush() // the write-back must not race the move below
 
         let parked = try makeTempDir("parked").appendingPathComponent("away.jpg")
         try FileManager.default.moveItem(at: away, to: parked)
         try await rescan(vm)
-        XCTAssertEqual(vm.allPhotos.map(\.fileName), ["keep"])
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["keep"])
 
         try FileManager.default.moveItem(at: parked, to: away)
         try await rescan(vm)
 
         XCTAssertEqual(try storedPhotos(container).count, 2)
-        let back = try XCTUnwrap(vm.allPhotos.first { $0.fileName == "away" })
+        let back = try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "away" })
         XCTAssertEqual(back.id, original.id)
         XCTAssertEqual(back.rating, 4)
     }
@@ -351,20 +351,20 @@ final class ScanTests: XCTestCase {
         let raw = photos.appendingPathComponent("pair.arw")
         try Data("not a real raw".utf8).write(to: raw) // fake bytes; only the extension matters to the scanner
         let (vm, _, _) = try await openLibrary(at: photos)
-        XCTAssertEqual(vm.jpgCount, 1)
-        XCTAssertEqual(vm.rawCount, 1)
+        XCTAssertEqual(vm.library.jpgCount, 1)
+        XCTAssertEqual(vm.library.rawCount, 1)
 
         try FileManager.default.removeItem(at: jpg)
         try await rescan(vm)
 
-        let photo = try XCTUnwrap(vm.allPhotos.first)
+        let photo = try XCTUnwrap(vm.library.allPhotos.first)
         XCTAssertNil(photo.jpgPath)
         XCTAssertEqual(photo.rawPath, raw.path)
         XCTAssertEqual(photo.fileSize, Int64(Data("not a real raw".utf8).count))
-        XCTAssertEqual(vm.jpgCount, 0)
-        XCTAssertEqual(vm.rawCount, 1)
-        vm.applyFilter(.jpgOnly)
-        XCTAssertTrue(vm.photos.isEmpty)
+        XCTAssertEqual(vm.library.jpgCount, 0)
+        XCTAssertEqual(vm.library.rawCount, 1)
+        vm.library.applyFilter(.jpgOnly)
+        XCTAssertTrue(vm.library.photos.isEmpty)
     }
 
     /// Existing behaviour, kept: a scan puts photos whose files it finds back into the library, bin
@@ -373,14 +373,14 @@ final class ScanTests: XCTestCase {
         let photos = try makeTempDir("photos")
         try makeJPEG("binned.jpg", in: photos)
         let (vm, _, _) = try await openLibrary(at: photos)
-        vm.deletePhoto(try XCTUnwrap(vm.allPhotos.first))
-        XCTAssertTrue(vm.allPhotos.isEmpty)
-        XCTAssertEqual(vm.binCount, 1)
+        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first))
+        XCTAssertTrue(vm.library.allPhotos.isEmpty)
+        XCTAssertEqual(vm.library.binCount, 1)
 
         try await rescan(vm)
 
-        XCTAssertEqual(vm.allPhotos.map(\.fileName), ["binned"])
-        XCTAssertEqual(vm.binCount, 0)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["binned"])
+        XCTAssertEqual(vm.library.binCount, 0)
     }
 
     func testPhotoOutsideScannedFolderStaysVisibleWhileItsFileExists() async throws {
@@ -395,7 +395,7 @@ final class ScanTests: XCTestCase {
                                       folderPath: elsewhere.path, creationDate: Date(), fileSize: 1))
         }
 
-        XCTAssertEqual(Set(vm.allPhotos.map(\.fileName)), ["inside", "outside"])
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["inside", "outside"])
     }
 
     func testScanOfMissingRootFolderHidesItsPhotos() async throws {
@@ -403,12 +403,12 @@ final class ScanTests: XCTestCase {
         try makeJPEG("a.jpg", in: photos)
         try makeJPEG("b.jpg", in: photos)
         let (vm, _, container) = try await openLibrary(at: photos)
-        XCTAssertEqual(vm.allPhotos.count, 2)
+        XCTAssertEqual(vm.library.allPhotos.count, 2)
 
         try FileManager.default.removeItem(at: photos) // like an unplugged drive
         try await rescan(vm)
 
-        XCTAssertTrue(vm.allPhotos.isEmpty)
+        XCTAssertTrue(vm.library.allPhotos.isEmpty)
         XCTAssertEqual(try storedPhotos(container).count, 2, "rows are kept, only hidden")
     }
 
@@ -417,12 +417,12 @@ final class ScanTests: XCTestCase {
         try makeJPEG("first.jpg", in: photos)
         let (vm, _, container) = try await openLibrary(at: photos)
 
-        vm.rescanCurrentLibrary()
+        vm.library.rescanCurrentLibrary()
         try makeJPEG("late.jpg", in: photos) // may or may not be seen by the running scan
-        vm.rescanCurrentLibrary()              // but the queued one sees it
+        vm.library.rescanCurrentLibrary()              // but the queued one sees it
         try await waitForScan(vm)
 
-        XCTAssertEqual(Set(vm.allPhotos.map(\.fileName)), ["first", "late"])
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["first", "late"])
         XCTAssertEqual(try storedPhotos(container).count, 2)
     }
 

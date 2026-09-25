@@ -1,13 +1,13 @@
 import SwiftUI
 
 struct SidebarView: View {
-    @Bindable var viewModel: PhotoLibraryViewModel
+    let library: LibraryStore
 
     var body: some View {
         List {
             // Clear filters button
-            if !viewModel.activeFilters.isEmpty && !viewModel.viewingBin {
-                Button(action: { viewModel.applyFilter(.all) }) {
+            if !library.activeFilters.isEmpty && !library.viewingBin {
+                Button(action: { library.applyFilter(.all) }) {
                     HStack {
                         Text("Clear Filters")
                         Spacer()
@@ -20,18 +20,18 @@ struct SidebarView: View {
             }
 
             Section("Library") {
-                sidebarRow(filter: .all, badge: viewModel.allPhotos.count) {
+                sidebarRow(filter: .all, badge: library.allPhotos.count) {
                     Label("All Photos", systemImage: "photo.on.rectangle.angled")
                 }
 
-                sidebarRow(filter: .unrated, badge: viewModel.ratingCounts[0, default: 0]) {
+                sidebarRow(filter: .unrated, badge: library.ratingCounts[0, default: 0]) {
                     Label("Unrated", systemImage: "star.slash")
                 }
             }
 
             Section("Ratings") {
                 ForEach(1...5, id: \.self) { stars in
-                    sidebarRow(filter: .rated(stars), badge: viewModel.ratingCounts[stars, default: 0]) {
+                    sidebarRow(filter: .rated(stars), badge: library.ratingCounts[stars, default: 0]) {
                         HStack(spacing: 2) {
                             ForEach(0..<stars, id: \.self) { _ in
                                 Image(systemName: "star.fill")
@@ -45,30 +45,30 @@ struct SidebarView: View {
             }
 
             Section("File Type") {
-                sidebarRow(filter: .jpgOnly, badge: viewModel.jpgCount) {
+                sidebarRow(filter: .jpgOnly, badge: library.jpgCount) {
                     Label("JPG", systemImage: "photo")
                 }
 
-                sidebarRow(filter: .rawOnly, badge: viewModel.rawCount) {
+                sidebarRow(filter: .rawOnly, badge: library.rawCount) {
                     Label("RAW", systemImage: "camera.filters")
                 }
             }
 
-            if !viewModel.tagCategories.isEmpty || !viewModel.uncategorizedTags.isEmpty {
+            if !library.tagCategories.isEmpty || !library.uncategorizedTags.isEmpty {
                 Section("Tags") {
-                    ForEach(viewModel.tagCategories, id: \.self) { category in
-                        sidebarRow(filter: .tagCategory(category), badge: viewModel.categoryCounts[category, default: 0]) {
+                    ForEach(library.tagCategories, id: \.self) { category in
+                        sidebarRow(filter: .tagCategory(category), badge: library.categoryCounts[category, default: 0]) {
                             Label(category.capitalized, systemImage: "folder")
                         }
 
-                        ForEach(viewModel.tagsByCategory[category] ?? [], id: \.id) { tag in
-                            sidebarRow(filter: .tag(tag.id), badge: viewModel.tagCounts[tag.id, default: 0]) {
+                        ForEach(library.tagsByCategory[category] ?? [], id: \.id) { tag in
+                            sidebarRow(filter: .tag(tag.id), badge: library.tagCounts[tag.id, default: 0]) {
                                 Label(tag.name, systemImage: "tag")
                                     .padding(.leading, 16)
                             }
 
                             ForEach(tag.children, id: \.id) { child in
-                                sidebarRow(filter: .tag(child.id), badge: viewModel.tagCounts[child.id, default: 0]) {
+                                sidebarRow(filter: .tag(child.id), badge: library.tagCounts[child.id, default: 0]) {
                                     Label(child.name, systemImage: "tag")
                                         .padding(.leading, 32)
                                 }
@@ -76,8 +76,8 @@ struct SidebarView: View {
                         }
                     }
 
-                    ForEach(viewModel.uncategorizedTags, id: \.id) { tag in
-                        sidebarRow(filter: .tag(tag.id), badge: viewModel.tagCounts[tag.id, default: 0]) {
+                    ForEach(library.uncategorizedTags, id: \.id) { tag in
+                        sidebarRow(filter: .tag(tag.id), badge: library.tagCounts[tag.id, default: 0]) {
                             Label(tag.name, systemImage: "tag")
                         }
                     }
@@ -85,7 +85,7 @@ struct SidebarView: View {
             }
 
             Section {
-                sidebarRow(filter: .bin, badge: viewModel.binCount) {
+                sidebarRow(filter: .bin, badge: library.binCount) {
                     Label("Bin", systemImage: "trash")
                 }
             }
@@ -96,11 +96,11 @@ struct SidebarView: View {
     private func isFilterActive(_ filter: SidebarFilter) -> Bool {
         switch filter {
         case .all:
-            return viewModel.activeFilters.isEmpty && !viewModel.viewingBin
+            return library.activeFilters.isEmpty && !library.viewingBin
         case .bin:
-            return viewModel.viewingBin
+            return library.viewingBin
         default:
-            return viewModel.activeFilters.contains(filter)
+            return library.activeFilters.contains(filter)
         }
     }
 
@@ -115,7 +115,7 @@ struct SidebarView: View {
             badge: badge,
             action: {
                 let isShiftHeld = NSEvent.modifierFlags.contains(.shift)
-                viewModel.applyFilter(filter, isShiftHeld: isShiftHeld)
+                library.applyFilter(filter, isShiftHeld: isShiftHeld)
             },
             content: content
         )

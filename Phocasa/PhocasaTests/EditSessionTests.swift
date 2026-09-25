@@ -285,7 +285,7 @@ final class EditSessionTests: XCTestCase {
         let raw = dir.appendingPathComponent("preset.ARW")
         let photo = try insertPhoto(jpg: try makeJPEG("preset.jpg", width: 60, height: 40, detail: false), raw: raw)
         viewModel.loadExistingData()
-        viewModel.toggleSelection(for: photo, addToSelection: false)
+        viewModel.selection.toggleSelection(for: photo, addToSelection: false)
         let preset = EditPreset(name: "P", parameters: exposure(0.8))
         context.insert(preset)
 
@@ -455,9 +455,9 @@ final class EditSessionTests: XCTestCase {
         await session.begin()
         session.parameters.exposure = 0.6
 
-        viewModel.setRating(3, for: photo)
+        viewModel.library.setRating(3, for: photo)
         viewModel.stopEditing(save: true)
-        viewModel.setRating(4, for: photo)
+        viewModel.library.setRating(4, for: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(MetadataService.shared.readMetadata(from: raw.path).rating, 4)
@@ -707,7 +707,7 @@ final class EditSessionTests: XCTestCase {
         second.jpgEditParameters = exposure(-1)
         try context.save()
         viewModel.loadExistingData()
-        XCTAssertEqual(viewModel.photos.map(\.id), [first.id, second.id])
+        XCTAssertEqual(viewModel.library.photos.map(\.id), [first.id, second.id])
         viewModel.openDetail(for: first)
         viewModel.startEditing(photo: first, isRAW: false)
         viewModel.editSession?.parameters.exposure = 1
@@ -798,7 +798,7 @@ final class EditSessionTests: XCTestCase {
         let viewModel = makeViewModel()
         let photo = try insertPhoto(raw: raw)
         viewModel.loadExistingData()
-        XCTAssertEqual(viewModel.jpgCount, 0)
+        XCTAssertEqual(viewModel.library.jpgCount, 0)
         viewModel.openDetail(for: photo)
         viewModel.startEditing(photo: photo, isRAW: true)
         let session = try XCTUnwrap(viewModel.editSession)
@@ -810,7 +810,7 @@ final class EditSessionTests: XCTestCase {
         viewModel.exportRAWToJPG(replaceExisting: false)
         _ = try await eventually(20, "the export becomes the photo's JPG") { photo.jpgPath }
         XCTAssertEqual(photo.jpgPath, export.path)
-        XCTAssertEqual(viewModel.jpgCount, 1, "photosDidChange: the library counts the new JPG")
+        XCTAssertEqual(viewModel.library.jpgCount, 1, "photosDidChange: the library counts the new JPG")
 
         viewModel.stopEditing(save: true)
         XCTAssertTrue(photo.hasRawEdits)

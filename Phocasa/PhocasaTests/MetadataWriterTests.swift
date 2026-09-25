@@ -451,19 +451,19 @@ final class MetadataWriterTests: XCTestCase {
         }
         let (vm, container) = try makeViewModel(with: photos)
         defer { _ = container }
-        XCTAssertEqual(vm.photos.count, 30)
+        XCTAssertEqual(vm.library.photos.count, 30)
 
         // Rate all 30 photos 3, then straight away rate the one the batch writes last 4.
-        vm.selectAll()
+        vm.selection.selectAll()
         vm.setRatingForSelection(3)
-        let last = try XCTUnwrap(vm.selectedPhotosList.last)
-        vm.setRating(4, for: last)
+        let last = try XCTUnwrap(vm.selection.selectedPhotosList.last)
+        vm.library.setRating(4, for: last)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(last.rating, 4)
         XCTAssertEqual(MetadataService.shared.readMetadata(from: try XCTUnwrap(last.jpgPath)).rating, 4,
                        "the later single rating must not be overwritten by the earlier batch")
-        let first = try XCTUnwrap(vm.selectedPhotosList.first)
+        let first = try XCTUnwrap(vm.selection.selectedPhotosList.first)
         XCTAssertEqual(MetadataService.shared.readMetadata(from: try XCTUnwrap(first.jpgPath)).rating, 3)
     }
 
@@ -475,7 +475,7 @@ final class MetadataWriterTests: XCTestCase {
 
         // Like pressing 1…5 quickly, several times over, ending on 2.
         let ratings = Array(repeating: [1, 2, 3, 4, 5], count: 6).flatMap { $0 } + [2]
-        for rating in ratings { vm.setRating(rating, for: photo) }
+        for rating in ratings { vm.library.setRating(rating, for: photo) }
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(MetadataService.shared.readMetadata(from: jpg.path).rating, 2,
@@ -492,7 +492,7 @@ final class MetadataWriterTests: XCTestCase {
         let (vm, container) = try makeViewModel(with: [photo])
         defer { _ = container }
 
-        vm.setRating(5, for: photo)
+        vm.library.setRating(5, for: photo)
         await MetadataWriter.shared.flush()
 
         XCTAssertEqual(MetadataService.shared.readEditParameters(forRAWAt: raw.path)?.exposure, 0.7)

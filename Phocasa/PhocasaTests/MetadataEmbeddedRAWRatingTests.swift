@@ -80,12 +80,12 @@ final class MetadataEmbeddedRAWRatingTests: XCTestCase {
         try context.save()
         vm.loadExistingData()
 
-        vm.rescanCurrentLibrary()
+        vm.library.rescanCurrentLibrary()
         let deadline = Date().addingTimeInterval(10)
-        while vm.isScanning && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        while vm.library.isScanning && Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
 
-        XCTAssertFalse(vm.isScanning)
-        let photo = try XCTUnwrap(vm.allPhotos.first)
+        XCTAssertFalse(vm.library.isScanning)
+        let photo = try XCTUnwrap(vm.library.allPhotos.first)
         XCTAssertNil(photo.jpgPath)
         XCTAssertEqual(photo.rawPath.map { URL(fileURLWithPath: $0).lastPathComponent }, "IMG_0003.dng")
         XCTAssertEqual(photo.rating, 4)

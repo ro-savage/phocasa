@@ -33,8 +33,8 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
 
                     // O(N); runs only when this view re-renders (not on zoom or pan frames). Task 30 swaps it
                     // for an index lookup.
-                    if let index = viewModel.photos.firstIndex(where: { $0.id == photo.id }) {
-                        Text("\(index + 1) / \(viewModel.photos.count)")
+                    if let index = viewModel.library.photos.firstIndex(where: { $0.id == photo.id }) {
+                        Text("\(index + 1) / \(viewModel.library.photos.count)")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.7))
                     }
@@ -92,7 +92,7 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
 
                 VStack(spacing: 8) {
                     RatingView(rating: photo.rating) { newRating in
-                        viewModel.setRating(newRating, for: photo)
+                        viewModel.library.setRating(newRating, for: photo)
                     }
 
                     HStack(spacing: 12) {
