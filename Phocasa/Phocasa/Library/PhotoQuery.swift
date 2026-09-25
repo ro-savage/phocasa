@@ -198,23 +198,18 @@ struct PhotoQuery: Equatable, Sendable {
         let groups = FilterGroups(filters)
         var counts = FacetCounts()
         for i in facts.indices {
-            let photo = facts[i]
-            let rating = groups.matchesRating(photo)
-            let fileType = groups.matchesFileType(photo)
-            let tag = groups.matchesTag(photo)
-            if fileType && tag {
-                counts.ratings[photo.rating, default: 0] += 1
-            }
-            if rating && fileType {
-                for id in photo.tagIDs { counts.tags[id, default: 0] += 1 }
-                for category in photo.tagCategories { counts.categories[category, default: 0] += 1 }
-            }
-            if rating && tag {
-                if photo.hasJPG { counts.jpg += 1 }
-                if photo.hasRAW { counts.raw += 1 }
-            }
+            groups.tally(facts[i], into: &counts, adding: true)
         }
         return counts
+    }
+
+    /// Updates counts from `facetCounts(over:)` (for this query) in O(1) when one photo changes:
+    /// pass the facts it had (`old`, nil if it's new to the counted photos) and has now (`new`, nil
+    /// if it left them). Entries that drop to zero are removed, as a full count wouldn't have them.
+    func updateFacetCounts(_ counts: inout FacetCounts, replacing old: PhotoFacts?, with new: PhotoFacts?) {
+        let groups = FilterGroups(filters)
+        if let old { groups.tally(old, into: &counts, adding: false) }
+        if let new { groups.tally(new, into: &counts, adding: true) }
     }
 }
 
@@ -224,8 +219,8 @@ private struct FilterGroups {
     private var hasRatingFilter = false
     private var wantsJPG = false
     private var wantsRAW = false
-    private var tagIDs: Set<UUID> = []
-    private var tagCategories: Set<String> = []
+    private var tagIDs: [UUID] = []
+    private var tagCategories: [String] = []
     private var hasTagFilter = false
 
     init(_ filters: Set<SidebarFilter>) {
@@ -236,14 +231,42 @@ private struct FilterGroups {
             case .rated(let stars): ratings.insert(stars); hasRatingFilter = true
             case .jpgOnly: wantsJPG = true
             case .rawOnly: wantsRAW = true
-            case .tag(let id): tagIDs.insert(id); hasTagFilter = true
-            case .tagCategory(let category): tagCategories.insert(category); hasTagFilter = true
+            case .tag(let id): tagIDs.append(id); hasTagFilter = true
+            case .tagCategory(let category): tagCategories.append(category); hasTagFilter = true
             }
         }
     }
 
     func matchesAll(_ facts: PhotoFacts) -> Bool {
         matchesRating(facts) && matchesFileType(facts) && matchesTag(facts)
+    }
+
+    /// Adds (or removes) one photo's contribution to faceted counts: each facet counts the photos
+    /// that match every filter group except its own.
+    func tally(_ photo: PhotoFacts, into counts: inout FacetCounts, adding: Bool) {
+        let rating = matchesRating(photo)
+        let fileType = matchesFileType(photo)
+        let tag = matchesTag(photo)
+        let delta = adding ? 1 : -1
+        if fileType && tag {
+            Self.bump(&counts.ratings, photo.rating, by: delta)
+        }
+        if rating && fileType {
+            for id in photo.tagIDs { Self.bump(&counts.tags, id, by: delta) }
+            for category in photo.tagCategories { Self.bump(&counts.categories, category, by: delta) }
+        }
+        if rating && tag {
+            if photo.hasJPG { counts.jpg += delta }
+            if photo.hasRAW { counts.raw += delta }
+        }
+    }
+
+    private static func bump<Key: Hashable>(_ counts: inout [Key: Int], _ key: Key, by delta: Int) {
+        if delta > 0 {
+            counts[key, default: 0] += delta
+        } else if let count = counts[key] {
+            counts[key] = count + delta > 0 ? count + delta : nil
+        }
     }
 
     func matchesRating(_ facts: PhotoFacts) -> Bool {
@@ -257,13 +280,9 @@ private struct FilterGroups {
 
     func matchesTag(_ facts: PhotoFacts) -> Bool {
         guard hasTagFilter else { return true }
-        // A photo has a handful of tags; walk its (small) sets rather than the filter's.
-        if !tagIDs.isEmpty {
-            for id in facts.tagIDs where tagIDs.contains(id) { return true }
-        }
-        if !tagCategories.isEmpty {
-            for category in facts.tagCategories where tagCategories.contains(category) { return true }
-        }
+        // The filter names one or two tags; hashed lookups beat iterating the photo's sets.
+        for id in tagIDs where facts.tagIDs.contains(id) { return true }
+        for category in tagCategories where facts.tagCategories.contains(category) { return true }
         return false
     }
 }
@@ -273,14 +292,38 @@ private struct FilterGroups {
 private struct SearchNeedle {
     private let text: String?
     private let impossible: Bool
+    /// The needle's bytes when it is ASCII without "\r"; enables the byte-search fast path.
+    private let asciiBytes: [UInt8]?
 
     init(_ searchText: String) {
-        text = searchText.isEmpty ? nil : searchText.lowercased()
+        let text = searchText.isEmpty ? nil : searchText.lowercased()
+        self.text = text
         impossible = text?.contains("\n") ?? false
+        if let text, text.utf8.count == text.utf16.count, !text.utf8.contains(0x0D) {
+            asciiBytes = Array(text.utf8)
+        } else {
+            asciiBytes = nil
+        }
     }
 
     func matches(_ facts: PhotoFacts) -> Bool {
         guard let text else { return true }
-        return !impossible && facts.searchKey.contains(text)
+        if impossible { return false }
+        if let asciiBytes, let found = Self.asciiContains(facts.searchKey, asciiBytes) {
+            return found
+        }
+        return facts.searchKey.contains(text)
+    }
+
+    /// Byte search, used only when both strings are ASCII without "\r". Then every byte is one
+    /// `Character` and no two spellings are canonically equivalent, so the result is exactly what
+    /// `String.contains` returns, several times faster. Returns nil when the key doesn't qualify.
+    private static func asciiContains(_ key: String, _ needle: [UInt8]) -> Bool? {
+        guard key.utf8.count == key.utf16.count else { return nil } // non-ASCII (utf16.count is O(1) for ASCII)
+        return key.utf8.withContiguousStorageIfAvailable { hay -> Bool? in
+            guard let base = hay.baseAddress else { return needle.isEmpty }
+            if memchr(base, 0x0D, hay.count) != nil { return nil }
+            return needle.withUnsafeBufferPointer { memmem(base, hay.count, $0.baseAddress, $0.count) != nil }
+        } ?? nil
     }
 }

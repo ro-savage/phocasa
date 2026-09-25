@@ -242,6 +242,74 @@ final class PhotoQueryTests: XCTestCase {
         XCTAssertEqual(PhotoQuery(filters: [.all]).facetCounts(over: all), PhotoQuery().facetCounts(over: all))
     }
 
+    func testSearchWithNonASCIIKeysBehavesLikeStringContains() {
+        // Keys that aren't plain ASCII take the `String.contains` path, with its canonical equivalence.
+        let decomposed = PhotoFacts(id: UUID(), rating: 0, hasJPG: true, hasRAW: false, tagIDs: [], tagCategories: [],
+                                    searchKey: "cafe\u{301}")
+        XCTAssertTrue(PhotoQuery(searchText: "caf\u{E9}").matchesSearch(decomposed))
+        let crlf = PhotoFacts(id: UUID(), rating: 0, hasJPG: true, hasRAW: false, tagIDs: [], tagCategories: [],
+                              searchKey: "a\r\nb")
+        XCTAssertEqual(PhotoQuery(searchText: "a").matchesSearch(crlf), "a\r\nb".contains("a"))
+        XCTAssertEqual(PhotoQuery(searchText: "b").matchesSearch(crlf), "a\r\nb".contains("b"))
+    }
+
+    func testSearchAgreesWithStringContains() {
+        var rng = SystemRandomNumberGenerator()
+        let pieces = ["a", "b", "c", "_", "1", "é", "e\u{301}", "\u{301}", "ß", "\r", "\r\n", " ", "img", "ø", "🌅"]
+        func random(_ length: ClosedRange<Int>) -> String {
+            (0..<Int.random(in: length, using: &rng)).map { _ in pieces.randomElement(using: &rng)! }.joined()
+        }
+        for _ in 0..<2000 {
+            let key = random(0...8).lowercased()
+            let needle = random(1...3)
+            let photo = PhotoFacts(id: UUID(), rating: 0, hasJPG: true, hasRAW: false, tagIDs: [], tagCategories: [],
+                                   searchKey: key)
+            XCTAssertEqual(PhotoQuery(searchText: needle).matchesSearch(photo), key.contains(needle.lowercased()),
+                           "key \(Array(key.unicodeScalars)) needle \(Array(needle.unicodeScalars))")
+        }
+    }
+
+    func testUpdateFacetCountsMatchesFullRecount() {
+        var rng = SystemRandomNumberGenerator()
+        let tagPool: [(id: UUID, name: String, category: String)] = [
+            (UUID(), "alice", "people"), (UUID(), "paris", "places"), (UUID(), "misc", ""),
+        ]
+        func randomFacts() -> PhotoFacts {
+            let jpg = Bool.random(using: &rng)
+            return facts("p", rating: Int.random(in: 0...5, using: &rng), jpg: jpg,
+                         raw: !jpg || Bool.random(using: &rng),
+                         tags: tagPool.filter { _ in Bool.random(using: &rng) })
+        }
+        let queries = [
+            PhotoQuery(), PhotoQuery(filters: [.rated(3)]), PhotoQuery(filters: [.jpgOnly, .tag(tagPool[0].id)]),
+            PhotoQuery(filters: [.unrated, .rawOnly, .tagCategory("places")]), PhotoQuery(filters: [.bin]),
+        ]
+        for query in queries {
+            var all = (0..<30).map { _ in randomFacts() }
+            var counts = query.facetCounts(over: all)
+            for _ in 0..<200 {
+                switch Int.random(in: 0..<3, using: &rng) {
+                case 0 where !all.isEmpty: // change one photo
+                    let i = Int.random(in: all.indices, using: &rng)
+                    let old = all[i]
+                    var new = randomFacts()
+                    new = PhotoFacts(id: old.id, rating: new.rating, hasJPG: new.hasJPG, hasRAW: new.hasRAW,
+                                     tagIDs: new.tagIDs, tagCategories: new.tagCategories, searchKey: new.searchKey)
+                    all[i] = new
+                    query.updateFacetCounts(&counts, replacing: old, with: new)
+                case 1 where !all.isEmpty: // remove one photo
+                    let old = all.remove(at: Int.random(in: all.indices, using: &rng))
+                    query.updateFacetCounts(&counts, replacing: old, with: nil)
+                default: // add one photo
+                    let new = randomFacts()
+                    all.append(new)
+                    query.updateFacetCounts(&counts, replacing: nil, with: new)
+                }
+                XCTAssertEqual(counts, query.facetCounts(over: all), "\(query.filters)")
+            }
+        }
+    }
+
     // MARK: - Matching indices
 
     func testMatchingIndicesKeepOrder() {
