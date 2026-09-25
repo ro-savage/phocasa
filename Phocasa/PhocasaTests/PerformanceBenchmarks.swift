@@ -119,7 +119,6 @@ final class DataPathBenchmarks: XCTestCase {
 
     private func runSuite(n: Int) async throws {
         let tag = "N=\(n)"
-        try await Task.sleep(for: .seconds(2)) // let the host app finish launching
         let dir = try makeTempDir("seed\(n)")
         let filesDir = try dir.appendingPathComponent("files", isDirectory: true).creatingDir()
         let storeURL = dir.appendingPathComponent("bench.store")
@@ -308,7 +307,6 @@ final class DataPathBenchmarks: XCTestCase {
     func testScan1k() async throws {
         try skipUnlessBenchmarking()
         let tag = "scan1k"
-        try await Task.sleep(for: .seconds(2))
         let dir = try makeTempDir("scan")
         let photosDir = try dir.appendingPathComponent("photos", isDirectory: true).creatingDir()
         let img = makeImage()
@@ -390,5 +388,18 @@ private extension URL {
     func creatingDir() throws -> URL {
         try FileManager.default.createDirectory(at: self, withIntermediateDirectories: true)
         return self
+    }
+}
+
+/// Deterministic seeded generator (standard SplitMix64), so every run seeds the same library.
+private struct SplitMix64: RandomNumberGenerator {
+    var state: UInt64
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }
