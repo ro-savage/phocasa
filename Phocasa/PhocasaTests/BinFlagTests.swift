@@ -2,17 +2,17 @@ import XCTest
 import SwiftData
 @testable import Phocasa
 
-/// The bin flag as stored. It used to be `PhotoAsset.isDeleted`, which collides with SwiftData's own
+/// The bin flag as stored. It used to be `PhotoAsset.isDeleted`, which collided with SwiftData's own
 /// `PersistentModel.isDeleted` (spec §H5): the property read `false` after a save, and saving any later change to a
 /// binned row wrote the flag back as `false`, so a photo rated in the bin came back into the library at the next
-/// reload or launch (task 30's probe; task 31's regression tests).
+/// reload or launch (task 30's probe). Each test here failed with `isDeleted`; `isInBin` fixes them (task 31).
 @MainActor
 final class BinFlagTests: LibraryTestCase {
 
     /// Ids of the binned photos as stored, read through a fresh context on the same container.
     private func storedBinIDs(in container: ModelContainer) -> Set<UUID> {
         let fresh = ModelContext(container)
-        let rows = (try? fresh.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isDeleted }))) ?? []
+        let rows = (try? fresh.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))) ?? []
         return Set(rows.map(\.id))
     }
 
@@ -56,7 +56,7 @@ final class BinFlagTests: LibraryTestCase {
     /// A photo already in the bin when the library loads (binned in an earlier session), rated twice: each rating is
     /// its own save.
     func testRatingAPhotoBinnedEarlierTwiceKeepsItInTheBin() {
-        let binned = insertPhoto(name: "binned", isDeleted: true)
+        let binned = insertPhoto(name: "binned", isInBin: true)
         library.loadExistingData()
         XCTAssertEqual(ids(library.binPhotos), [binned.id], "precondition")
 
@@ -85,7 +85,7 @@ final class BinFlagTests: LibraryTestCase {
 
     /// A row inserted in the bin, then changed and saved again, stays in the bin.
     func testChangingARowInsertedInTheBinKeepsTheFlag() throws {
-        let binned = insertPhoto(name: "binned", isDeleted: true)
+        let binned = insertPhoto(name: "binned", isInBin: true)
         binned.fileSize = 2000
         try context.save()
 
@@ -124,13 +124,13 @@ final class BinFlagTests: LibraryTestCase {
     /// The property reads what was stored straight after a save, with no refetch (results/10.md, deviation 12).
     func testFlagReadsCorrectlyStraightAfterASave() throws {
         let photo = insertPhoto(name: "a")
-        photo.isDeleted = true
+        photo.isInBin = true
         try context.save()
-        XCTAssertTrue(photo.isDeleted, "read straight after the save")
+        XCTAssertTrue(photo.isInBin, "read straight after the save")
 
         photo.rating = 3
         try context.save()
-        XCTAssertTrue(photo.isDeleted, "read after a later save of another field")
+        XCTAssertTrue(photo.isInBin, "read after a later save of another field")
     }
 
     /// `moveToBin` and `restoreFromBin` leave the property matching the store.
@@ -139,11 +139,11 @@ final class BinFlagTests: LibraryTestCase {
         library.loadExistingData()
 
         library.moveToBin([photo])
-        XCTAssertTrue(photo.isDeleted)
+        XCTAssertTrue(photo.isInBin)
         XCTAssertEqual(storedBinIDs(in: container), [photo.id])
 
         library.restoreFromBin([photo])
-        XCTAssertFalse(photo.isDeleted)
+        XCTAssertFalse(photo.isInBin)
         XCTAssertEqual(storedBinIDs(in: container), [])
     }
 

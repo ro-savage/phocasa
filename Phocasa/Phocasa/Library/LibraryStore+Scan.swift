@@ -214,7 +214,7 @@ extension LibraryStore {
             if photo.fileSize != update.fileSize { photo.fileSize = update.fileSize }
             if update.restoresFromBin {
                 // Not compared first: reading `isDeleted` can be stale (see `StoredPhoto.fetchAllNow`).
-                photo.isDeleted = false
+                photo.isInBin = false
                 restoredFromBin = true
             }
             changed.append(photo)

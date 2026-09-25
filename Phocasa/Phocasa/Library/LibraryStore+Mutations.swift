@@ -113,7 +113,7 @@ extension LibraryStore {
     func moveToBin(_ photosToMove: [PhotoAsset]) -> [UUID] {
         var ids: [UUID] = []
         for photo in photosToMove {
-            photo.isDeleted = true
+            photo.isInBin = true
             ids.append(photo.id)
         }
         try? modelContext?.save()
@@ -126,7 +126,7 @@ extension LibraryStore {
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) -> [UUID] {
         var ids: [UUID] = []
         for photo in photosToRestore {
-            photo.isDeleted = false
+            photo.isInBin = false
             ids.append(photo.id)
         }
         try? modelContext?.save()
@@ -166,7 +166,7 @@ extension LibraryStore {
         for (photo, change) in changes {
             switch change {
             case .toBin:
-                photo.isDeleted = true
+                photo.isInBin = true
             case .dropRAW:
                 photo.rawPath = nil
                 photo.hasRawEdits = false

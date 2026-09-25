@@ -99,8 +99,8 @@ final class LibraryStoreInMemoryTests: LibraryTestCase {
     }
 
     func testSearchAppliesInBinView() {
-        insertPhoto(name: "sunset", isDeleted: true)
-        insertPhoto(name: "forest", isDeleted: true)
+        insertPhoto(name: "sunset", isInBin: true)
+        insertPhoto(name: "forest", isInBin: true)
         library.loadExistingData()
         library.searchText = "sun"
 

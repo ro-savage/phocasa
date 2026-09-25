@@ -34,7 +34,7 @@ class LibraryTestCase: XCTestCase {
     func insertPhoto(
         name: String,
         rating: Int = 0,
-        isDeleted: Bool = false,
+        isInBin: Bool = false,
         creationDate: Date? = nil
     ) -> PhotoAsset {
         let photo = PhotoAsset(
@@ -45,7 +45,7 @@ class LibraryTestCase: XCTestCase {
             fileSize: 1000
         )
         photo.rating = rating
-        photo.isDeleted = isDeleted
+        photo.isInBin = isInBin
         context.insert(photo)
         try? context.save()
         return photo

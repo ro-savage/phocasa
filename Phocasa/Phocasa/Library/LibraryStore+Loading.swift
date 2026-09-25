@@ -29,7 +29,7 @@ extension LibraryStore {
         let tags = (try? context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))) ?? []
         tagFacts = TagFactsCache(tags: tags)
 
-        let fetchedPhotos = sort.fetch(where: #Predicate { !$0.isDeleted }, in: context)
+        let fetchedPhotos = sort.fetch(where: #Predicate { !$0.isInBin }, in: context)
 
         if loading.needsAvailabilityCheck {
             checkFileAvailability(for: fetchedPhotos)
@@ -45,7 +45,7 @@ extension LibraryStore {
             allFacts = available.map { fetchedFacts[$0] }
         }
 
-        binPhotos = sort.fetch(where: #Predicate { $0.isDeleted }, in: context)
+        binPhotos = sort.fetch(where: #Predicate { $0.isInBin }, in: context)
         binFacts = makeFacts(for: binPhotos)
 
         libraryVersion += 1
