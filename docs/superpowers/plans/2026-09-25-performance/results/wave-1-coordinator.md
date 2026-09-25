@@ -99,12 +99,13 @@ The fix:
 - **Coordinator harness:** AppleScript `keystroke "3"` doesn't reach SwiftUI's `onKeyPress`; `key code` does. This
   is a driver quirk, not an app bug.
 
-## Decisions for the user (from the results files)
+## Decisions for the user: answered 2026-09-25, implemented by task 23 (wave 2)
 
-1. RAW sidecar rewrites drop any third-party XMP (Lightroom, Capture One develop settings). Existing behaviour.
-   Should the app merge into the existing sidecar instead? (`results/14.md`)
-2. Scans now import ratings embedded in RAW files (in-camera or Lightroom), where they used to be ignored.
-   (`results/14.md`)
-3. A click on a grid star still waits ≈356 ms for double-click detection. Making it instant means a double-click on
-   a star rates twice. Existing behaviour. (`results/11.md`)
-4. JPG+RAW pairs still write ratings only into the JPG. Existing behaviour. (`results/14.md`)
+1. **RAW sidecar rewrites drop third-party XMP.** Answer: "It shouldn't rewrite everything. Just update." Sidecars are
+   now updated in place.
+2. **Scans import ratings embedded in RAW files.** Answer: "Yes." Keep it (task 23 adds a regression test).
+3. **Grid star clicks wait ≈356 ms.** Answer: "Make it instant." The user expected a double-click to give the same
+   rating twice. `RatingView` toggles a click on the current star back to 0, so task 23 must make a double-click
+   leave the rating set.
+4. **Pairs write ratings only into the JPG.** Answer: "Rating can go on both." The rating, plus the keywords that
+   travel with it, goes to the JPG and the RAW sidecar.

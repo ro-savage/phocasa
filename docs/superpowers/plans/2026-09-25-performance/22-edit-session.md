@@ -85,6 +85,8 @@ This removes about 15 flags from the view model, along with the manual reset in 
   - `loadImages` calls `MetadataService.readEditParameters(forRAWAt:)` on the main actor. Move that read off the main thread.
 - **Task 10:** after `exportRAWToJPG` sets `photo.jpgPath`, call `viewModel.photosDidChange([photo])`. Otherwise the JPG count and filter miss the new file until the next reload. `EditSession` doesn't know the view model, so either let the view model do it after the export returns, or give the session a callback.
 - **Task 13 (check what merged):** saved-edit renders in `PhotoDetailView.loadImages` and the JPG comparison render are full-resolution. If the lanes exist, run them on `.full`, so they never delay previews.
+- **Bug found in the wave-1 app check (existing):** after an edit is saved (Escape, or the edit button), the detail view shows the *unedited* image until you navigate away and back. `renderedEditImage` is only refreshed by `loadImages`. Fix it: when a session ends with a save, the detail view shows the saved edit, from the session's last full render or a fresh `.full` render. Add a test.
+- **Don't edit `MetadataService` or `MetadataWriter`:** task 23 owns them in this wave and is changing how sidecars are written. Call `MetadataWriter.shared.enqueueEditParameters(_:forRAWAt:)` and `MetadataService.readEditParameters(forRAWAt:)` as they are.
 - After this task `ImageLoader.loadFullResolution(for:)` has no app callers. Only `DetailNavigationBenchmarks` (its "old" path) uses it. Leave it; task 30 decides.
 
 ## Steps

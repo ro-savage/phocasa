@@ -104,6 +104,7 @@ Tasks in the same wave run **in parallel** in separate worktrees. A wave starts 
 | 2 | [20](20-scan-and-launch.md) | Scan and launch path off the main thread; no redundant writes; scan guard | 10, 14 | M |
 | 2 | [21](21-thumbnail-disk-cache.md) | Persistent thumbnail disk cache | 11 | M |
 | 2 | [22](22-edit-session.md) | Extract `EditSession` from the view model; sidecar I/O off main | 12, 13, 14 | L |
+| 2 | [23](23-metadata-and-rating-decisions.md) | User decisions: update sidecars in place, ratings on both files of a pair, instant star clicks | 11, 14 | M |
 | 3 | [30](30-structure-and-polish.md) | Split the remaining view model, keep grid alive, off-main trashing, dedupe, CLAUDE.md | all of waves 1–2 | L |
 | 3 | [31](31-schema-cleanup.md) | Schema cleanup: `isInBin`, drop dead fields, migration test | 30 | S |
 
@@ -140,17 +141,21 @@ wave 2, task 30/31 in wave 3. Other tasks put their gated benchmarks in their ow
 
 ### Wave 2
 
-| File / region | 20 | 21 | 22 |
-|---|---|---|---|
-| VM: `setModelContext`, availability, folder opening, `rescanCurrentLibrary`, `scanFolder`, `findOrCreateTag` | **owns** | | |
-| VM: editing state and editing, JPG comparison, crop, export, presets | | | **owns** |
-| `Services/FolderScanner.swift` | **owns** | | |
-| New `Library/TagParsing.swift` | **owns** | | |
-| `Services/ImageLoader.swift`, new `Services/ThumbnailDiskCache.swift` | | **owns** | |
-| `Views/EditSidebarView.swift`, `Views/CropOverlayView.swift`, new `Editing/*` | | | **owns** |
-| `Views/PhotoDetailView.swift` and `Views/Detail/*`: edit-related references only | | | **owns** |
-| `Views/ContentView.swift`: edit-related lines only (key handling, `EditSidebarView` presence) | | | **owns** |
-| Tests | `FolderScannerTests`, new `ScanTests` | new `ThumbnailDiskCacheTests` | new `EditSessionTests`; the crop and preset tests in `ViewModelTests` |
+| File / region | 20 | 21 | 22 | 23 |
+|---|---|---|---|---|
+| VM: `setModelContext`, availability, folder opening, `rescanCurrentLibrary`, `scanFolder`, `findOrCreateTag` | **owns** | | | |
+| VM: editing state and editing, JPG comparison, crop, export, presets | | | **owns** | |
+| VM: `metadataWriteItem(for:)`, `writeMetadataInBackground(_:)` | | | | **owns** |
+| `Services/FolderScanner.swift` | **owns** | | | |
+| New `Library/TagParsing.swift` | **owns** | | | |
+| `Services/ImageLoader.swift`, new `Services/ThumbnailDiskCache.swift` | | **owns** | | |
+| `Services/MetadataService.swift`, `Services/MetadataWriter.swift` | | | | **owns** |
+| `Views/RatingView.swift`; `Views/PhotoGridItemView.swift` rating-row gesture only | | | | **owns** |
+| `Views/EditSidebarView.swift`, `Views/CropOverlayView.swift`, new `Editing/*` | | | **owns** | |
+| `Views/PhotoDetailView.swift` and `Views/Detail/*`: edit-related references only | | | **owns** | |
+| `Views/ContentView.swift`: edit-related lines only (key handling, `EditSidebarView` presence) | | | **owns** | |
+| `PhocasaTests/PerformanceBenchmarks.swift` (add lines only) | **owns** | | | |
+| Tests | `FolderScannerTests`, new `ScanTests` | new `ThumbnailDiskCacheTests` | new `EditSessionTests`; the crop and preset tests in `ViewModelTests` | `Metadata*Tests`; the star tests in `PhotoGridItemViewTests` |
 
 ### Wave 3
 
@@ -181,7 +186,7 @@ Task 30 owns everything. Task 31 owns the models, the `isDeleted` call sites and
 Task files are guidelines. Agents should check their claims against the code and change the approach where they see a better one, recording deviations in the results file. What decides a merge is evidence:
 
 - **Performance tasks (10, 11, 12, 13, 20, 21):** the task's primary benchmark metrics must improve measurably, and nothing else may regress by more than 5%.
-  - The coordinator **re-runs the relevant benchmarks itself** on `main` and on the task branch, with no other builds or agents running. Numbers taken while other agents are compiling are noise.
+  - The coordinator **re-runs the relevant benchmarks itself** on `main` and on the task branch, with no other builds or agents running. Numbers taken while other agents are compiling are noise. The coordinator's tools and protocol (A/B harness, test runner, real-app check) are in `Tools/coordinator/README.md`.
   - If the improvement isn't there, the task is **skipped**: its branch isn't merged, and the reason goes in `results/<task-id>.md` on `main`.
   - A subagent that finds early, by measuring or prototyping, that its approach won't help should stop and report instead of finishing.
 - **Mixed tasks:** task 12 includes bug fixes (orientation, scroll hijack, wasted RAW render). If its performance changes don't pay off, keep and merge the bug fixes and drop the rest.
