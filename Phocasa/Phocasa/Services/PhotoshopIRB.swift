@@ -71,14 +71,15 @@ enum PhotoshopIRB {
     /// when it can't be done safely: malformed resources or datasets, or non-ASCII keywords in IPTC text of unknown
     /// encoding.
     static func replacingKeywords(in payload: Data, with keywords: [String]) -> Data? {
-        guard var (resources, padding) = resources(in: payload) else { return nil }
+        guard let parsed = resources(in: payload) else { return nil }
+        var resources = parsed.resources
         guard let index = resources.firstIndex(where: { $0.id == iptcResource }) else { return payload }
         guard let iim = IPTCIIM.replacingKeywords(in: resources[index].dataBytes, with: keywords) else { return nil }
         resources[index] = resources[index].replacingData(iim)
         for (i, resource) in resources.enumerated() where resource.id == digestResource {
             resources[i] = resource.replacingData(Data(Insecure.MD5.hash(data: iim)))
         }
-        return self.payload(resources, padding: padding)
+        return self.payload(resources, padding: parsed.padding)
     }
 
     /// `payload` without thumbnail resources, or nil if its resources are malformed.
