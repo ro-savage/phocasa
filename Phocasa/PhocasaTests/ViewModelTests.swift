@@ -32,7 +32,7 @@ final class ViewModelTests: XCTestCase {
     private func insertPhoto(
         name: String,
         rating: Int = 0,
-        isDeleted: Bool = false,
+        isInBin: Bool = false,
         creationDate: Date? = nil
     ) -> PhotoAsset {
         let photo = PhotoAsset(
@@ -43,7 +43,7 @@ final class ViewModelTests: XCTestCase {
             fileSize: 1000
         )
         photo.rating = rating
-        photo.isDeleted = isDeleted
+        photo.isInBin = isInBin
         context.insert(photo)
         try? context.save()
         return photo
@@ -104,12 +104,12 @@ final class ViewModelTests: XCTestCase {
     }
 
     func testRestoreFromBin() {
-        let photo = insertPhoto(name: "a", isDeleted: true)
+        let photo = insertPhoto(name: "a", isInBin: true)
         viewModel.loadExistingData()
 
         viewModel.restoreFromBin([photo])
 
-        XCTAssertFalse(photo.isDeleted)
+        XCTAssertFalse(photo.isInBin)
         XCTAssertTrue(viewModel.library.allPhotos.contains { $0.id == photo.id })
     }
 
@@ -128,7 +128,7 @@ final class ViewModelTests: XCTestCase {
         let path = dir.appendingPathComponent("binned.jpg").path
         FileManager.default.createFile(atPath: path, contents: Data())
 
-        let photo = insertPhoto(name: "binned", isDeleted: true)
+        let photo = insertPhoto(name: "binned", isInBin: true)
         photo.jpgPath = path
         try context.save()
 
@@ -140,16 +140,16 @@ final class ViewModelTests: XCTestCase {
     }
 
     func testRestoreSelected() {
-        let a = insertPhoto(name: "a", isDeleted: true)
-        let b = insertPhoto(name: "b", isDeleted: true)
+        let a = insertPhoto(name: "a", isInBin: true)
+        let b = insertPhoto(name: "b", isInBin: true)
         viewModel.loadExistingData()
         viewModel.library.applyFilter(.bin)
         viewModel.selection.selectedPhotos = [a.id, b.id]
 
         viewModel.restoreSelected()
 
-        XCTAssertFalse(a.isDeleted)
-        XCTAssertFalse(b.isDeleted)
+        XCTAssertFalse(a.isInBin)
+        XCTAssertFalse(b.isInBin)
     }
 
     // MARK: - Navigation
@@ -233,7 +233,7 @@ final class ViewModelTests: XCTestCase {
         // RAW path should be cleared, JPG should remain
         XCTAssertNil(paired.rawPath)
         XCTAssertEqual(paired.jpgPath, "/fake/paired.jpg")
-        XCTAssertFalse(paired.isDeleted, "Photo should NOT be in bin")
+        XCTAssertFalse(paired.isInBin, "Photo should NOT be in bin")
         XCTAssertFalse(paired.hasRawEdits, "RAW edits should be cleared")
     }
 
@@ -252,7 +252,7 @@ final class ViewModelTests: XCTestCase {
         // JPG path should be cleared, RAW should remain
         XCTAssertNil(paired.jpgPath)
         XCTAssertEqual(paired.rawPath, "/fake/paired.cr3")
-        XCTAssertFalse(paired.isDeleted, "Photo should NOT be in bin")
+        XCTAssertFalse(paired.isInBin, "Photo should NOT be in bin")
     }
 
     func testDeleteNonPairedInRAWOnlyModeSoftDeletes() async {
@@ -294,11 +294,10 @@ final class ViewModelTests: XCTestCase {
 
     private func ids(_ photos: [PhotoAsset]) -> [UUID] { photos.map(\.id) }
 
-    /// Ids of the binned photos as stored, read through a separate context. Reading `photo.isDeleted`
-    /// after a save isn't reliable: it collides with Core Data's own `isDeleted` (spec §H5).
+    /// Ids of the binned photos as stored, read through a separate context.
     private func storedBinIDs() -> Set<UUID> {
         let fresh = ModelContext(container)
-        let rows = (try? fresh.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isDeleted }))) ?? []
+        let rows = (try? fresh.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))) ?? []
         return Set(rows.map(\.id))
     }
 
@@ -372,8 +371,8 @@ final class ViewModelTests: XCTestCase {
     }
 
     func testEmptyBinUsesInMemoryBin() {
-        let a = insertPhoto(name: "a", isDeleted: true, creationDate: date(2000))
-        let b = insertPhoto(name: "b", isDeleted: true, creationDate: date(1000))
+        let a = insertPhoto(name: "a", isInBin: true, creationDate: date(2000))
+        let b = insertPhoto(name: "b", isInBin: true, creationDate: date(1000))
         insertPhoto(name: "c")
         viewModel.loadExistingData()
 
@@ -384,7 +383,7 @@ final class ViewModelTests: XCTestCase {
     }
 
     func testConfirmPermanentDeleteEmptiesBin() async {
-        insertPhoto(name: "a", isDeleted: true)
+        insertPhoto(name: "a", isInBin: true)
         insertPhoto(name: "b")
         viewModel.loadExistingData()
         viewModel.emptyBin()
@@ -512,7 +511,7 @@ final class ViewModelTests: XCTestCase {
         [people, places, loose].forEach { context.insert($0) }
         var photos: [PhotoAsset] = []
         for i in 0..<24 {
-            let photo = insertPhoto(name: "IMG_\(i)", rating: i % 4, isDeleted: i == 11, creationDate: date(Double(100 - i)))
+            let photo = insertPhoto(name: "IMG_\(i)", rating: i % 4, isInBin: i == 11, creationDate: date(Double(100 - i)))
             if i % 3 == 0 { photo.rawPath = "/fake/IMG_\(i).cr3" }
             if i % 3 == 1 { photo.jpgPath = nil; photo.rawPath = "/fake/IMG_\(i).arw" }
             if i % 2 == 0 { photo.tags.append(people) }
@@ -591,7 +590,7 @@ final class ViewModelTests: XCTestCase {
         ]
         for i in 0..<30 {
             let photo = insertPhoto(name: "IMG_\(i)", rating: Int.random(in: 0...5, using: &rng),
-                                    isDeleted: i % 7 == 0, creationDate: date(Double(1000 - i * 10)))
+                                    isInBin: i % 7 == 0, creationDate: date(Double(1000 - i * 10)))
             if Bool.random(using: &rng) { photo.rawPath = "/fake/IMG_\(i).arw" }
         }
         viewModel.loadExistingData()

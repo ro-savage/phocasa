@@ -9,7 +9,7 @@ struct StoredPhoto: Sendable, Equatable {
     let jpgPath: String?
     let rawPath: String?
     let fileSize: Int64
-    /// `PhotoAsset.isDeleted`: the photo is in the bin.
+    /// `PhotoAsset.isInBin`: the photo is in the bin.
     let isInBin: Bool
 }
 
@@ -30,7 +30,7 @@ extension StoredPhoto {
         let context = ModelContext(container)
         // Bin membership comes from a predicate the store evaluates. Reading `isDeleted` through a model can
         // disagree with the store (it collides with Core Data's own `isDeleted`; results/10.md, deviation 12).
-        let binned = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isDeleted }))) ?? []
+        let binned = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))) ?? []
         let binnedIDs = Set(binned.map(\.id))
         let photos = (try? context.fetch(FetchDescriptor<PhotoAsset>())) ?? []
         var rows: [StoredPhoto] = []

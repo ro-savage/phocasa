@@ -172,7 +172,7 @@ final class DataPathBenchmarks: XCTestCase {
             var fetched: [PhotoAsset] = []
             let tFetch = clock.measure {
                 fetched = (try? ctx.fetch(FetchDescriptor<PhotoAsset>(
-                    predicate: #Predicate { !$0.isDeleted },
+                    predicate: #Predicate { !$0.isInBin },
                     sortBy: [SortDescriptor(\.creationDate, order: .reverse)]))) ?? []
             }
             var refs = 0
@@ -188,7 +188,7 @@ final class DataPathBenchmarks: XCTestCase {
             var fetched: [PhotoAsset] = []
             let tFetch = clock.measure {
                 var d = FetchDescriptor<PhotoAsset>(
-                    predicate: #Predicate { !$0.isDeleted },
+                    predicate: #Predicate { !$0.isInBin },
                     sortBy: [SortDescriptor(\.creationDate, order: .reverse)])
                 d.relationshipKeyPathsForPrefetching = [\.tags]
                 fetched = (try? ctx.fetch(d)) ?? []
@@ -209,11 +209,11 @@ final class DataPathBenchmarks: XCTestCase {
         bench(tag, "1 loadExistingData() warm") { vm.loadExistingData() }
         bench(tag, "1a raw fetch(!isDeleted, sorted) warm") {
             _ = try? context.fetch(FetchDescriptor<PhotoAsset>(
-                predicate: #Predicate { !$0.isDeleted },
+                predicate: #Predicate { !$0.isInBin },
                 sortBy: [SortDescriptor(\.creationDate, order: .reverse)]))
         }
         bench(tag, "1b raw fetch(isDeleted) bin warm") {
-            _ = try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isDeleted }))
+            _ = try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))
         }
         // 2
         bench(tag, "2 refreshAvailability() (stat all + load)") { vm.library.refreshAvailability() }
@@ -511,7 +511,7 @@ final class DataPathBenchmarks: XCTestCase {
         bench(tag, "context.save() nothing dirty") { try? ctx.save() }
         let all = vm.library.allPhotos
         bench(tag, "same-value reassign 4 fields on 1000 rows + save") {
-            for p in all { p.jpgPath = p.jpgPath; p.rawPath = p.rawPath; p.fileSize = p.fileSize; p.isDeleted = false }
+            for p in all { p.jpgPath = p.jpgPath; p.rawPath = p.rawPath; p.fileSize = p.fileSize; p.isInBin = false }
             try? ctx.save()
         }
         for p in all { p.fileSize = p.fileSize }

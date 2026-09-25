@@ -12,7 +12,7 @@ final class LibraryStoreTests: LibraryTestCase {
     func testLoadExistingData() {
         insertPhoto(name: "photo1")
         insertPhoto(name: "photo2")
-        insertPhoto(name: "deleted", isDeleted: true)
+        insertPhoto(name: "deleted", isInBin: true)
 
         library.loadExistingData()
 
@@ -31,7 +31,7 @@ final class LibraryStoreTests: LibraryTestCase {
 
     func testLoadBinViewShowsDeletedPhotos() {
         insertPhoto(name: "active")
-        insertPhoto(name: "binned", isDeleted: true)
+        insertPhoto(name: "binned", isInBin: true)
 
         library.viewingBin = true
         library.loadExistingData()
@@ -99,8 +99,8 @@ final class LibraryStoreTests: LibraryTestCase {
 
     func testFilterBin() {
         insertPhoto(name: "a")
-        insertPhoto(name: "b", isDeleted: true)
-        insertPhoto(name: "c", isDeleted: true)
+        insertPhoto(name: "b", isInBin: true)
+        insertPhoto(name: "c", isInBin: true)
         library.loadExistingData()
 
         library.applyFilter(.bin)
@@ -111,7 +111,7 @@ final class LibraryStoreTests: LibraryTestCase {
 
     func testFilterBinDoesNotShowActivePhotos() {
         insertPhoto(name: "active")
-        insertPhoto(name: "binned", isDeleted: true)
+        insertPhoto(name: "binned", isInBin: true)
         library.loadExistingData()
 
         library.applyFilter(.bin)
@@ -383,7 +383,7 @@ final class LibraryStoreTests: LibraryTestCase {
 
     func testBinFilterIsExclusive() {
         insertPhoto(name: "a", rating: 3)
-        insertPhoto(name: "b", isDeleted: true)
+        insertPhoto(name: "b", isInBin: true)
         library.loadExistingData()
 
         library.applyFilter(.rated(3))

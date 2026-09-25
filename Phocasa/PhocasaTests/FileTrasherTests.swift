@@ -45,8 +45,7 @@ final class FileTrasherTests: LibraryTestCase {
         return url.path
     }
 
-    /// A photo whose files are real temp files, saved once. (A binned photo changed after its first save loses its
-    /// bin flag: `isDeleted` collides with Core Data's own, spec §H5.)
+    /// A photo whose files are real temp files, saved once.
     @discardableResult
     private func insertPhoto(_ name: String, raw: Bool = false, sidecar: Bool = false,
                              inBin: Bool = false) throws -> PhotoAsset {
@@ -54,7 +53,7 @@ final class FileTrasherTests: LibraryTestCase {
                                rawPath: raw ? try makeFile(name + ".arw") : nil, folderPath: photosDir.path,
                                creationDate: Date(), fileSize: 2)
         if sidecar { _ = try makeFile(name + ".xmp") }
-        photo.isDeleted = inBin
+        photo.isInBin = inBin
         context.insert(photo)
         try context.save()
         return photo
