@@ -80,6 +80,34 @@ final class MetadataRealFileTests: XCTestCase {
         XCTAssertEqual(MetadataService.shared.readMetadata(from: raw.path).rating, 1)
     }
 
+    func testRatingARealCameraJPGChangesOnlyItsXMP() throws {
+        let jpg = try XCTUnwrap(jpg, "needs the RAW's JPG next to it")
+        let before = try Data(contentsOf: jpg)
+        let beforeProps = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithData(before as CFData, nil)), 0, nil) as? [String: Any])
+
+        MetadataService.shared.writeMetadata(rating: 4, keywords: ["people:ann", "beach"], toImageAt: jpg.path)
+        MetadataService.shared.writeMetadata(rating: 2, keywords: ["beach"], toImageAt: jpg.path)
+
+        let after = try Data(contentsOf: jpg)
+        typealias T = MetadataJPEGPreservationTests
+        let xmpID = "http://ns.adobe.com/xap/1.0/"
+        let (oldSegments, oldSOS) = T.header(before), (newSegments, newSOS) = T.header(after)
+        XCTAssertEqual(newSegments.filter { $0.id != xmpID }, oldSegments.filter { $0.id != xmpID },
+                       "Exif (with the MakerNote), MPF and every other segment stay byte-identical")
+        XCTAssertEqual(after[newSOS...], before[oldSOS...], "image data and the appended preview are copied as is")
+        if let oldPreview = T.mpfSecondImage(before) {
+            let newPreview = try XCTUnwrap(T.mpfSecondImage(after))
+            XCTAssertEqual(after[newPreview], before[oldPreview], "the MPF entry still points at the preview")
+        }
+        let afterProps = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
+            try XCTUnwrap(CGImageSourceCreateWithData(after as CFData, nil)), 0, nil) as? [String: Any])
+        XCTAssertEqual(Set(afterProps.keys), Set(beforeProps.keys).union(["{IPTC}"]),
+                       "no ImageIO dictionary (such as the MakerNote's {PictureStyle}) disappears")
+        XCTAssertEqual(try embeddedRating(jpg), 2)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: jpg.path).keywords, ["beach"])
+    }
+
     func testRatingARealPairWritesTheJPGAndTheSidecar() async throws {
         let jpg = try XCTUnwrap(jpg, "needs the RAW's JPG next to it")
         let rawBefore = try digest(raw)

@@ -140,11 +140,16 @@ final class MetadataService: Sendable {
     /// if ImageIO can't copy the source, nothing on disk changes and no temp file is left.
     /// Symlinks are written through (the link stays a link). Permissions, extended attributes and
     /// file dates are kept. Read-only files are left alone.
+    ///
+    /// For a JPEG, only the XMP and IPTC-IIM segments of ImageIO's output are used: they are spliced into the
+    /// original bytes (`spliceJPEGMetadata`), because ImageIO's rewrite drops what it doesn't model, such as the
+    /// camera's MakerNote and other APPn segments.
     private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
         let fm = FileManager.default
         let target = url.resolvingSymlinksInPath()
         guard fm.isWritableFile(atPath: target.path),
-              let source = CGImageSourceCreateWithURL(target as CFURL, nil) else { return }
+              let original = try? Data(contentsOf: target, options: .mappedIfSafe),
+              let source = CGImageSourceCreateWithData(original as CFData, nil) else { return }
         let uti = CGImageSourceGetType(source) ?? (UTType.jpeg.identifier as CFString)
 
         // A data destination, not a URL one: ImageIO leaves its own temp file behind when a
@@ -184,10 +189,116 @@ final class MetadataService: Sendable {
         // Lossless: copies the image data as is and merges in the new metadata.
         guard CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, nil) else { return }
 
+        var bytes = output as Data
+        if uti as String == UTType.jpeg.identifier,
+           let spliced = Self.spliceJPEGMetadata(original: original, rewritten: bytes),
+           Self.jpeg(spliced, readsBack: rating, keywords) {
+            bytes = spliced
+        }
+
         let originalDates = Phocasa.captureFileDates(target)
-        guard Self.replace(target, exists: true, writingTempWith: { try output.write(to: $0, options: .withoutOverwriting) })
+        guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
         else { return }
         Phocasa.restoreFileDates(target, dates: originalDates)
+    }
+
+    // MARK: - JPEG metadata splice
+
+    private struct JPEGSegment {
+        enum Kind { case xmp, extendedXMP, iptc, mpf, exif, other }
+        let marker: UInt8
+        let range: Range<Int>
+        let kind: Kind
+    }
+
+    private static let jpegSegmentIDs: [(marker: UInt8, id: Data, kind: JPEGSegment.Kind)] = [
+        (0xE1, Data("http://ns.adobe.com/xap/1.0/\u{0}".utf8), .xmp),
+        (0xE1, Data("http://ns.adobe.com/xmp/extension/\u{0}".utf8), .extendedXMP),
+        (0xE1, Data("Exif\u{0}".utf8), .exif),
+        (0xED, Data("Photoshop 3.0\u{0}".utf8), .iptc),
+        (0xE2, Data("MPF\u{0}".utf8), .mpf),
+    ]
+
+    /// The marker segments between SOI and SOS, and where SOS starts. Nil for anything unusual (no SOI, fill
+    /// bytes, standalone markers, a length that runs past the end): those files are left to ImageIO.
+    private static func jpegHeader(_ d: Data) -> (segments: [JPEGSegment], sos: Int)? {
+        let start = d.startIndex
+        guard d.count >= 4, d[start] == 0xFF, d[start + 1] == 0xD8 else { return nil }
+        var segments: [JPEGSegment] = []
+        var i = start + 2
+        while true {
+            guard i + 4 <= d.endIndex, d[i] == 0xFF else { return nil }
+            let marker = d[i + 1]
+            if marker == 0xDA { return (segments, i) }
+            guard marker != 0xFF, marker != 0x00, marker != 0x01, !(0xD0...0xD9).contains(marker) else { return nil }
+            let length = Int(d[i + 2]) << 8 | Int(d[i + 3])
+            guard length >= 2, i + 2 + length <= d.endIndex else { return nil }
+            let payload = d[(i + 4)..<(i + 2 + length)]
+            let kind = jpegSegmentIDs.first { $0.marker == marker && payload.starts(with: $0.id) }?.kind ?? .other
+            segments.append(JPEGSegment(marker: marker, range: i..<(i + 2 + length), kind: kind))
+            i += 2 + length
+        }
+    }
+
+    /// `original` with its XMP (APP1) and IPTC-IIM (APP13) segments replaced by those of `rewritten`, ImageIO's
+    /// rewrite of the same file with the new metadata merged in. Every other byte of `original` is kept: Exif with
+    /// the camera's MakerNote, MPF previews, ICC profiles, other APPn and COM segments, and the image data.
+    ///
+    /// The new XMP goes where the old one was, or after the JFIF and Exif segments; new IPTC goes where the old
+    /// one was, or right after the XMP. Returns nil, so the caller keeps `rewritten`, when that can't be done
+    /// safely: either file isn't plain marker segments up to SOS; `rewritten` hasn't exactly one XMP segment, or
+    /// has extended XMP; `original` has several XMP or IPTC segments, or extended XMP; `original` has IPTC but
+    /// `rewritten` doesn't; or a change would land after an MPF segment, whose image offsets count from it.
+    static func spliceJPEGMetadata(original: Data, rewritten: Data) -> Data? {
+        guard let (old, sos) = jpegHeader(original), let (new, _) = jpegHeader(rewritten) else { return nil }
+        let newXMP = new.filter { $0.kind == .xmp }
+        let newIPTC = new.filter { $0.kind == .iptc }
+        guard newXMP.count == 1, newIPTC.count <= 1, !new.contains(where: { $0.kind == .extendedXMP }),
+              old.filter({ $0.kind == .xmp }).count <= 1, old.filter({ $0.kind == .iptc }).count <= 1,
+              !old.contains(where: { $0.kind == .extendedXMP }) else { return nil }
+
+        let oldXMPIndex = old.firstIndex { $0.kind == .xmp }
+        let oldIPTCIndex = old.firstIndex { $0.kind == .iptc }
+        if oldIPTCIndex != nil && newIPTC.isEmpty { return nil }
+        // Without an old XMP segment, the new one goes before this index: after the leading JFIF/Exif segments.
+        let insertXMPAt = old.firstIndex { !($0.marker == 0xE0 || $0.kind == .exif) } ?? old.count
+
+        if let mpf = old.firstIndex(where: { $0.kind == .mpf }) {
+            let xmpSafe = oldXMPIndex.map { $0 < mpf } ?? (insertXMPAt <= mpf)
+            let iptcSafe = oldIPTCIndex.map { $0 < mpf } ?? true
+            guard xmpSafe, iptcSafe else { return nil }
+        }
+
+        let xmpBytes = rewritten[newXMP[0].range]
+        let iptcBytes = newIPTC.first.map { rewritten[$0.range] }
+        let newIPTCFollowsXMP = oldIPTCIndex == nil
+        var out = Data(capacity: original.count + xmpBytes.count + (iptcBytes?.count ?? 0))
+        out.append(contentsOf: [0xFF, 0xD8])
+        func appendXMP() {
+            out.append(xmpBytes)
+            if newIPTCFollowsXMP, let iptcBytes { out.append(iptcBytes) }
+        }
+        for (index, segment) in old.enumerated() {
+            if oldXMPIndex == nil && index == insertXMPAt { appendXMP() }
+            switch segment.kind {
+            case .xmp: appendXMP()
+            case .iptc: if let iptcBytes { out.append(iptcBytes) }
+            default: out.append(original[segment.range])
+            }
+        }
+        if oldXMPIndex == nil && insertXMPAt == old.count { appendXMP() }
+        out.append(original[sos...])
+        return out
+    }
+
+    /// Whether ImageIO reads `spliced` as a complete image with this rating and these keywords: a check on the
+    /// splice before it replaces anyone's photo. (Its frame and image data are the original's bytes, so the size
+    /// needs no check; reading it would parse the whole Exif, MakerNote included, for about 1 ms.)
+    private static func jpeg(_ spliced: Data, readsBack rating: Int, _ keywords: [String]) -> Bool {
+        guard let source = CGImageSourceCreateWithData(spliced as CFData, nil),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) else { return false }
+        return xmpRating(in: meta) == rating && xmpSubject(in: meta) == keywords
     }
 
     /// Writes a new version of `target` through a temp file in the same folder, then swaps it in.
