@@ -377,4 +377,63 @@ final class MetadataWriterTests: XCTestCase {
         XCTAssertEqual(service.readMetadata(from: raw.path).rating, 4)
     }
 
+    // MARK: - Through the view model (spec §F3)
+
+    func testViewModelSingleRatingAfterBatchRatingWins() async throws {
+        var photos: [PhotoAsset] = []
+        for i in 0..<30 {
+            let jpg = try makeJPEG(String(format: "batch_%02d.jpg", i), size: 512)
+            photos.append(PhotoAsset(fileName: jpg.deletingPathExtension().lastPathComponent, jpgPath: jpg.path,
+                                     folderPath: dir.path, creationDate: Date(timeIntervalSince1970: Double(i))))
+        }
+        let (vm, container) = try makeViewModel(with: photos)
+        defer { _ = container }
+        XCTAssertEqual(vm.photos.count, 30)
+
+        // Rate all 30 photos 3, then straight away rate the one the batch writes last 4.
+        vm.selectAll()
+        vm.setRatingForSelection(3)
+        let last = try XCTUnwrap(vm.selectedPhotosList.last)
+        vm.setRating(4, for: last)
+        await MetadataWriter.shared.flush()
+
+        XCTAssertEqual(last.rating, 4)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: try XCTUnwrap(last.jpgPath)).rating, 4,
+                       "the later single rating must not be overwritten by the earlier batch")
+        let first = try XCTUnwrap(vm.selectedPhotosList.first)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: try XCTUnwrap(first.jpgPath)).rating, 3)
+    }
+
+    func testViewModelRapidRatingChangesLandInOrder() async throws {
+        let jpg = try makeJPEG("rapid.jpg")
+        let photo = PhotoAsset(fileName: "rapid", jpgPath: jpg.path, folderPath: dir.path)
+        let (vm, container) = try makeViewModel(with: [photo])
+        defer { _ = container }
+
+        // Like pressing 1…5 quickly, several times over, ending on 2.
+        let ratings = Array(repeating: [1, 2, 3, 4, 5], count: 6).flatMap { $0 } + [2]
+        for rating in ratings { vm.setRating(rating, for: photo) }
+        await MetadataWriter.shared.flush()
+
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: jpg.path).rating, 2,
+                       "the file must end up with the last rating set")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["rapid.jpg"])
+    }
+
+    func testViewModelRatingRAWOnlyPhotoKeepsItsEdits() async throws {
+        let raw = dir.appendingPathComponent("IMG_7.ARW")
+        try Data("fake raw bytes".utf8).write(to: raw)
+        MetadataService.shared.writeEditParameters(EditParameters(exposure: 0.7), forRAWAt: raw.path)
+        let photo = PhotoAsset(fileName: "IMG_7", rawPath: raw.path, folderPath: dir.path)
+        photo.hasRawEdits = true
+        let (vm, container) = try makeViewModel(with: [photo])
+        defer { _ = container }
+
+        vm.setRating(5, for: photo)
+        await MetadataWriter.shared.flush()
+
+        XCTAssertEqual(MetadataService.shared.readEditParameters(forRAWAt: raw.path)?.exposure, 0.7)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: raw.path).rating, 5)
+        XCTAssertTrue(photo.hasRawEdits)
+    }
 }

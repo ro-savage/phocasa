@@ -909,18 +909,15 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Background Metadata Write-back
 
-    private func metadataWriteItem(for photo: PhotoAsset) -> (rating: Int, keywords: [String], path: String) {
-        (photo.rating, photo.tags.map(\.fullName), photo.displayPath)
+    private func metadataWriteItem(for photo: PhotoAsset) -> MetadataWriteItem {
+        MetadataWriteItem(path: photo.displayPath, rating: photo.rating, keywords: photo.tags.map(\.fullName))
     }
 
-    private func writeMetadataInBackground(_ items: [(rating: Int, keywords: [String], path: String)]) {
+    /// Hands the writes to the serial `MetadataWriter`, which writes them off the main thread,
+    /// in call order, keeping only the latest per file. Returns immediately.
+    private func writeMetadataInBackground(_ items: [MetadataWriteItem]) {
         guard !items.isEmpty else { return }
-        let metadata = self.metadata
-        Task.detached {
-            for item in items {
-                metadata.writeMetadata(rating: item.rating, keywords: item.keywords, toImageAt: item.path)
-            }
-        }
+        MetadataWriter.shared.enqueue(items)
     }
 
     // MARK: - Zoom
