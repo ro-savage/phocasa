@@ -426,6 +426,27 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(try storedPhotos(container).count, 2)
     }
 
+    /// `waitForScans()` returns once the launch rescan and every scan queued behind it are done: where work that
+    /// should start after launch waits.
+    func testWaitForScansWaitsForTheLaunchRescanAndQueuedScans() async throws {
+        let photos = try makeTempDir("photos")
+        try makeJPEG("first.jpg", in: photos)
+        let container = try makeContainer()
+        let context = container.mainContext
+        context.insert(PhotoLibrary(rootFolderPath: photos.path))
+        try context.save()
+        let vm = PhotoLibraryViewModel()
+        vm.setModelContext(context) // starts the launch rescan
+        XCTAssertTrue(vm.library.isScanning)
+        try makeJPEG("late.jpg", in: photos)
+        vm.library.rescanCurrentLibrary() // queued behind it
+
+        await vm.library.waitForScans()
+
+        XCTAssertFalse(vm.library.isScanning)
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["first", "late"])
+    }
+
     // MARK: - Scan plan (pure)
 
     private func found(_ name: String, folder: String = "/f", jpg: Bool = true, raw: Bool = false,
