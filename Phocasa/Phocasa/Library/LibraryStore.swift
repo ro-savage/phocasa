@@ -90,6 +90,8 @@ final class LibraryStore {
     @ObservationIgnored var loading = LoadingState()
     /// The scan code's own state (`ScanState`, declared in `LibraryStore+Scan`).
     @ObservationIgnored var scanning = ScanState()
+    /// The capture-date backfill's state (`CaptureDateState`, declared in `CaptureDateBackfill`).
+    @ObservationIgnored var captureDates = CaptureDateState()
     /// What the last scan did. For tests and benchmarks.
     @ObservationIgnored var lastScanReport: ScanReport?
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted

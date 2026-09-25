@@ -146,6 +146,7 @@ struct ScanPlan: Sendable {
                             fileSize: found.fileSize
                         )
                         asset.rating = found.metadata?.rating ?? 0
+                        asset.captureDate = found.metadata?.captureDate
                         context.insert(asset)
                         chunk.append(asset.id)
                     }

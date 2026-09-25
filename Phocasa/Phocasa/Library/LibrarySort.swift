@@ -4,12 +4,16 @@ import SwiftData
 /// The one definition of photo order. The library, the bin and the grid are all kept in this order, and nothing else
 /// sorts photos.
 ///
-/// Photos are ordered by a key, today the file's creation date (a photo without one sorts as the oldest), newest
-/// first by default. Every path that orders photos goes through here:
+/// Photos are ordered by capture date (EXIF `DateTimeOriginal`, `PhotoAsset.captureDate`), falling back to the file's
+/// creation date for photos without one, newest first by default (user decision, wave 2 #6). A photo with neither
+/// sorts as the oldest. Ties (burst shots share a capture second) are broken by the creation date. Every path that
+/// orders photos goes through here:
 /// - fetching from the store: `fetch(where:in:)`;
-/// - the key, for a model (`key(of:)`) or a plain value (`key(creationDate:)`), and `precedes(_:_:)`;
+/// - the key, for a model (`key(of:)`, `sortKey(of:)`) or plain values (`key(captureDate:creationDate:)`), and
+///   `precedes(_:_:)`;
 /// - where one photo goes in a sorted list: `insertionIndex(for:in:)`;
 /// - merging many photos into a sorted list: `merge(_:into:_:)`;
+/// - putting a list back in order after capture dates changed: `ranks(of:)` and `reorder(_:_:ranks:)`;
 /// - switching direction: `toggle()` and `reorderAfterToggle(_:)`.
 struct LibrarySort: Equatable, Sendable {
     /// Newest first (the default), or oldest first.
@@ -17,32 +21,144 @@ struct LibrarySort: Equatable, Sendable {
 
     // MARK: - The key
 
-    /// The sort key of a photo with this creation date. A photo without one sorts as the oldest, which is also where
-    /// the store's sort puts a nil date in either direction.
-    static func key(creationDate: Date?) -> Date {
-        creationDate ?? .distantPast
+    /// A photo's place in the order.
+    struct Key: Comparable, Sendable {
+        /// The capture date, or else the file creation date; `.distantPast` (the oldest) without either.
+        var date: Date
+        /// Breaks ties between equal dates (burst shots share a capture second): the file creation date, or
+        /// `.distantPast`.
+        var creationDate: Date
+
+        static func < (a: Key, b: Key) -> Bool {
+            a.date != b.date ? a.date < b.date : a.creationDate < b.creationDate
+        }
     }
 
-    /// The sort key of a stored photo (one model read).
+    static func key(captureDate: Date?, creationDate: Date?) -> Key {
+        Key(date: captureDate ?? creationDate ?? .distantPast, creationDate: creationDate ?? .distantPast)
+    }
+
+    /// The sort date of a photo without a capture date.
+    static func key(creationDate: Date?) -> Date {
+        key(captureDate: nil, creationDate: creationDate).date
+    }
+
+    /// The sort date of a stored photo (`Key.date`: one or two model reads).
     static func key(of photo: PhotoAsset) -> Date {
-        key(creationDate: photo.creationDate)
+        photo.captureDate ?? key(creationDate: photo.creationDate)
+    }
+
+    /// The full key of a stored photo (two model reads).
+    static func sortKey(of photo: PhotoAsset) -> Key {
+        key(captureDate: photo.captureDate, creationDate: photo.creationDate)
+    }
+
+    /// Whether a photo with sort date `a` comes before one with sort date `b`. Photos with equal dates don't.
+    func precedes(_ a: Date, _ b: Date) -> Bool {
+        newestFirst ? a > b : a < b
     }
 
     /// Whether a photo with key `a` comes before one with key `b`. Photos with equal keys don't.
-    func precedes(_ a: Date, _ b: Date) -> Bool {
+    func precedes(_ a: Key, _ b: Key) -> Bool {
         newestFirst ? a > b : a < b
     }
 
     // MARK: - Fetching
 
-    /// The photos matching `predicate`, fetched from `context` in this order. The store sorts by the key: SQLite puts
-    /// a nil date first ascending and last descending, which is where `key(creationDate:)` puts it.
+    /// The photos matching `predicate`, fetched from `context` in this order. Safe on any context, on its own thread.
+    ///
+    /// SwiftData can't sort by `captureDate ?? creationDate`, so the store sorts by capture date, then creation date.
+    /// That gives two runs, each in order: the photos with a capture date, and those without, which SQLite puts first
+    /// ascending and last descending, sorted by creation date. `interleavingRuns(_:)` merges them in memory. When
+    /// either run is empty (every photo has a capture date, or none has one yet) that costs about 14 model reads at 10k.
     func fetch(where predicate: Predicate<PhotoAsset>, in context: ModelContext) -> [PhotoAsset] {
+        let order: SortOrder = newestFirst ? .reverse : .forward
         let descriptor = FetchDescriptor<PhotoAsset>(
             predicate: predicate,
-            sortBy: [SortDescriptor(\.creationDate, order: newestFirst ? .reverse : .forward)]
+            sortBy: [SortDescriptor(\.captureDate, order: order), SortDescriptor(\.creationDate, order: order)]
         )
-        return (try? context.fetch(descriptor)) ?? []
+        return interleavingRuns((try? context.fetch(descriptor)) ?? [])
+    }
+
+    /// Merges the store's two runs (see `fetch(where:in:)`) into one list in this order.
+    func interleavingRuns(_ photos: [PhotoAsset]) -> [PhotoAsset] {
+        // Newest first, the dated run comes first; oldest first, the undated one. Binary search for where it ends.
+        var low = 0
+        var high = photos.count
+        while low < high {
+            let mid = (low + high) / 2
+            if (photos[mid].captureDate != nil) == newestFirst { low = mid + 1 } else { high = mid }
+        }
+        guard low > 0, low < photos.count else { return photos }
+        let first = photos[..<low]
+        let second = photos[low...]
+        if min(first.count, second.count) * Self.log2(photos.count) < photos.count {
+            return mergeByInsertion(first, second)
+        }
+        return newestFirst ? mergeLinearly(dated: first, undated: second) : mergeLinearly(dated: second, undated: first)
+    }
+
+    /// A small run merged into a large one by binary search: O(k log n) model reads. On equal keys, `first` comes
+    /// first.
+    private func mergeByInsertion(_ first: ArraySlice<PhotoAsset>, _ second: ArraySlice<PhotoAsset>) -> [PhotoAsset] {
+        let smallIsFirst = first.count <= second.count
+        let small = smallIsFirst ? first : second
+        let large = smallIsFirst ? second : first
+        var merged: [PhotoAsset] = []
+        merged.reserveCapacity(first.count + second.count)
+        var next = large.startIndex
+        for photo in small {
+            let key = Self.sortKey(of: photo)
+            // The first photo of `large` (from `next`) that this one goes before.
+            var low = next
+            var high = large.endIndex
+            while low < high {
+                let mid = (low + high) / 2
+                let other = Self.sortKey(of: large[mid])
+                let goesBefore = smallIsFirst ? !precedes(other, key) : precedes(key, other)
+                if goesBefore { high = mid } else { low = mid + 1 }
+            }
+            merged.append(contentsOf: large[next..<low])
+            merged.append(photo)
+            next = low
+        }
+        merged.append(contentsOf: large[next...])
+        return merged
+    }
+
+    /// Two large runs merged in one pass: one model read per photo, plus the creation dates of photos whose dates tie.
+    /// On equal keys, dated photos come first.
+    private func mergeLinearly(dated: ArraySlice<PhotoAsset>, undated: ArraySlice<PhotoAsset>) -> [PhotoAsset] {
+        let datedDates = dated.map { $0.captureDate ?? .distantPast }
+        let undatedDates = undated.map { Self.key(creationDate: $0.creationDate) }
+        var merged: [PhotoAsset] = []
+        merged.reserveCapacity(dated.count + undated.count)
+        var i = 0
+        var j = 0
+        while i < datedDates.count && j < undatedDates.count {
+            let datedFirst: Bool
+            if datedDates[i] != undatedDates[j] {
+                datedFirst = precedes(datedDates[i], undatedDates[j])
+            } else {
+                // An undated photo's key is its creation date twice.
+                let datedKey = Key(date: datedDates[i], creationDate: Self.key(creationDate: dated[dated.startIndex + i].creationDate))
+                datedFirst = !precedes(Key(date: undatedDates[j], creationDate: undatedDates[j]), datedKey)
+            }
+            if datedFirst {
+                merged.append(dated[dated.startIndex + i])
+                i += 1
+            } else {
+                merged.append(undated[undated.startIndex + j])
+                j += 1
+            }
+        }
+        merged.append(contentsOf: dated[(dated.startIndex + i)...])
+        merged.append(contentsOf: undated[(undated.startIndex + j)...])
+        return merged
+    }
+
+    private static func log2(_ n: Int) -> Int {
+        n > 1 ? Int.bitWidth - (n - 1).leadingZeroBitCount : 1
     }
 
     // MARK: - Sorted lists
@@ -50,12 +166,15 @@ struct LibrarySort: Equatable, Sendable {
     /// Where `photo` goes in `photos` (in this order): after every photo that doesn't come after it. A binary search,
     /// so it reads O(log n) keys.
     func insertionIndex(for photo: PhotoAsset, in photos: [PhotoAsset]) -> Int {
-        let key = Self.key(of: photo)
+        insertionIndex(forKey: Self.sortKey(of: photo), in: photos)
+    }
+
+    private func insertionIndex(forKey key: Key, in photos: [PhotoAsset]) -> Int {
         var low = 0
         var high = photos.count
         while low < high {
             let mid = (low + high) / 2
-            if precedes(key, Self.key(of: photos[mid])) { high = mid } else { low = mid + 1 }
+            if precedes(key, Self.sortKey(of: photos[mid])) { high = mid } else { low = mid + 1 }
         }
         return low
     }
@@ -68,8 +187,8 @@ struct LibrarySort: Equatable, Sendable {
         into photos: [PhotoAsset], _ facts: [PhotoFacts]
     ) -> ([PhotoAsset], [PhotoFacts]) {
         guard !incoming.isEmpty else { return (photos, facts) }
-        let keys = incoming.map { Self.key(of: $0.photo) }
-        let positions = incoming.map { insertionIndex(for: $0.photo, in: photos) }
+        let keys = incoming.map { Self.sortKey(of: $0.photo) }
+        let positions = keys.map { insertionIndex(forKey: $0, in: photos) }
         let order = incoming.indices.sorted { a, b in
             if positions[a] != positions[b] { return positions[a] < positions[b] }
             if keys[a] != keys[b] { return precedes(keys[a], keys[b]) }
@@ -93,6 +212,42 @@ struct LibrarySort: Equatable, Sendable {
         mergedPhotos.append(contentsOf: photos[next...])
         mergedFacts.append(contentsOf: facts[next...])
         return (mergedPhotos, mergedFacts)
+    }
+
+    // MARK: - Re-ordering after keys changed
+
+    /// Each photo's place in the order oldest first (0 is the oldest), from plain values, so it can be planned off the
+    /// main actor. Equal keys keep their order in `keys`.
+    static func ranks(of keys: [(id: UUID, key: Key)]) -> [UUID: Int] {
+        let order = keys.indices.sorted { a, b in
+            keys[a].key != keys[b].key ? keys[a].key < keys[b].key : a < b
+        }
+        var ranks = [UUID: Int](minimumCapacity: order.count)
+        for (rank, index) in order.enumerated() { ranks[keys[index].id] = rank }
+        return ranks
+    }
+
+    /// `photos` (with its facts) put in this order by `ranks(of:)`, reading no model: each ranked photo goes to its
+    /// rank's place. Photos without a rank (added since the ranks were planned) are then merged in by key.
+    func reorder(_ photos: [PhotoAsset], _ facts: [PhotoFacts], ranks: [UUID: Int]) -> ([PhotoAsset], [PhotoFacts]) {
+        var slots = [Int](repeating: -1, count: ranks.count)
+        var unranked: [(photo: PhotoAsset, facts: PhotoFacts)] = []
+        for index in facts.indices {
+            if let rank = ranks[facts[index].id] {
+                slots[newestFirst ? ranks.count - 1 - rank : rank] = index
+            } else {
+                unranked.append((photos[index], facts[index]))
+            }
+        }
+        var orderedPhotos: [PhotoAsset] = []
+        var orderedFacts: [PhotoFacts] = []
+        orderedPhotos.reserveCapacity(photos.count)
+        orderedFacts.reserveCapacity(facts.count)
+        for index in slots where index >= 0 {
+            orderedPhotos.append(photos[index])
+            orderedFacts.append(facts[index])
+        }
+        return merge(unranked, into: orderedPhotos, orderedFacts)
     }
 
     // MARK: - Direction

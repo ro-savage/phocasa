@@ -341,6 +341,7 @@ extension LibraryStore {
                 fileSize: found.fileSize
             )
             asset.rating = found.metadata?.rating ?? 0
+            asset.captureDate = found.metadata?.captureDate
             context.insert(asset)
             inserted.append(asset)
 
