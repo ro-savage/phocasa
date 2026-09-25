@@ -13,6 +13,7 @@ import AppKit
 import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
+import SwiftData
 @testable import Phocasa
 
 // MARK: - Test images and pixel comparison
@@ -388,6 +389,7 @@ final class ImageEditingServiceTests: XCTestCase {
                        "\(label): NSImage size", file: file, line: line)
         XCTAssertEqual(cg.width, reference.width, "\(label): width", file: file, line: line)
         XCTAssertEqual(cg.height, reference.height, "\(label): height", file: file, line: line)
+        XCTAssertEqual(cg.colorSpace?.name, reference.colorSpace?.name, "\(label): colour-space tag", file: file, line: line)
         guard let diff = EditTestImages.maxChannelDifference(cg, reference) else { return }
         XCTAssertLessThanOrEqual(diff, 1, "\(label): max channel difference", file: file, line: line)
     }
@@ -455,6 +457,25 @@ final class ImageEditingServiceSchedulingTests: XCTestCase {
         if let tempDir { try? FileManager.default.removeItem(at: tempDir) }
     }
 
+    func testRawScaleFactor() {
+        let box = CGSize(width: 1600, height: 1100)
+        XCTAssertEqual(ImageEditingService.rawScaleFactor(nativeSize: CGSize(width: 6000, height: 4000), maxSize: box),
+                       0.2667, accuracy: 0.0001)
+        XCTAssertEqual(ImageEditingService.rawScaleFactor(nativeSize: CGSize(width: 1000, height: 800), maxSize: box), 1)
+        // Height-limited, and portrait (the caller passes the oriented size).
+        XCTAssertEqual(ImageEditingService.rawScaleFactor(nativeSize: CGSize(width: 4912, height: 3264), maxSize: box),
+                       Float(1600.0 / 4912.0), accuracy: 0.0001)
+        XCTAssertEqual(ImageEditingService.rawScaleFactor(nativeSize: CGSize(width: 3264, height: 4912), maxSize: box),
+                       Float(1100.0 / 4912.0), accuracy: 0.0001)
+        // Never above 1, and degenerate sizes don't scale.
+        for native in [CGSize(width: 1600, height: 1100), CGSize(width: 10, height: 10), CGSize(width: 1601, height: 1),
+                       CGSize(width: 0, height: 0), CGSize(width: 50_000, height: 30_000)] {
+            let s = ImageEditingService.rawScaleFactor(nativeSize: native, maxSize: box)
+            XCTAssertLessThanOrEqual(s, 1, "\(native)")
+            XCTAssertGreaterThan(s, 0, "\(native)")
+        }
+    }
+
     func testCancelledRenderReturnsNilWithoutRendering() async throws {
         let url = tempDir.appendingPathComponent("source.jpg")
         try EditTestImages.writeJPEG(to: url, width: 1200, height: 800, orientation: 6)
@@ -508,6 +529,109 @@ final class ImageEditingServiceSchedulingTests: XCTestCase {
 
         XCTAssertNotNil(preview)
         XCTAssertLessThan(previewDone, fullDone, "the preview completes while the full-resolution render is in flight")
+    }
+}
+
+// MARK: - Gated view-model benchmark (PHOCASA_BENCH=1)
+
+final class EditViewModelBenchmarks: XCTestCase {
+    private var tempDir: URL!
+
+    override func setUpWithError() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["PHOCASA_BENCH"] == "1", "Set PHOCASA_BENCH=1 to run benchmarks")
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("phocasa-edit-vm-bench-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        if let tempDir { try? FileManager.default.removeItem(at: tempDir) }
+    }
+
+    @MainActor
+    func testBenchViewModelTicks24MPJPEG() async throws {
+        let url = tempDir.appendingPathComponent("vm-24mp.jpg")
+        try EditTestImages.writeJPEG(to: url, width: 6000, height: 4000, orientation: 1)
+        try await EditViewModelBench.run(label: "24MP JPEG", url: url, isRAW: false)
+    }
+}
+
+/// End to end through the view model: `startEditing`, then a slider tick (`editParameters.exposure` +
+/// `updateEditPreview()`), timed until `editedPreviewImage` changes, including the 30 ms debounce.
+/// - idle: nothing else is rendering;
+/// - during: the tick lands 5 ms after the 300 ms full-resolution pass starts;
+/// - draw: main-thread time of the first `CGContext.draw` of `fullResEditImage` into a 1600x1067 bitmap.
+@MainActor
+enum EditViewModelBench {
+    private static func ms(_ d: Duration) -> Double {
+        Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15
+    }
+
+    private static func waitUntil(timeout: Duration = .seconds(20), _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else { throw XCTSkip("timed out waiting for the view model") }
+            try await Task.sleep(for: .microseconds(250))
+        }
+    }
+
+    /// One slider tick: returns its latency and when the new preview landed.
+    private static func tick(_ vm: PhotoLibraryViewModel, exposure: Double) async throws
+        -> (ms: Double, landed: ContinuousClock.Instant) {
+        let old = vm.editedPreviewImage
+        vm.editParameters.exposure = exposure
+        let start = ContinuousClock.now
+        vm.updateEditPreview()
+        try await waitUntil { vm.editedPreviewImage != nil && vm.editedPreviewImage !== old }
+        let landed = ContinuousClock.now
+        return (ms(landed - start), landed)
+    }
+
+    /// `url` must be a file in a temp directory. `stopEditing(save: false)` never writes, but nothing here should
+    /// ever point at a real photo folder.
+    static func run(label: String, url: URL, isRAW: Bool, rounds: Int = 8) async throws {
+        let container = try ModelContainer(for: PhotoAsset.self, Tag.self, PhotoLibrary.self, EditPreset.self,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+        let vm = PhotoLibraryViewModel()
+        vm.setModelContext(context)
+        let photo = PhotoAsset(fileName: "bench", jpgPath: isRAW ? nil : url.path, rawPath: isRAW ? url.path : nil,
+                               folderPath: url.deletingLastPathComponent().path, creationDate: Date(), fileSize: 1)
+        context.insert(photo)
+
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        var idle: [Double] = [], during: [Double] = [], draw: [Double] = []
+        for round in 0...rounds {   // round 0 is a warm-up
+            vm.startEditing(photo: photo, isRAW: isRAW)
+            try await waitUntil { vm.fullResEditImage != nil }
+
+            let a = try await tick(vm, exposure: 0.30 + Double(round) * 0.01)
+            try await Task.sleep(until: a.landed + .milliseconds(305), clock: .continuous)
+            let b = try await tick(vm, exposure: 0.60 + Double(round) * 0.01)
+
+            try await waitUntil { vm.fullResEditImage != nil }
+            let cg = try XCTUnwrap(vm.fullResEditImage.flatMap(EditTestImages.cgImage))
+            let ctx = try XCTUnwrap(CGContext(data: nil, width: 1600, height: 1067, bitsPerComponent: 8, bytesPerRow: 0,
+                                              space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            let drawStart = ContinuousClock.now
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 1600, height: 1067))
+            let drawMs = ms(ContinuousClock.now - drawStart)
+            vm.stopEditing(save: false)
+
+            if round > 0 {
+                idle.append(a.ms)
+                during.append(b.ms)
+                draw.append(drawMs)
+            }
+        }
+        func report(_ name: String, _ samples: [Double]) {
+            let s = samples.sorted()
+            func f(_ x: Double) -> String { String(format: "%.1f", x) }
+            print("BENCH|editvm|\(label)|\(name)|median_ms=\(f(s[s.count / 2]))|min_ms=\(f(s.first!))|max_ms=\(f(s.last!))|runs=\(s.count)")
+        }
+        report("tick idle", idle)
+        report("tick during full pass", during)
+        report("main-thread first draw of fullResEditImage", draw)
     }
 }
 
@@ -570,6 +694,39 @@ final class ImageEditingServiceBenchmarks: XCTestCase {
         }
         report("preview 24MP JPEG (fit 1600x1100)", samples)
         service.clearCache()
+    }
+
+    /// Process memory (phys_footprint and resident size), in MB.
+    private static func memoryMB() -> (footprint: Double, resident: Double) {
+        var info = rusage_info_v4()
+        let rc = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0) }
+        }
+        guard rc == 0 else { return (-1, -1) }
+        return (Double(info.ri_phys_footprint) / 1_048_576, Double(info.ri_resident_size) / 1_048_576)
+    }
+
+    /// Memory after 50 preview renders of a 24 MP JPEG through a fresh service (the `.cacheIntermediates` budget:
+    /// +150 MB). Run it alone (`-only-testing:` this method) so other tests' allocations don't show up.
+    func testBenchPreviewMemory24MP() async throws {
+        let url = try make24MP()
+        let service = ImageEditingService()
+        func f(_ x: Double) -> String { String(format: "%.1f", x) }
+        let start = Self.memoryMB()
+        await service.prepareStandard(url: url)
+        var samples: [Double] = []
+        for i in 0..<50 {
+            let t0 = clock.now
+            let image = await service.processStandard(url: url, parameters: params(500 + i), maxSize: previewBox, lane: .preview)
+            samples.append(ms(clock.now - t0))
+            XCTAssertNotNil(image)
+        }
+        let after = Self.memoryMB()
+        service.clearCache()
+        try await Task.sleep(for: .milliseconds(500))
+        let cleared = Self.memoryMB()
+        print("BENCH|editmem|50 previews of a 24MP JPEG (fresh service)|start_footprint_mb=\(f(start.footprint))|after_footprint_mb=\(f(after.footprint))|cleared_footprint_mb=\(f(cleared.footprint))|start_resident_mb=\(f(start.resident))|after_resident_mb=\(f(after.resident))|cleared_resident_mb=\(f(cleared.resident))")
+        report("preview 24MP JPEG, 50 renders on a fresh service", samples)
     }
 
     /// Spec §E2: a preview requested 10 ms after a full-resolution render starts. Time from the preview request to

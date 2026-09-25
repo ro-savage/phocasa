@@ -22,11 +22,15 @@ actor ImageEditingService {
     init() {
         let caches = SharedEditCaches()
         self.caches = caches
-        let context = Self.makeContext()
-        previewLane = RenderLane(label: "com.phocasa.editing.preview", qos: .userInteractive, context: context, caches: caches)
-        fullLane = RenderLane(label: "com.phocasa.editing.full", qos: .userInitiated, context: context, caches: caches)
+        // One context per lane: a Metal-backed CIContext owns a single command queue, so a shared context would
+        // serialise the preview's GPU work behind a full-resolution render.
+        previewLane = RenderLane(label: "com.phocasa.editing.preview", qos: .userInteractive,
+                                 context: Self.makeContext(), caches: caches)
+        fullLane = RenderLane(label: "com.phocasa.editing.full", qos: .userInitiated,
+                              context: Self.makeContext(), caches: caches)
     }
 
+    /// Both lanes use identical options, so they produce identical pixels.
     private static func makeContext() -> CIContext {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(mtlDevice: device, options: [
@@ -51,6 +55,14 @@ actor ImageEditingService {
 
     /// Number of renders that got past the cancellation check and did work. For tests.
     nonisolated var renderCount: Int { caches.renderCount }
+
+    /// The `CIRAWFilter.scaleFactor` that demosaics a RAW of `nativeSize` (oriented) straight to a size that fits
+    /// `maxSize`. Never above 1.
+    static func rawScaleFactor(nativeSize: CGSize, maxSize: CGSize) -> Float {
+        guard nativeSize.width > 0, nativeSize.height > 0 else { return 1 }
+        let scale = min(maxSize.width / nativeSize.width, maxSize.height / nativeSize.height)
+        return Float(min(1, scale))
+    }
 
     // MARK: - Cache Management
 
@@ -227,15 +239,23 @@ private actor RenderLane {
     func renderRAW(url: URL, parameters: EditParameters, maxSize: CGSize?) -> RenderedImage? {
         guard beginRender(), let rawFilter = rawFilter(for: url) else { return nil }
 
-        // Draft mode for preview renders (much faster, slightly lower quality)
-        rawFilter.isDraftModeEnabled = (maxSize != nil)
+        // Previews demosaic straight to the target size, in draft mode: ~2x faster than decoding at full size and
+        // scaling afterwards. Full renders decode at native size. Both are set on every render: the filter is cached.
+        if let maxSize {
+            rawFilter.isDraftModeEnabled = true
+            rawFilter.scaleFactor = ImageEditingService.rawScaleFactor(nativeSize: Self.orientedNativeSize(of: rawFilter),
+                                                                       maxSize: maxSize)
+        } else {
+            rawFilter.isDraftModeEnabled = false
+            rawFilter.scaleFactor = 1
+        }
 
         EditPipeline.applyRAWParameters(rawFilter, parameters: parameters)
 
         guard var output = rawFilter.outputImage else { return nil }
 
-        // Scale BEFORE post-filters — smaller image = faster filter chain
-        if let maxSize {
+        // scaleFactor lands within a pixel or so of the target; scale BEFORE post-filters only if it's still too big.
+        if let maxSize, output.extent.width > maxSize.width + 1 || output.extent.height > maxSize.height + 1 {
             output = EditPipeline.scaleToFit(output, maxSize: maxSize)
         }
 
@@ -286,18 +306,37 @@ private actor RenderLane {
         return writeJPEG(ciImage, to: outputURL, quality: quality)
     }
 
+    /// `nativeSize` ignores orientation; the output image doesn't.
+    private static func orientedNativeSize(of filter: CIRAWFilter) -> CGSize {
+        let size = filter.nativeSize
+        switch filter.orientation {
+        case .leftMirrored, .right, .rightMirrored, .left: return CGSize(width: size.height, height: size.width)
+        default: return size
+        }
+    }
+
     // MARK: Output
+
+    /// Renders the pixels now, on this lane. The default `createCGImage(_:from:)` returns a deferred image for large
+    /// outputs, whose pixels are then produced on first draw, on the main thread. Same format and colour-space tag
+    /// as that default: 8-bit RGBA, tagged Device RGB (not sRGB, whatever its header says).
+    private func makeCGImage(_ ciImage: CIImage) -> CGImage? {
+        ciContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8,
+                                colorSpace: CGColorSpaceCreateDeviceRGB(), deferred: false)
+    }
 
     private func render(_ ciImage: CIImage) -> RenderedImage? {
         let extent = ciImage.extent
         guard extent.width > 0, extent.height > 0 else { return nil }
-        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else { return nil }
+        guard let cgImage = makeCGImage(ciImage) else { return nil }
         return RenderedImage(cgImage: cgImage, size: extent.size)
     }
 
     private func writeJPEG(_ image: CIImage, to url: URL, quality: Double) -> Bool {
         let originalDates = Phocasa.captureFileDates(url)
 
+        // Deferred on purpose: the encoder pulls the pixels here, on the lane, so nothing lands on the main thread,
+        // and the file stays byte-identical to what earlier versions wrote.
         let extent = image.extent
         guard let cgImage = ciContext.createCGImage(image, from: extent) else { return false }
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return false }
