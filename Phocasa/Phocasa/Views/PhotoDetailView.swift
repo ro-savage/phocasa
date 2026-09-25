@@ -170,6 +170,14 @@ struct PhotoDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .alert("Export", isPresented: Binding(
+            get: { viewModel.exportFailure != nil },
+            set: { if !$0 { viewModel.exportFailure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.exportFailure ?? "")
+        }
         .onDisappear {
             if viewModel.isEditing {
                 viewModel.stopEditing(save: true)

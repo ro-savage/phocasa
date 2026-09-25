@@ -29,6 +29,8 @@ final class PhotoLibraryViewModel {
     private(set) var savedEditHandoff: SavedEditHandoff?
     /// Bumped when an export rewrites a photo's file, so the detail view decodes it again.
     private(set) var editedFilesVersion = 0
+    /// Why the last export didn't happen, for the alert; nil when there is nothing to report.
+    var exportFailure: String?
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
 
@@ -290,8 +292,13 @@ final class PhotoLibraryViewModel {
         guard let session = editSession else { return }
         let photo = session.photo
         let jpgBefore = photo.jpgPath
+        let replacing = replaceExisting && jpgBefore != nil
         Task {
-            guard await session.exportRAWToJPG(replaceExisting: replaceExisting) else { return }
+            let result = await session.exportRAWToJPG(replaceExisting: replaceExisting)
+            guard result == .written else {
+                exportFailure = Self.failureMessage(result, replacing: replacing)
+                return
+            }
             if photo.jpgPath != jpgBefore {
                 library.photosDidChange([photo])
             }
@@ -305,8 +312,30 @@ final class PhotoLibraryViewModel {
     func exportJPGPermanent() {
         guard let session = editSession, let jpgPath = session.photo.jpgPath else { return }
         Task {
-            guard await session.exportJPGPermanent() else { return }
+            let result = await session.exportJPGPermanent()
+            guard result == .written else {
+                exportFailure = Self.failureMessage(result, bakingEdits: true)
+                return
+            }
             fileWasRewritten(jpgPath)
+        }
+    }
+
+    private static func failureMessage(_ result: ExportResult, replacing: Bool = false, bakingEdits: Bool = false) -> String? {
+        switch result {
+        case .written:
+            return nil
+        case .failed:
+            return "The file couldn't be written."
+        case .metadataNotKept where bakingEdits:
+            return "The edits weren't applied. Phocasa couldn't carry this photo's metadata (camera details, capture "
+                + "date, location, captions) into the edited file, so applying them would have lost it. The edits are "
+                + "kept as a saved edit."
+        case .metadataNotKept where replacing:
+            return "The JPG wasn't replaced. Phocasa couldn't carry its metadata (camera details, capture date, "
+                + "location, captions) into the new file. Use \"Create new file\" instead."
+        case .metadataNotKept:
+            return "No file was written. Phocasa couldn't carry the photo's metadata into the new file."
         }
     }
 

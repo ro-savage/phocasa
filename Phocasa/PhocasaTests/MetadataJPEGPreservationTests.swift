@@ -280,28 +280,20 @@ final class MetadataJPEGPreservationTests: XCTestCase {
 
     // MARK: - The splice itself
 
-    private func rewritten(_ original: Data, rating: Int = 3, keywords: [String] = ["k"]) throws -> Data {
-        let source = try XCTUnwrap(CGImageSourceCreateWithData(original as CFData, nil))
-        let meta = CGImageMetadataCreateMutable()
-        XCTAssertTrue(CGImageMetadataSetValueWithPath(meta, nil, "xmp:Rating" as CFString, "\(rating)" as CFString))
-        let out = CFDataCreateMutable(nil, 0)!
-        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil))
-        XCTAssertTrue(CGImageDestinationCopyImageSource(dest, source, [
-            kCGImageDestinationMetadata: meta, kCGImageDestinationMergeMetadata: true,
-        ] as CFDictionary, nil))
-        return out as Data
+    private func packet(rating: Int = 3, keywords: [String] = ["k"]) throws -> Data {
+        try XCTUnwrap(MetadataService.xmpPacket(rating: rating, keywords: keywords, updating: nil))
     }
 
     func testSpliceKeepsTheOriginalOutsideTheMetadataSegments() throws {
         let original = Self.cameraStyleJPEG()
-        let spliced = try XCTUnwrap(MetadataService.spliceJPEGMetadata(original: original, rewritten: try rewritten(original)))
+        let spliced = try XCTUnwrap(MetadataService.spliceJPEGMetadata(original: original, xmp: try packet(), keywords: ["k"]))
         XCTAssertEqual(untouchable(spliced).segments, untouchable(original).segments)
         XCTAssertEqual(untouchable(spliced).tail, untouchable(original).tail)
     }
 
     func testSpliceRefusesLayoutsItCantHandleSafely() throws {
         let original = Self.cameraStyleJPEG()
-        let good = try rewritten(original)
+        let good = try packet()
 
         // An XMP segment after the MPF one: replacing it would move the preview the MP offsets point at.
         let xmpPayload = Data("http://ns.adobe.com/xap/1.0/".utf8) + Data([0]) + Data("""
@@ -309,17 +301,18 @@ final class MetadataJPEGPreservationTests: XCTestCase {
             <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"/></rdf:RDF></x:xmpmeta>
             """.utf8)
         let xmpAfterMPF = Self.withMPF(original, second: Self.imageIOJPEG(width: 16, height: 16), xmpAfterMPF: xmpPayload)
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: xmpAfterMPF, rewritten: try rewritten(xmpAfterMPF)))
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: xmpAfterMPF, xmp: good, keywords: ["k"]))
 
-        // Not a JPEG, a truncated segment, and a rewrite without XMP.
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: Data("not a jpeg".utf8), rewritten: good))
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original.prefix(30), rewritten: good))
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original, rewritten: original))
+        // Not a JPEG, a truncated segment, and an XMP packet too big for one segment.
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: Data("not a jpeg".utf8), xmp: good, keywords: ["k"]))
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original.prefix(30), xmp: good, keywords: ["k"]))
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original, xmp: Data(repeating: 0x20, count: 70_000),
+                                                        keywords: ["k"]))
 
         // Extended XMP in the original.
         let (segments, sos) = Self.header(original)
         let extended = Self.segment(0xE1, Data("http://ns.adobe.com/xmp/extension/".utf8) + Data([0]) + Data(repeating: 0x41, count: 80))
         let withExtended = Self.assemble(segments + [extended], tail: original[sos...])
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: withExtended, rewritten: good))
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: withExtended, xmp: good, keywords: ["k"]))
     }
 }
