@@ -434,4 +434,157 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         cache.waitForPendingWork()
         XCTAssertEqual(cachedFiles().count, 2)
     }
+
+    // MARK: - ImageLoader integration
+
+    private func loader(_ cache: ThumbnailDiskCache?) -> ImageLoader {
+        ImageLoader(diskCache: cache)
+    }
+
+    func testLoaderUsesDiskCacheOnSecondLaunch() async throws {
+        let path = try writeSource("portrait.jpg", width: 1200, height: 800, orientation: 6, square: false)
+
+        let first = loader(makeCache())
+        let firstImage = await first.loadThumbnail(for: path, maxSize: 300)
+        XCTAssertNotNil(firstImage)
+        XCTAssertEqual(first.originalDecodeCount, 1)
+        first.diskCache?.waitForPendingWork()
+
+        // A relaunch: same directory, empty memory cache.
+        let second = loader(makeCache())
+        let loaded = await second.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertEqual(second.originalDecodeCount, 0, "the thumbnail must come from the disk cache")
+        let thumbnail = try XCTUnwrap(loaded)
+        let cg = try XCTUnwrap(thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertEqual(max(cg.width, cg.height), 384, "same bucket as a fresh decode")
+        XCTAssertGreaterThan(cg.height, cg.width, "EXIF orientation 6 stays applied")
+        XCTAssertEqual(thumbnail.size, NSSize(width: cg.width, height: cg.height))
+        let decoded = try XCTUnwrap(firstImage?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(DiskCacheTestImages.maxChannelDifference(decoded, cg)), 12)
+        XCTAssertTrue(second.cachedThumbnail(for: path, maxSize: 300) === thumbnail, "a disk hit fills the memory cache")
+    }
+
+    func testLoaderWithoutDiskCacheDecodesAfterClearCache() async throws {
+        let path = try writeSource("photo.jpg")
+        let plain = loader(nil)
+
+        _ = await plain.loadThumbnail(for: path, maxSize: 300)
+        plain.clearCache()
+        _ = await plain.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertEqual(plain.originalDecodeCount, 2)
+    }
+
+    func testClearCacheKeepsTheDiskCache() async throws {
+        // The coordinator's relaunch benchmark relies on this: memory emptied, disk kept.
+        let path = try writeSource("photo.jpg")
+        let cached = loader(makeCache())
+
+        _ = await cached.loadThumbnail(for: path, maxSize: 300)
+        cached.diskCache?.waitForPendingWork()
+        cached.clearCache()
+        XCTAssertNil(cached.cachedThumbnail(for: path, maxSize: 300))
+        let again = await cached.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertNotNil(again)
+        XCTAssertEqual(cached.originalDecodeCount, 1)
+    }
+
+    func testChangedSourceIsDecodedAgain() async throws {
+        let path = try writeSource("photo.jpg", width: 1200, height: 800, hue: 0.9)
+        let first = loader(makeCache())
+        _ = await first.loadThumbnail(for: path, maxSize: 300)
+        first.diskCache?.waitForPendingWork()
+
+        _ = try writeSource("photo.jpg", width: 800, height: 1200, hue: 0.2)
+        let second = loader(makeCache())
+        let loaded = await second.loadThumbnail(for: path, maxSize: 300)
+
+        XCTAssertEqual(second.originalDecodeCount, 1, "a rewritten file misses the disk cache")
+        let cg = try XCTUnwrap(loaded?.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertGreaterThan(cg.height, cg.width, "the new file's pixels, not the cached ones")
+    }
+
+    func testInvalidateRemovesDiskEntries() async throws {
+        let path = try writeSource("photo.jpg")
+        let first = loader(makeCache())
+        _ = await first.loadThumbnail(for: path, maxSize: 300)
+        _ = await first.loadThumbnail(for: path, maxSize: 1000)
+        first.diskCache?.waitForPendingWork()
+        XCTAssertEqual(cachedFiles().count, 2)
+
+        first.invalidate(path: path)
+        first.diskCache?.waitForPendingWork()
+
+        XCTAssertEqual(cachedFiles(), [])
+        let second = loader(makeCache())
+        _ = await second.loadThumbnail(for: path, maxSize: 300)
+        XCTAssertEqual(second.originalDecodeCount, 1)
+    }
+
+    func testInvalidateDuringDecodeDoesNotWriteAStaleEntryToDisk() async throws {
+        // Big enough that the decode takes tens of milliseconds.
+        let path = try writeSource("big.jpg", width: 4000, height: 3000)
+        let cached = loader(makeCache())
+
+        let load = Task { await cached.loadThumbnail(for: path, maxSize: 300) }
+        try await waitFor("the decode to start") { cached.originalDecodeCount == 1 }
+        cached.invalidate(path: path)
+        _ = await load.value
+        cached.diskCache?.waitForPendingWork()
+
+        XCTAssertEqual(cachedFiles(), [], "a decode that started before invalidate(path:) must not reach the disk")
+        XCTAssertNil(cached.cachedThumbnail(for: path, maxSize: 300))
+    }
+
+    func testClearCacheDuringDecodeStillStoresToDisk() async throws {
+        // clearCache() is memory-only: a decode running across it is still a valid thumbnail for the disk.
+        let path = try writeSource("big.jpg", width: 4000, height: 3000)
+        let cached = loader(makeCache())
+
+        let load = Task { await cached.loadThumbnail(for: path, maxSize: 300) }
+        try await waitFor("the decode to start") { cached.originalDecodeCount == 1 }
+        cached.clearCache()
+        _ = await load.value
+        cached.diskCache?.waitForPendingWork()
+
+        XCTAssertEqual(cachedFiles().count, 1)
+        XCTAssertNil(cached.cachedThumbnail(for: path, maxSize: 300), "the memory cache still drops it")
+    }
+
+    // MARK: - Where the shared loader caches
+
+    func testDiskCacheDirectorySelection() {
+        let override = "/private/tmp/phocasa-thumbs-test"
+        XCTAssertNil(ImageLoader.diskCacheDirectory(environment: ["XCTestConfigurationFilePath": "/x"]),
+                     "the test host never uses a disk cache unless one is configured")
+        XCTAssertEqual(
+            ImageLoader.diskCacheDirectory(environment: ["XCTestConfigurationFilePath": "/x",
+                                                         "PHOCASA_THUMBNAIL_CACHE_DIR": override])?.path,
+            override
+        )
+        XCTAssertEqual(ImageLoader.diskCacheDirectory(environment: [:]), ThumbnailDiskCache.defaultDirectory,
+                       "a normal launch uses the default directory")
+        XCTAssertEqual(ImageLoader.diskCacheDirectory(environment: ["PHOCASA_THUMBNAIL_CACHE_DIR": override]),
+                       ThumbnailDiskCache.defaultDirectory, "the override is for test hosts only")
+    }
+
+    func testDefaultDirectoryIsInTheUsersCachesFolder() throws {
+        let caches = try XCTUnwrap(FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+        let path = ThumbnailDiskCache.defaultDirectory.standardizedFileURL.path
+
+        XCTAssertTrue(path.hasPrefix(caches.standardizedFileURL.path + "/"))
+        XCTAssertTrue(path.hasSuffix("/Thumbnails/v1"))
+    }
+
+    func testSharedLoaderInThisTestHostNeverUsesTheRealCachesFolder() throws {
+        let configured = ProcessInfo.processInfo.environment["PHOCASA_THUMBNAIL_CACHE_DIR"]
+        if let configured {
+            XCTAssertEqual(ImageLoader.shared.diskCache?.directory.path, URL(fileURLWithPath: configured).path)
+        } else {
+            XCTAssertNil(ImageLoader.shared.diskCache)
+        }
+        XCTAssertNotEqual(ImageLoader.shared.diskCache?.directory, ThumbnailDiskCache.defaultDirectory)
+    }
 }
