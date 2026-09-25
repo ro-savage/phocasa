@@ -61,7 +61,9 @@ Phocasa/
 │   ├── AppDelegate.swift           — quit waits for pending metadata writes (at most 5 s)
 │   ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary, EditPreset)
 │   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
-│   │                                 store lives, and the one-time move of a legacy `default.store`)
+│   │                                 store lives, and the one-time move of a legacy `default.store`);
+│   │                                 LibraryLocation (which store and thumbnail cache a launch uses: the user's,
+│   │                                 the test host's in-memory one, or the development library)
 │   ├── ViewModels/
 │   │   └── PhotoLibraryViewModel   — coordinator: owns LibraryStore, SelectionModel, editSession; UI flags; detail,
 │   │                                 delete, selection-wide rating/tagging, editing entry points, presets
@@ -122,6 +124,11 @@ Tools/
   moves such a store into the Phocasa folder once, before the container opens (companions first, the store file
   last), only when its metadata names Phocasa's `PhotoAsset` entity; another app's `default.store` is left alone, and
   one whose metadata can't be read is opened where it is.
+- **Development library:** a Debug launch with `PHOCASA_DEVELOPMENT_LIBRARY=1` (Release ignores it) keeps its library
+  in `Application Support/Phocasa-Development/Phocasa.store` and its thumbnails in `Phocasa-Development/Thumbnails/v1`
+  (`PHOCASA_THUMBNAIL_CACHE_DIR` overrides the cache), for real-app checks that relaunch. It never reads, moves or
+  opens `Application Support/Phocasa/` or a `default.store` (no legacy move), nor `Caches/com.phocasa.app`.
+  `LibraryLocation.resolve` decides the store and the cache for `PhocasaApp` and `ImageLoader.shared` together.
 - **JPG+RAW pairing:** Files with the same stem name are combined into one PhotoAsset entry
 - **Dual metadata:** the SwiftData DB is the primary store. Ratings and tags are also written back to the files:
   XMP (`xmp:Rating`, `dc:subject`) and IPTC keywords inside JPGs, the `.xmp` sidecar for RAW files, and both files
@@ -291,6 +298,8 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names a folder (pass `TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR`).
   Tests must never open or modify anything under `~/Library/Application Support` (the user's real library) or write to
   `~/Library/Caches/com.phocasa.app`. `StoreLocationTests` pass a temp folder in place of Application Support.
+- The test host stays in memory even with `PHOCASA_DEVELOPMENT_LIBRARY=1` (the scheme's Test action shares the Run
+  action's environment). Development-library tests pass temp folders to `LibraryLocation.resolve`.
 - Tests use temp directories and in-memory or temp-file stores. Tests that delete files give `LibraryStore` a
   `FileTrasher` that moves them into a temp folder, never the user's Trash.
 - Gated benchmarks need `PHOCASA_BENCH=1` (see Build & Run); tests on a real camera RAW are skipped unless

@@ -63,16 +63,42 @@ The wave-1 quiet baseline and results are in `docs/superpowers/plans/2026-09-25-
 
 A normal launch opens the user's real SwiftData store: `~/Library/Application Support/Phocasa/Phocasa.store`, where
 the first launch of a build from 2026-09-26 on moves `~/Library/Application Support/default.store`. **Never do that.**
-When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-memory store instead.
+Launch a **Debug** build of the binary in one of two ways instead (`LibraryLocation` decides; task B):
+
+- **Development library** (`PHOCASA_DEVELOPMENT_LIBRARY=1`, Debug builds only; a Release build ignores it): the library
+  lives on disk in `~/Library/Application Support/Phocasa-Development/Phocasa.store`, its thumbnails in
+  `Phocasa-Development/Thumbnails/v1` (or `PHOCASA_THUMBNAIL_CACHE_DIR`). It survives a relaunch. It never reads, moves
+  or opens `Application Support/Phocasa/` or a `default.store` (no legacy move runs), and never writes
+  `~/Library/Caches/com.phocasa.app`. **Don't also set `XCTestConfigurationFilePath`:** the test host's in-memory store
+  wins over the flag.
+- **In-memory** (`XCTestConfigurationFilePath=/dev/null/in-memory`): a throwaway store, forgotten on quit, and no disk
+  cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names one. Enough when the check needs no relaunch.
 
 1. **Photos:** make a writable temp copy of some test photos. Include rotated ones (`orient`), and remove one JPG to
    get a RAW-only photo:
    `mkdir -p "$TMPDIR/phocasa-smoke/photos"; cp ~/PhocasaBenchRAW/DSC086{37..50}.* "$TMPDIR/phocasa-smoke/photos/"`.
-2. **Build** with `xcodebuild … -derivedDataPath "$TMPDIR/phocasa-dd-coord-app" build`, and check for 0 source warnings.
-3. **Launch the binary directly**, in the background:
-   `XCTestConfigurationFilePath=/dev/null/in-memory "$TMPDIR/phocasa-dd-coord-app/Build/Products/Debug/Phocasa.app/Contents/MacOS/Phocasa"`.
-   Confirm with `lsof -p <pid> | grep -c "\.store"` that it's `0` (neither `Phocasa.store` nor `default.store`).
-4. **Drive it.** The terminal needs Accessibility and Screen Recording permission; the user granted both on 2026-09-25.
+2. **Build** with `xcodebuild … -configuration Debug -derivedDataPath "$TMPDIR/phocasa-dd-coord-app" build`, and check
+   for 0 source warnings.
+3. **Reset the development folder**, so each check starts from an empty library (quote the path, it has a space):
+   `rm -rf "$HOME/Library/Application Support/Phocasa-Development"`. It's the only folder under Application Support a
+   check may write or delete.
+4. **Launch the binary directly**, in the background:
+   `PHOCASA_DEVELOPMENT_LIBRARY=1 "$TMPDIR/phocasa-dd-coord-app/Build/Products/Debug/Phocasa.app/Contents/MacOS/Phocasa" & PID=$!`.
+   Once the window is up, confirm that only the development store is open:
+   - `lsof -p $PID | grep "\.store"` lists only `…/Application Support/Phocasa-Development/Phocasa.store` (and its
+     `-wal`/`-shm`): `lsof -p $PID | grep -c "Phocasa-Development/Phocasa\.store"` is at least 1, and
+     `lsof -p $PID | grep "\.store" | grep -vc "/Phocasa-Development/"` is `0`;
+   - `lsof -p $PID | grep -cE "Application Support/(Phocasa/|default\.store|\.default_SUPPORT)"` is `0`.
+   If either check fails, `kill $PID` and stop.
+   - *In-memory alternative:* `XCTestConfigurationFilePath=/dev/null/in-memory "…/Phocasa" & PID=$!`, and
+     `lsof -p $PID | grep -c "\.store"` is `0`. Skip step 3.
+5. **Relaunch** (development library only): quit with Cmd-Q (`key code 12 using command down`, inside the `osascript`
+   that sets the app frontmost; not `kill`, which skips the quit-time metadata flush), wait for `$PID` to exit, then
+   launch as in step 4 without resetting the folder, and run the `lsof` checks again. The library comes back without
+   reopening the folder. To change the store between launches (for example to clear capture dates for the backfill),
+   do it with the app quit, on that file only: `sqlite3 "$HOME/Library/Application Support/Phocasa-Development/Phocasa.store"`
+   (SwiftData's tables and columns are `Z`-prefixed, e.g. `ZPHOTOASSET`; check with `.schema`).
+6. **Drive it.** The terminal needs Accessibility and Screen Recording permission; the user granted both on 2026-09-25.
    - Bring it to the front and size it: `tell application "System Events" to tell process "Phocasa" …`.
    - Open the folder: Cmd-O, then Cmd-Shift-G, type the path, Return, Return.
    - Use **`key code`** for keys (36 Return, 53 Escape, 123/124 arrows, 18–23 digits 1–6). AppleScript `keystroke "3"`
@@ -80,7 +106,8 @@ When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-memory st
    - Use `app-driver/click` for clicks. System Events' `click at` performs an accessibility press, which SwiftUI tap
      gestures ignore.
    - Take screenshots with `screencapture -x -R<x>,<y>,<w>,<h> out.png` and look at them.
-5. **Check write-backs on the copies:** `rating <jpg>` and `grep` in the `.xmp`. Delete the copies afterwards.
+7. **Check write-backs on the copies:** `rating <jpg>` and `grep` in the `.xmp`. Delete the copies afterwards, and
+   the development folder (step 3's `rm -rf`).
 
 ### Protocol that worked in wave 2
 
@@ -122,9 +149,11 @@ When `XCTestConfigurationFilePath` is set, the app uses a throwaway in-memory st
   added for that purpose, and say so in the record.
 - **Coordinates.** `screencapture -R40,60,1400,900` gives a 2800×1800 image. A point in it maps to screen points as
   `x = 40 + px/2`, `y = 60 + py/2`. The image viewer may show it scaled; convert with its stated factor.
-- **Relaunch with the disk cache.** Launch with both `XCTestConfigurationFilePath=/dev/null/in-memory` and
-  `PHOCASA_THUMBNAIL_CACHE_DIR=<temp dir>`. The in-memory store forgets the library on quit, so reopen the folder
-  after relaunching. Cache files touched after the relaunch (`find <dir> -newermt @<ts>`) prove disk hits.
+- **Relaunch with the disk cache.** Use the development library: the library and its thumbnail cache
+  (`Phocasa-Development/Thumbnails/v1`, or `PHOCASA_THUMBNAIL_CACHE_DIR=<temp dir>`) both survive the relaunch, so
+  there's no need to reopen the folder. Cache files touched after the relaunch (`find <dir> -newermt @<ts>`) prove
+  disk hits. (Before task B this took the in-memory launch plus `PHOCASA_THUMBNAIL_CACHE_DIR`, and reopening the
+  folder after each relaunch.)
 - **Useful fixtures:**
   - a RAW-only photo (delete one JPG from the copy);
   - rotated photos (`orient`);
