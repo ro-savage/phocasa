@@ -15,6 +15,8 @@ extension FocusedValues {
 @main
 struct PhocasaApp: App {
     @FocusedValue(\.openFolderAction) var openFolder
+    /// Quit waits for pending metadata writes (see `AppDelegate`).
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     /// When the app is launched as the XCTest host, use a throwaway in-memory store so test runs
     /// never open, migrate or rescan the user's real library.
