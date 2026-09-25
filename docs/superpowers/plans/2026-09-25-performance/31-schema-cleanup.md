@@ -17,6 +17,30 @@ because the key collides with Core Data's own `isDeleted`.
 >   `~/Library/Application Support/default.store*` before they run the new build normally. Put that reminder in your
 >   results file too.
 
+## Coordinator notes after task 30 merged (read first)
+
+Task 30's real layout is in `results/30.md`, "Layout for wave 3B → Task 31". The bin-flag call sites are:
+- app: `Models/PhotoAsset.swift` (declaration, `init`); `Library/LibraryStore+Loading.swift` (`loadExistingData`'s two
+  predicates); `Library/LibraryStore+Mutations.swift` (`moveToBin`, `restoreFromBin`, `deleteFileType`'s `.toBin`);
+  `Library/LibraryStore+Scan.swift` (`applyScanUpdates`); `Library/ScanPlan.swift` (`StoredPhoto.fetchAllNow`);
+- tests: `LibraryTestCase.insertPhoto(isDeleted:)` (rename the parameter to `isInBin:` and its callers),
+  `ViewModelTests` (`insertPhoto`, `storedBinIDs`, assertions), `LibraryStoreTests`, `LibraryStoreInMemoryTests`,
+  `FileTrasherTests.insertPhoto`, `LibrarySortTests.fetchLibrary`, `ScanTests`, `PerformanceBenchmarks.swift`.
+- `SidebarView` now takes `library: LibraryStore`; the child-tag rows are its `ForEach(tag.children…)`.
+
+**A bug on `main` that your rename must fix, with a regression test (found by task 30):** rating a photo that is in
+the bin takes it out of the bin in the store. Saving any later change to a binned row writes the flag back as false,
+because `isDeleted` collides with SwiftData's own. In the app, a photo rated in the bin view reappears in the library
+after the next reload or launch. Add a failing-first test: bin a photo, rate it (`library.setRating`), save, then check
+that a **fresh** `ModelContext` on the same container still finds it with `#Predicate { $0.isInBin }` and that
+`loadExistingData()` keeps it in the bin. Show it failing on `main` (with `isDeleted`) in your results.
+
+**Comments.** Several comments explain the old collision (`ScanPlan.swift` near `fetchAllNow`, `applyScanUpdates` in
+`+Scan`, CLAUDE.md's SwiftData section). In **your** files, update them. In task 32's files (`+Loading`, `+Scan`,
+`ScanPlan.swift`) keep the rename mechanical (the identifier only) so the coordinator can re-apply it to 32's hunks, and
+list the comments that are now stale under "Needs". Put the CLAUDE.md replacement text under "Needs" too: the
+coordinator edits CLAUDE.md after 3B merges.
+
 ## Coordination with the other wave-3B tasks
 
 - **Task 33 adds `PhotoAsset.captureDate`** (and maybe a second optional attribute) at the same time. Both of you edit

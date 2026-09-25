@@ -27,6 +27,21 @@
     put it under "Needs".
   - The library/store code (30–33) and `ImageLoader` (34).
 
+## Coordinator notes after task 30 merged (read first)
+
+- `EditSidebarView`'s presence (`if let session = viewModel.editSession`) moved from `ContentView` to
+  `Views/MainContentView.swift`, which also layers the detail view over the (hidden, still alive) grid.
+- The editing entry points stay on `PhotoLibraryViewModel` with the same signatures (`startEditing`, `stopEditing`,
+  `continueEditing`, `exportRAWToJPG`, `exportJPGPermanent`, `fileWasRewritten`). The viewport is known in
+  `PhotoDetailView`, which reaches the session as `viewModel.editSession`. If you must change the view model, keep it to
+  its editing section, and say so.
+- **The coordinator's harness** (`Tools/coordinator/CoordinatorEditBenchmarks-Session.swift`) drives an `EditSession`
+  with no view: it sets `session.parameters`, and waits for `session.previewImage` and `session.fullImage`. Keep those
+  three members. Decide what a session with **no viewport** does (the harness has none), and document how a caller
+  gives it one, so the coordinator can update the harness on `main` in a separate commit. Say under "Needs" exactly
+  what to change there. Don't edit `Tools/coordinator/` yourself.
+- `ImageLoader` changed in task 34 (the disk-cache follow-ups, `loadFullResolution` removed); it isn't yours.
+
 ## Constraints
 
 - **Pixels.** Rendered output at a given size stays pixel-identical (≤ 1) to what `ImageEditingService` produces for

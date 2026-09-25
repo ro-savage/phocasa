@@ -24,6 +24,46 @@ keeps working.
   - task 31's rename, `isDeleted` → `isInBin`;
   - editing (35).
 
+## Coordinator notes after task 30 merged (read first)
+
+Task 30's real layout is in `results/30.md`, "Layout for wave 3B → Task 33". In short:
+- **`Library/LibrarySort.swift`** is a `struct LibrarySort: Equatable, Sendable { var newestFirst }` with
+  `static key(creationDate:)`, `static key(of: PhotoAsset)` (the only per-photo key read in the app), `precedes`,
+  `fetch(where:in:)` (the only fetch that orders; both of `loadExistingData`'s fetches use it), `insertionIndex(for:in:)`,
+  `merge(_:into:_:)`, `toggle()` and `reorderAfterToggle(_:)`. `LibrarySortTests` pins that they agree.
+  - Task 32 may call `sort.fetch(where:in:)` from a **background** `ModelContext` for its off-main launch snapshot, and
+    uses `key(of:)`. Keep both signatures. Task 32 was told not to call `key(creationDate:)`, so you may change or
+    replace it.
+  - If you sort in memory (option b), do it inside `fetch(where:in:)`, so every caller, including task 32's background
+    snapshot, gets the new order.
+- **Insert sites** (one line each, in task 32's files): `ScanPlan.insertInBackground` in `Library/ScanPlan.swift`, and
+  `insertScannedPhotos` in `Library/LibraryStore+Scan.swift`, at `let asset = PhotoAsset(…)`. Task 32 was told to keep
+  a single obvious creation point in each.
+- **After-launch hook:** one line in `PhotoLibraryViewModel.setModelContext(_:)`
+  (`ViewModels/PhotoLibraryViewModel.swift`), after `library.open(context)`, e.g.
+  `Task { await library.waitForScans(); <start the backfill> }`. `waitForScans()` returns after the launch rescan;
+  task 32 keeps that true if the launch load becomes asynchronous.
+- **The backfill** goes in your new `Library/CaptureDateBackfill.swift`. It may be an `extension LibraryStore` or its
+  own type. Extensions can't hold stored state; if you need state on the store, follow task 30's pattern (a small
+  `struct` declared in your file, plus one stored property line in `LibraryStore.swift`; nobody else edits that file in
+  wave 3B).
+- **Re-order once at the end in memory, not with `loadExistingData()`.** A full reload costs about 320 ms on the main
+  actor at 10k, over your ~16 ms budget. `allPhotos`/`allFacts`/`binPhotos`/`binFacts` have internal setters: re-sort
+  them with `LibrarySort` in your file, bump `libraryVersion`/`binVersion`, and call `refreshVisiblePhotos()`. Measure
+  that step's main-actor time at 10k.
+- **The `isDeleted` collision (spec §H5) is still on your branch.** Task 31 renames it in parallel; the coordinator
+  merges 31 first. Until then, saving any change to a **binned** row writes its bin flag back as false (task 30 found
+  this). So your backfill, which writes to binned rows too, will take them out of the bin in the store **on your
+  branch only**. Write the test "binned rows stay binned across the backfill" anyway. If it fails only because of the
+  collision, wrap it in `XCTExpectFailure("fixed by task 31's isInBin rename", strict: false)` and say so under "Needs":
+  the coordinator removes the wrapper after merging.
+- **New attributes:** prefer optionals, which lightweight migration adds as nil. A non-optional attribute needs a
+  default value in its declaration. List every attribute you add under "Needs": the coordinator extends task 31's
+  `MigrationTests` (V1 → current) to cover them after both merge.
+- **`MetadataService`:** change only `readMetadata(from:)` / `PhotoMetadata`. Leave the write path and
+  `restoreFileDates` alone: task 34's thumbnail re-key relies on metadata writes restoring the file date to within
+  10 µs.
+
 ## Design notes
 
 - **Reading.**

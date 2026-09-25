@@ -52,8 +52,9 @@ DD="$TMPDIR/phocasa-dd-<task-id>"      # e.g. phocasa-dd-10
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -configuration Debug -derivedDataPath "$DD" build 2>&1 | tail -5
 
 # Full test suite (look for "** TEST SUCCEEDED **"; count warnings with: grep -c "warning:").
-# After wave 2 the baseline is "Executed 441 tests, with 20 tests skipped and 0 failures" (the skips are gated
-# benchmarks and gated real-file tests), with 0 compiler warnings on a clean build.
+# After wave 3A (tasks 30 and 34) the baseline is "Executed 495 tests, with 26 tests skipped and 0 failures" (the
+# skips are gated benchmarks and gated real-file tests), with 0 compiler warnings on a clean build.
+# Hosted-window tests (GridKeepAliveTests) need the display awake: run xcodebuild under `caffeinate -d -u`.
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -destination 'platform=macOS' -derivedDataPath "$DD" test > "$DD.test.log" 2>&1; tail -3 "$DD.test.log"
 grep -E "error:|failed \(|Executed [0-9]+ tests" "$DD.test.log" | sort -u
 
@@ -180,16 +181,18 @@ the coordinator applies them after both merge.
 
 ### Wave 3B
 
-The file names are task 30's layout. The coordinator re-checks them against merged `main` before dispatching.
+The file names are task 30's layout (`results/30.md`, "Layout for wave 3B"), re-checked by the coordinator against merged `main`. Each 3B task file starts with "Coordinator notes after task 30 merged".
 
 | File / region | 31 | 32 | 33 | 35 |
 |---|---|---|---|---|
 | `Models/*`: rename, removals | **owns** | | | |
 | `Models/PhotoAsset.swift`: new capture-date attribute(s) | | | **owns** | |
 | Every `isDeleted` bin-flag call site (mechanical rename), `SidebarView` child rows, `MigrationTests`, migration plan in `PhocasaApp` if needed | **owns** | | | |
-| `Library/LibraryStore+Loading.swift`, `Library/LibraryStore+Scan.swift`, `Library/ScanPlan.swift`, `Services/FolderScanner.swift` | | **owns** | one line per insert site | |
-| Incremental-insert entry point in `LibraryStore` / `LibraryStore+Mutations` (additive) | | **owns** | | |
+| `Library/LibraryStore+Loading.swift` (incl. `LoadingState`), `Library/LibraryStore+Scan.swift` (incl. `ScanState`), `Library/ScanPlan.swift`, `Services/FolderScanner.swift` | | **owns** | one line per insert site | |
+| Incremental insert (and, optionally, removal) in `Library/LibraryStore+ListEditing.swift` (additive); the two post-trash `loadExistingData()` calls in `LibraryStore+Mutations` (optional) | | **owns** | | |
 | `Library/LibrarySort.swift` (the only definition of photo order) | | | **owns** | |
+| `PhotoLibraryViewModel.setModelContext(_:)`: one after-launch line (`waitForScans()`, then the backfill); new `Library/CaptureDateBackfill.swift` | | | **owns** | |
+| `Views/MainContentView.swift`: the `EditSidebarView` line only | | | | **owns** |
 | `MetadataService.readMetadata` / `PhotoMetadata` (capture date); new backfill file | | | **owns** | |
 | `Editing/*`; saved-edit and edit parts of `PhotoDetailView` and `Views/Detail/*` | | | | **owns** |
 | `PhocasaTests/PerformanceBenchmarks.swift` (additions, `7x` seed fix) | | **owns** | | |

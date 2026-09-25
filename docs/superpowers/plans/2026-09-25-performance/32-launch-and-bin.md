@@ -19,8 +19,8 @@
   - `Library/ScanPlan.swift` and `Services/FolderScanner.swift`;
   - `ScanTests` and `FolderScannerTests`;
   - `PhocasaTests/PerformanceBenchmarks.swift` (additions, plus the `7x` seed fix below).
-- **You may add** a small incremental-insert entry point to `LibraryStore.swift` / `LibraryStore+Mutations.swift`, next
-  to `relocate`. Keep it additive: task 33 edits the sort in `LibrarySort.swift`.
+- **You may add** a small incremental-insert entry point to `LibraryStore+ListEditing.swift`, next to `relocate` (see
+  the coordinator notes above). Keep it additive: task 33 edits the sort in `LibrarySort.swift`.
 - **Don't touch:**
   - `LibrarySort.swift` (task 33). **Always order through it**, never by `creationDate` directly, so that task 33's
     change applies to your paths too.
@@ -28,6 +28,37 @@
   - Editing (35).
   - `isDeleted` naming: task 31 renames it to `isInBin` in parallel. Keep your edits away from the lines it renames
     where you can; the coordinator merges 31 first and resolves the rest.
+
+## Coordinator notes after task 30 merged (read first)
+
+Task 30's real layout is in `results/30.md`, "Layout for wave 3B → Task 32". In short:
+- **Launch** is `LibraryStore.open(_:)` in `Library/LibraryStore+Loading.swift`: it sets the context, runs
+  `loadExistingData()`, then starts `rescanCurrentLibrary()`. `PhotoLibraryViewModel.setModelContext(_:)` calls it.
+- **State.** Swift extensions can't add stored properties. Loading state lives in `LibraryStore.LoadingState`
+  (declared in `+Loading`, stored as `loading`), scan state in `LibraryStore.ScanState` (declared in `+Scan`, stored as
+  `scanning`). Add your new state there, so you don't need to edit `LibraryStore.swift`.
+- **The incremental insert goes in `Library/LibraryStore+ListEditing.swift`**, next to `relocate` (not
+  `+Mutations`, as the table used to say). Its helpers `insertIntoList(_:facts:inBin:)` and `relocateByMerging` are
+  private to that file; they place photos with `sort.insertionIndex(for:in:)` and `sort.merge(_:into:_:)`. Facts for a
+  new row come from `PhotoFacts(photo, tags: &tagFacts)`. Afterwards call `refreshVisiblePhotos()` and
+  `sortTagCategories()`.
+- **Order only through `LibrarySort`** (task 33 changes it in parallel). Fetch ordered photos with
+  `sort.fetch(where:in:)`, which works with any `ModelContext`, including a background one, and read a model's key
+  with `LibrarySort.key(of:)`. **Don't call `LibrarySort.key(creationDate:)`**, never build a `SortDescriptor` on
+  `creationDate`, and never sort by `creationDate` yourself: task 33 may change what the key is made of. If your
+  background snapshot needs the order, keep the order the fetch returned.
+- **`waitForScans()` is task 33's after-launch hook** (`Task { await library.waitForScans(); … }` in
+  `setModelContext`). Keep its contract: it returns only once no scan is running or queued, **and**, if you make the
+  launch load asynchronous, once that load has been applied. Keep `ScanTests.testWaitForScansWaitsForTheLaunchRescanAndQueuedScans`
+  passing, and extend it to cover the async load.
+- **Optional, recommended: deletes that end in a full reload.** After their files are trashed, `deleteFileType` and
+  `deletePermanently` in `Library/LibraryStore+Mutations.swift` each call `loadExistingData()` (about 320 ms on the
+  main actor at 10k), so a permanent delete or Empty Bin freezes a large library briefly. If your incremental-insert
+  work makes an in-memory removal cheap, you may replace **those two calls only** with it (put the removal next to
+  `relocate` in `+ListEditing`), with an oracle-style test that the state equals a fresh load, and a harness line. Task
+  31 renames `isDeleted` in `+Mutations` at the same time; don't touch other lines there.
+- Task 31 renames `isDeleted` → `isInBin` in your files at the same time (a mechanical identifier rename). The
+  coordinator merges 31 first and re-applies it to your hunks. Don't reformat those lines.
 
 ## Coordination with task 33 (capture date)
 
