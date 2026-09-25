@@ -138,8 +138,12 @@ extension LibraryStore {
         var didApplyChunk: ((Int) -> Void)?
     }
 
-    /// Main-actor time each write chunk aims at; chunks grow or shrink to stay near it. A frame is about 16 ms.
-    private static let captureDateChunkTarget: Duration = .milliseconds(8)
+    /// Main-actor time each write chunk aims at: chunks grow below 11 ms and shrink above 15 ms, so none takes much
+    /// more than a frame (about 16 ms). With 10k photos loaded, a main-context save costs about 7 ms however few rows
+    /// it writes (`setRating` pays it too), plus about 0.15 ms per row with its fetch, so chunks settle at about
+    /// 30–55 rows there, and at more in smaller libraries.
+    private static let captureDateChunkGrowBelow: Duration = .milliseconds(11)
+    private static let captureDateChunkShrinkAbove: Duration = .milliseconds(15)
 
     /// After launch (`PhotoLibraryViewModel.setModelContext`): once the launch rescan, and any scan queued behind it,
     /// is done, and `captureDates.startDelay` later, fills in the capture dates of photos stored without one
@@ -200,7 +204,7 @@ extension LibraryStore {
             report.planTime = clock.now - phase
         }
 
-        var chunkRows = min(64, captureDates.maxChunkRows)
+        var chunkRows = min(32, captureDates.maxChunkRows)
         var next = 0
         while next < found.count, let context = modelContext {
             let chunkStart = clock.now
@@ -210,13 +214,14 @@ extension LibraryStore {
             report.chunkMainActorTimes.append(elapsed)
             captureDates.didApplyChunk?(report.chunkMainActorTimes.count - 1)
             next = end
-            if elapsed < Self.captureDateChunkTarget / 2 {
-                chunkRows = min(chunkRows * 2, captureDates.maxChunkRows)
-            } else if elapsed > Self.captureDateChunkTarget {
-                chunkRows = max(chunkRows / 2, 1)
+            if elapsed < Self.captureDateChunkGrowBelow {
+                chunkRows = min(max(chunkRows * 5 / 4, chunkRows + 1), captureDates.maxChunkRows)
+            } else if elapsed > Self.captureDateChunkShrinkAbove {
+                chunkRows = max(chunkRows * 3 / 4, 1)
             }
-            // A short sleep, not a yield: the run loop gets to handle events and draw between chunks.
-            if next < found.count { try? await Task.sleep(for: .milliseconds(1)) }
+            // Sleep as long as the chunk took (not a yield): the run loop gets at least half the main actor to handle
+            // events and draw while the backfill writes.
+            if next < found.count { try? await Task.sleep(for: max(elapsed, .milliseconds(2))) }
         }
 
         if let ranks, report.datesWritten > 0 {
