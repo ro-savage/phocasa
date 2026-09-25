@@ -755,6 +755,25 @@ final class EditSessionTests: XCTestCase {
         XCTAssertEqual(shown.orientedSize, CGSize(width: 400, height: 600))
     }
 
+    /// With a viewport, the saved JPG edit is rendered to fill its half of the comparison, not at native size.
+    func testJPGComparisonRendersTheSavedJPGEditToFitItsHalf() async throws {
+        let jpg = try makeJPEG("pair.jpg", width: 600, height: 400, orientation: 6, detail: false)
+        let photo = try insertPhoto(jpg: jpg, raw: dir.appendingPathComponent("pair.ARW"))
+        photo.jpgEditParameters = exposure(0.5)
+        try context.save()
+        let session = makeSession(photo, isRAW: true)
+        session.viewportPixelSize = CGSize(width: 400, height: 400)
+
+        session.toggleJPGComparison()
+
+        let shown = try await eventually { session.jpgComparisonImage }
+        XCTAssertEqual(shown.orientedSize, CGSize(width: 200, height: 300), "the 400×600 edit fitted into 200×400")
+        let expected = await ImageEditingService.shared.processStandard(
+            url: jpg, parameters: exposure(0.5), maxSize: CGSize(width: 200, height: 300), lane: .full)
+        let difference = EditTestImages.maxChannelDifference(shown.cgImage, try XCTUnwrap(expected.flatMap(EditTestImages.cgImage)))
+        XCTAssertLessThanOrEqual(difference ?? 255, 1)
+    }
+
     func testSideBySideAndJPGComparisonExcludeEachOther() async throws {
         let jpg = try makeJPEG("pair.jpg", width: 60, height: 40, detail: false)
         let session = makeSession(try insertPhoto(jpg: jpg, raw: dir.appendingPathComponent("pair.ARW")), isRAW: true)

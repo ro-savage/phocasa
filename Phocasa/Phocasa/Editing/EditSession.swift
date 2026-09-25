@@ -378,16 +378,23 @@ final class EditSession {
         }
     }
 
-    /// The paired JPG with its saved edits rendered, or else its decode (hardware path, subsample 2, which covers
-    /// half the window; a cached full-resolution decode is reused), oriented at display time.
+    /// The paired JPG with its saved edits rendered (to fill its half of the comparison when the viewport is known),
+    /// or else its decode (hardware path, subsample 2, which covers half the window; a cached full-resolution decode
+    /// is reused), oriented at display time.
     private func loadJPGComparisonImage() {
         guard let jpgPath = photo.jpgPath else { return }
         let savedJPG = photo.jpgEditParameters.flatMap { $0.isDefault ? nil : $0 }
         let service = self.service
+        let half = viewportPixelSize.map { CGSize(width: $0.width / 2, height: $0.height) }
         comparisonTask = Task { [weak self] in
             let image: DisplayImage?
             if let savedJPG {
-                let rendered = await service.processStandard(url: URL(fileURLWithPath: jpgPath), parameters: savedJPG, lane: .full)
+                let url = URL(fileURLWithPath: jpgPath)
+                var maxSize: CGSize?
+                if let half, let native = await EditRenderSize.loadNativeSize(ofImageAt: url) {
+                    maxSize = EditRenderSize.fitMaxSize(native: native, parameters: savedJPG, viewport: half)
+                }
+                let rendered = await service.processStandard(url: url, parameters: savedJPG, maxSize: maxSize, lane: .full)
                 image = rendered.flatMap(DisplayImage.init(nsImage:))
             } else {
                 let loader = FullImageLoader.shared
