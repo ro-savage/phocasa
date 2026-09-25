@@ -25,11 +25,11 @@ final class ThumbnailCacheKey: NSObject, Sendable {
 }
 
 final class ImageLoader: @unchecked Sendable {
-    /// The app's loader. A test host (`XCTestConfigurationFilePath` set) gets no disk cache unless
-    /// `PHOCASA_THUMBNAIL_CACHE_DIR` names one, so tests never write into the real Caches folder.
+    /// The app's loader, caching thumbnails where `LibraryLocation.current` says. A test host
+    /// (`XCTestConfigurationFilePath` set) gets no disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names one, so tests
+    /// never write into the real Caches folder; the development library keeps its own in its folder.
     static let shared = ImageLoader(
-        diskCache: diskCacheDirectory(environment: ProcessInfo.processInfo.environment)
-            .map { ThumbnailDiskCache(directory: $0) }
+        diskCache: LibraryLocation.current.thumbnailCacheDirectory.map { ThumbnailDiskCache(directory: $0) }
     )
 
     /// Size buckets in pixels (long edge). Requests are rounded UP to the next bucket, so a
@@ -77,18 +77,6 @@ final class ImageLoader: @unchecked Sendable {
     init(diskCache: ThumbnailDiskCache?) {
         self.diskCache = diskCache
         thumbnailCache.totalCostLimit = Self.thumbnailCacheCostLimit
-    }
-
-    /// Where `shared` keeps its disk cache. A test host uses `PHOCASA_THUMBNAIL_CACHE_DIR` if set and no disk cache
-    /// otherwise; a normal launch always uses `ThumbnailDiskCache.defaultDirectory`.
-    static func diskCacheDirectory(environment: [String: String]) -> URL? {
-        guard environment["XCTestConfigurationFilePath"] != nil else {
-            return ThumbnailDiskCache.defaultDirectory
-        }
-        guard let configured = environment["PHOCASA_THUMBNAIL_CACHE_DIR"], !configured.isEmpty else {
-            return nil
-        }
-        return URL(fileURLWithPath: configured, isDirectory: true)
     }
 
     // MARK: - Thumbnails

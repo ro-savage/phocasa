@@ -12,7 +12,9 @@ final class ForeignNote {
 
 /// The library's store lives in `Application Support/Phocasa/Phocasa.store`; the first launch moves a store left at
 /// SwiftData's default location (`Application Support/default.store`, where builds before this change kept it) into
-/// that folder. Each test uses its own temp folder in place of Application Support.
+/// that folder. The development library (`LibraryLocation`, `PHOCASA_DEVELOPMENT_LIBRARY=1`) keeps its own store in
+/// `Application Support/Phocasa-Development/` and leaves both alone. Each test uses its own temp folder in place of
+/// Application Support.
 @MainActor
 final class StoreLocationTests: XCTestCase {
 
@@ -233,5 +235,142 @@ final class StoreLocationTests: XCTestCase {
         let rated = try XCTUnwrap(try ModelContext(container).fetch(FetchDescriptor<Phocasa.PhotoAsset>())
             .first { $0.fileName == "rated" })
         XCTAssertEqual(rated.jpgEditParametersData, externalBlob)
+    }
+
+    // MARK: - Development library
+
+    private var developmentFolder: URL { appSupport.appendingPathComponent("Phocasa-Development", isDirectory: true) }
+    private var developmentURL: URL { developmentFolder.appendingPathComponent("Phocasa.store") }
+
+    /// A Debug launch with `PHOCASA_DEVELOPMENT_LIBRARY=1`, with the temp folder as Application Support.
+    private func developmentLocation() -> LibraryLocation {
+        LibraryLocation.resolve(environment: ["PHOCASA_DEVELOPMENT_LIBRARY": "1"], isDebugBuild: true,
+                                applicationSupport: appSupport,
+                                caches: appSupport.appendingPathComponent("Caches", isDirectory: true))
+    }
+
+    private func isInDevelopmentFolder(_ path: String) -> Bool {
+        let folder = developmentFolder.standardizedFileURL.path
+        let path = URL(fileURLWithPath: path).standardizedFileURL.path
+        return path == folder || path.hasPrefix(folder + "/")
+    }
+
+    func testTheDevelopmentLibraryKeepsItsStoreInItsOwnFolder() throws {
+        let url = try XCTUnwrap(developmentLocation().prepareStore())
+
+        XCTAssertEqual(url.standardizedFileURL, developmentURL.standardizedFileURL)
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: developmentFolder.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue, "the development folder exists for SwiftData to create the store in")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: appSupport.path), ["Phocasa-Development"],
+                       "nothing else is made")
+
+        try writeCurrentStore(at: url, fileName: "development")
+        XCTAssertEqual(try photoNames(at: developmentURL), ["development"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: phocasaFolder.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyURL.path))
+    }
+
+    /// A real library and a legacy store, both of Phocasa's models. The development library doesn't look at either:
+    /// every file stays where it was, and each store still holds its own photos.
+    func testTheDevelopmentLibraryLeavesTheRealAndLegacyStoresAlone() throws {
+        try FileManager.default.createDirectory(at: phocasaFolder, withIntermediateDirectories: true)
+        try writeCurrentStore(at: newURL, fileName: "real")
+        try writeV1Store(at: legacyURL)
+        let before = try snapshot(appSupport)
+        XCTAssertTrue(before.keys.contains("Phocasa/Phocasa.store"))
+        XCTAssertTrue(before.keys.contains("default.store"))
+        XCTAssertTrue(before.keys.contains { $0.hasPrefix(".default_SUPPORT/_EXTERNAL_DATA/") })
+        let files = RecordingFileManager()
+
+        let url = try XCTUnwrap(developmentLocation().prepareStore(fileManager: files))
+        try writeCurrentStore(at: url, fileName: "development")
+
+        XCTAssertEqual(url.standardizedFileURL, developmentURL.standardizedFileURL)
+        XCTAssertEqual(files.paths.filter { !isInDevelopmentFolder($0) }, [], "it looked at nothing outside its folder")
+        let after = try snapshot(appSupport).filter { !$0.key.hasPrefix("Phocasa-Development/") }
+        XCTAssertEqual(differences(after, before), [], "every file of both stores is still there, and nothing moved")
+        // Opened only now, after the check (opening the V1 store migrates it).
+        XCTAssertEqual(try photoNames(at: developmentURL), ["development"])
+        XCTAssertEqual(try photoNames(at: newURL), ["real"])
+        XCTAssertEqual(try photoNames(at: legacyURL), ["binned", "rated"])
+    }
+
+    /// With only a legacy store, a normal launch moves it into the Phocasa folder. The development library doesn't.
+    func testTheDevelopmentLibraryRunsNoLegacyMove() throws {
+        try writeV1Store(at: legacyURL)
+        let before = try snapshot(appSupport)
+
+        let url = try XCTUnwrap(developmentLocation().prepareStore())
+
+        XCTAssertEqual(url.standardizedFileURL, developmentURL.standardizedFileURL)
+        XCTAssertEqual(differences(try snapshot(appSupport), before), [], "the legacy store stays where it is")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: phocasaFolder.path), "no Phocasa folder is made")
+    }
+
+    /// What the in-memory test host can't do: a library written in one launch is there in the next.
+    func testTheDevelopmentLibrarySurvivesARelaunch() throws {
+        do {
+            let url = try XCTUnwrap(developmentLocation().prepareStore())
+            let container = try openCurrent(at: url)
+            let context = ModelContext(container)
+            let binned = Phocasa.PhotoAsset(fileName: "binned", folderPath: "/p")
+            binned.isInBin = true
+            let rated = Phocasa.PhotoAsset(fileName: "rated", folderPath: "/p")
+            rated.rating = 5
+            context.insert(binned)
+            context.insert(rated)
+            try context.save()
+        }   // quit: the container is released
+
+        let url = try XCTUnwrap(developmentLocation().prepareStore())   // the next launch
+        XCTAssertEqual(url.standardizedFileURL, developmentURL.standardizedFileURL)
+        let container = try openCurrent(at: url)
+        let photos = try ModelContext(container).fetch(FetchDescriptor<Phocasa.PhotoAsset>())
+        XCTAssertEqual(photos.map(\.fileName).sorted(), ["binned", "rated"])
+        XCTAssertEqual(photos.first { $0.fileName == "binned" }?.isInBin, true)
+        XCTAssertEqual(photos.first { $0.fileName == "rated" }?.rating, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: phocasaFolder.path))
+    }
+}
+
+/// A file manager that records every path it's asked about or asked to change.
+private final class RecordingFileManager: FileManager, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var paths: [String] { lock.withLock { recorded } }
+
+    private func record(_ paths: String...) { lock.withLock { recorded += paths } }
+
+    override func fileExists(atPath path: String) -> Bool {
+        record(path)
+        return super.fileExists(atPath: path)
+    }
+
+    override func fileExists(atPath path: String, isDirectory: UnsafeMutablePointer<ObjCBool>?) -> Bool {
+        record(path)
+        return super.fileExists(atPath: path, isDirectory: isDirectory)
+    }
+
+    override func contentsOfDirectory(atPath path: String) throws -> [String] {
+        record(path)
+        return try super.contentsOfDirectory(atPath: path)
+    }
+
+    override func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool,
+                                  attributes: [FileAttributeKey: Any]? = nil) throws {
+        record(url.path)
+        try super.createDirectory(at: url, withIntermediateDirectories: createIntermediates, attributes: attributes)
+    }
+
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        record(srcURL.path, dstURL.path)
+        try super.moveItem(at: srcURL, to: dstURL)
+    }
+
+    override func removeItem(at url: URL) throws {
+        record(url.path)
+        try super.removeItem(at: url)
     }
 }
