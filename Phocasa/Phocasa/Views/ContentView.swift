@@ -2,17 +2,28 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
+/// The window: the library and detail view (`MainContentView`), with the toolbar (`LibraryToolbar`), the status bar
+/// (`StatusBarView`), search, the permanent-delete alert, the folder picker and the keyboard handling. The toolbar and
+/// the status bar are their own types, so selection changes don't re-evaluate this body.
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @State private var viewModel = PhotoLibraryViewModel()
+    @State private var viewModel: PhotoLibraryViewModel
     @FocusState private var isContentFocused: Bool
 
+    /// Body evaluations, for tests.
+    @MainActor static var bodyEvaluations = 0
+
+    init(viewModel: PhotoLibraryViewModel = PhotoLibraryViewModel()) {
+        _viewModel = State(initialValue: viewModel)
+    }
+
     var body: some View {
-        mainContent
+        let _ = Self.bodyEvaluations += 1
+        MainContentView(viewModel: viewModel)
             .focusable()
             .focused($isContentFocused)
             .focusEffectDisabled()
-            .toolbar { toolbarContent }
+            .toolbar { LibraryToolbar(viewModel: viewModel) }
             .searchable(text: Bindable(viewModel.library).searchText, prompt: "Search by tag or filename")
             .searchSuggestions {
                 if !viewModel.library.searchText.isEmpty {
@@ -51,7 +62,7 @@ struct ContentView: View {
                     viewModel.library.handleFolderSelected(url: url)
                 }
             }
-            .overlay(alignment: .bottom) { statusBar }
+            .overlay(alignment: .bottom) { StatusBarView(library: viewModel.library, selection: viewModel.selection) }
             .focusedSceneValue(\.openFolderAction) { viewModel.openFolder() }
             .onAppear {
                 viewModel.setModelContext(modelContext)
@@ -69,10 +80,6 @@ struct ContentView: View {
                 viewModel.editSession?.showOriginal = false
                 return .handled
             }
-    }
-
-    private var mainContent: some View {
-        MainContentView(viewModel: viewModel)
     }
 
     private func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
@@ -168,103 +175,5 @@ struct ContentView: View {
 
     private var firstSelectedPhoto: PhotoAsset? {
         viewModel.selection.primarySelectedPhoto
-    }
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button(action: { viewModel.openFolder() }) {
-                Label("Open Folder", systemImage: "folder.badge.plus")
-            }
-
-            if viewModel.library.currentLibrary != nil {
-                Button(action: { viewModel.library.rescanCurrentLibrary() }) {
-                    Label("Rescan", systemImage: "arrow.clockwise")
-                }
-            }
-        }
-
-        ToolbarItemGroup(placement: .automatic) {
-            Button(action: { viewModel.library.toggleSortOrder() }) {
-                Label(
-                    viewModel.library.sortNewestFirst ? "Newest First" : "Oldest First",
-                    systemImage: viewModel.library.sortNewestFirst ? "arrow.down" : "arrow.up"
-                )
-            }
-            .help(viewModel.library.sortNewestFirst ? "Sorted newest first" : "Sorted oldest first")
-
-            HStack(spacing: 4) {
-                Image(systemName: "minus.magnifyingglass")
-                    .font(.caption)
-                Slider(value: Binding(
-                    get: { Double(22 - viewModel.gridColumns) },
-                    set: { viewModel.gridColumns = 22 - Int($0) }
-                ), in: 2...20, step: 1)
-                .frame(width: 120)
-                Image(systemName: "plus.magnifyingglass")
-                    .font(.caption)
-            }
-        }
-
-        ToolbarItemGroup(placement: .automatic) {
-            if viewModel.library.viewingBin && !viewModel.selection.selectedPhotos.isEmpty {
-                Button(action: { viewModel.restoreSelected() }) {
-                    Label("Restore", systemImage: "arrow.uturn.backward")
-                }
-            }
-
-            if !viewModel.selection.selectedPhotos.isEmpty {
-                Button(role: .destructive, action: { viewModel.deleteSelected() }) {
-                    Label(viewModel.library.viewingBin ? "Delete Forever" : "Delete", systemImage: "trash")
-                }
-            }
-
-            if viewModel.library.viewingBin && viewModel.library.binCount > 0 {
-                Button(role: .destructive, action: { viewModel.emptyBin() }) {
-                    Label("Empty Bin", systemImage: "trash.slash")
-                }
-            }
-        }
-    }
-
-    private var statusBar: some View {
-        HStack {
-            if let trash = viewModel.library.trashProgress {
-                ProgressView(value: Double(trash.done), total: Double(trash.total))
-                    .frame(width: 60)
-                Text("Moving \(trash.total) files to the Trash... \(trash.done)/\(trash.total)")
-                    .font(.caption)
-            } else if viewModel.library.isScanning {
-                ProgressView()
-                    .scaleEffect(0.6)
-                Text(viewModel.library.scanProgress)
-                    .font(.caption)
-            } else if viewModel.library.viewingBin {
-                Text("\(viewModel.library.binCount) in bin")
-                    .font(.caption)
-                if !viewModel.selection.selectedPhotos.isEmpty {
-                    Text("• \(viewModel.selection.selectedPhotos.count) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("\(viewModel.library.allPhotos.count) photos")
-                    .font(.caption)
-                if viewModel.library.photos.count != viewModel.library.allPhotos.count {
-                    Text("(\(viewModel.library.photos.count) shown)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if !viewModel.selection.selectedPhotos.isEmpty {
-                    Text("• \(viewModel.selection.selectedPhotos.count) selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(.bar)
     }
 }
