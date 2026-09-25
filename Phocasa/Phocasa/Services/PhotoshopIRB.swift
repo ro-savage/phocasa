@@ -37,13 +37,15 @@ enum PhotoshopIRB {
         }
     }
 
-    /// The resources in an APP13 payload, or nil if it isn't a well-formed run of resource blocks.
-    static func resources(in payload: Data) -> [Resource]? {
+    /// The resources in an APP13 payload, and the zero padding after them (some writers pad), or nil if it isn't a
+    /// well-formed run of resource blocks.
+    static func resources(in payload: Data) -> (resources: [Resource], padding: Data)? {
         let p = Data(payload)
         guard p.starts(with: header) else { return nil }
         var i = header.count
         var out: [Resource] = []
         while i < p.count {
+            if p[i...].allSatisfy({ $0 == 0 }) { return (out, Data(p[i...])) }
             guard i + 12 <= p.count, signatures.contains(p[i..<(i + 4)]) else { return nil }
             let id = UInt16(p[i + 4]) << 8 | UInt16(p[i + 5])
             let nameLength = Int(p[i + 6])
@@ -57,11 +59,11 @@ enum PhotoshopIRB {
             out.append(Resource(id: id, block: Data(p[i..<end]), data: (dataStart - i)..<(dataStart - i + size)))
             i = end
         }
-        return out
+        return (out, Data())
     }
 
-    static func payload(_ resources: [Resource]) -> Data {
-        resources.reduce(into: header) { $0 += $1.block }
+    static func payload(_ resources: [Resource], padding: Data) -> Data {
+        resources.reduce(into: header) { $0 += $1.block } + padding
     }
 
     /// `payload` with its IPTC keywords replaced by `keywords` (every other resource and dataset kept byte for byte,
@@ -69,20 +71,20 @@ enum PhotoshopIRB {
     /// when it can't be done safely: malformed resources or datasets, or non-ASCII keywords in IPTC text of unknown
     /// encoding.
     static func replacingKeywords(in payload: Data, with keywords: [String]) -> Data? {
-        guard var resources = resources(in: payload) else { return nil }
+        guard var (resources, padding) = resources(in: payload) else { return nil }
         guard let index = resources.firstIndex(where: { $0.id == iptcResource }) else { return payload }
         guard let iim = IPTCIIM.replacingKeywords(in: resources[index].dataBytes, with: keywords) else { return nil }
         resources[index] = resources[index].replacingData(iim)
         for (i, resource) in resources.enumerated() where resource.id == digestResource {
             resources[i] = resource.replacingData(Data(Insecure.MD5.hash(data: iim)))
         }
-        return self.payload(resources)
+        return self.payload(resources, padding: padding)
     }
 
     /// `payload` without thumbnail resources, or nil if its resources are malformed.
     static func removingThumbnails(from payload: Data) -> Data? {
-        guard let resources = resources(in: payload) else { return nil }
-        return self.payload(resources.filter { !thumbnailResources.contains($0.id) })
+        guard let (resources, padding) = resources(in: payload) else { return nil }
+        return self.payload(resources.filter { !thumbnailResources.contains($0.id) }, padding: padding)
     }
 }
 

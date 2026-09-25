@@ -55,13 +55,17 @@ enum XMPProperties {
     private static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"
 
     /// Whether `rewritten` (nil: no properties) holds every value of `original`, apart from `changing` (a property
-    /// and everything under it). Added values don't matter.
-    static func keepsEverything(of original: CGImageMetadata, in rewritten: CGImageMetadata?, changing: Set<Property>) -> Bool {
-        let before = values(original), after = rewritten.map(values) ?? [:]
+    /// and everything under it). Added values don't matter. `rewritten` is only evaluated when `original` has other
+    /// values, so a caller can parse it lazily.
+    static func keepsEverything(of original: CGImageMetadata, in rewritten: @autoclosure () -> CGImageMetadata?,
+                                changing: Set<Property>) -> Bool {
         let changed = changing.map(\.key)
-        return before.allSatisfy { path, value in
-            changed.contains { path == $0 || path.hasPrefix($0 + "[") || path.hasPrefix($0 + "/") } || after[path] == value
+        let kept = values(original).filter { path, _ in
+            !changed.contains { path == $0 || path.hasPrefix($0 + "[") || path.hasPrefix($0 + "/") }
         }
+        guard !kept.isEmpty else { return true }
+        let after = rewritten().map(values) ?? [:]
+        return kept.allSatisfy { after[$0.key] == $0.value }
     }
 
     /// The properties an export changes: they describe the pixels, which are new and upright.
@@ -78,9 +82,10 @@ enum XMPProperties {
     }
 
     /// An XMP packet with its pixel properties made to match new upright `width`×`height` pixels: orientation 1, the
-    /// new size, the colour space; the old ICC profile's name and any XMP thumbnail removed. Only properties already
-    /// present change. Refused when ImageIO can't parse the packet and it names one of those properties, or when the
-    /// rewrite would lose any other value.
+    /// new size, the colour space; the old ICC profile's name, any XMP thumbnail, and what describes data appended
+    /// after the old image (a motion photo's video, an Ultra HDR gain map) removed. Only properties already present
+    /// change. Refused when ImageIO can't parse the packet and it names one of those properties, or when the rewrite
+    /// would lose any other value.
     static func patchForNewPixels(_ packet: Data, width: Int, height: Int, sRGB: Bool) -> Patch {
         guard let original = CGImageMetadataCreateFromXMPData(packet as CFData),
               let meta = CGImageMetadataCreateMutableCopy(original) else {
@@ -104,10 +109,44 @@ enum XMPProperties {
             }
             changed = true
         }
+        // Properties describing data after the image (a motion photo's video, an Ultra HDR gain map), which an
+        // export doesn't carry over.
+        let appended = appendedDataProperties(in: original)
+        for property in appended {
+            guard CGImageMetadataRemoveTagWithPath(meta, nil, property.path as CFString) else { return .refused }
+            changed = true
+        }
         guard changed else { return .unchanged }
         guard let data = CGImageMetadataCreateXMPData(meta, nil) as Data?,
-              let reparsed = CGImageMetadataCreateFromXMPData(data as CFData),
-              keepsEverything(of: original, in: reparsed, changing: pixelProperties) else { return .refused }
+              keepsEverything(of: original, in: CGImageMetadataCreateFromXMPData(data as CFData),
+                              changing: pixelProperties.union(appended))
+        else { return .refused }
         return .patched(data)
+    }
+
+    private static let googleCameraNamespace = "http://ns.google.com/photos/1.0/camera/"
+    /// Google's container directory (the items appended after the image) and Adobe's gain-map description.
+    private static let appendedDataNamespaces: Set<String> = [
+        "http://ns.google.com/photos/1.0/container/", "http://ns.adobe.com/hdr-gain-map/1.0/",
+    ]
+    /// Google camera properties that describe an appended motion-photo video.
+    private static let appendedDataCameraProperties: Set<String> = [
+        "MotionPhoto", "MotionPhotoVersion", "MotionPhotoPresentationTimestampUs",
+        "MicroVideo", "MicroVideoVersion", "MicroVideoOffset", "MicroVideoPresentationTimestampUs",
+    ]
+
+    /// The top-level properties of `meta` that describe appended data, as `Property` values.
+    private static func appendedDataProperties(in meta: CGImageMetadata) -> Set<Property> {
+        var out: Set<Property> = []
+        CGImageMetadataEnumerateTagsUsingBlock(meta, nil, nil) { _, tag in
+            let namespace = CGImageMetadataTagCopyNamespace(tag) as String? ?? ""
+            let name = CGImageMetadataTagCopyName(tag) as String? ?? ""
+            if appendedDataNamespaces.contains(namespace)
+                || (namespace == googleCameraNamespace && appendedDataCameraProperties.contains(name)) {
+                out.insert(Property(namespace: namespace, prefix: CGImageMetadataTagCopyPrefix(tag) as String? ?? "", name: name))
+            }
+            return true
+        }
+        return out
     }
 }

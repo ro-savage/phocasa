@@ -122,4 +122,52 @@ final class ExportMetadataCompositionTests: XCTestCase {
         payload[payload.count - 3] = 0x7F   // the IIM dataset's length now runs past the resource
         XCTAssertNil(PhotoshopIRB.replacingKeywords(in: Data(payload), with: ["b"]))
     }
+
+    func testAPaddedResourceBlockIsPatchedAndKeepsItsPadding() throws {
+        let iim = IRBTestData.dataset(2, 0, [0, 4]) + IRBTestData.dataset(2, 25, "a")
+        let payload = Data(Array("Photoshop 3.0\u{0}".utf8) + IRBTestData.block(0x0404, iim) + [0, 0, 0, 0])
+        let patched = try XCTUnwrap(PhotoshopIRB.replacingKeywords(in: payload, with: ["b"]))
+        XCTAssertEqual(patched.suffix(4), Data([0, 0, 0, 0]), "the padding is kept")
+        let resources = IRBTestData.resources(patched)
+        XCTAssertEqual(resources.first.map { IRBTestData.datasets($0.data).map(\.value) }, [Data([0, 4]), Data("b".utf8)])
+    }
+
+    /// Phones describe data they append after the image in XMP: a motion photo's video (Google's `GCamera` and
+    /// `Container` namespaces) or an Ultra HDR gain map (`hdrgm`). An export carries none of that data over, so the
+    /// XMP describing it goes too.
+    func testXMPDescribingDataAfterTheImageIsDropped() throws {
+        let xmp = """
+        <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+         <rdf:Description rdf:about=""
+           xmlns:GCamera="http://ns.google.com/photos/1.0/camera/"
+           xmlns:Container="http://ns.google.com/photos/1.0/container/"
+           xmlns:Item="http://ns.google.com/photos/1.0/container/item/"
+           xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/"
+           xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+           GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1" GCamera:MotionPhotoPresentationTimestampUs="500"
+           GCamera:MicroVideo="1" GCamera:MicroVideoOffset="12345" GCamera:SpecialTypeID="keep-me"
+           hdrgm:Version="1.0" photoshop:City="Paris">
+          <Container:Directory><rdf:Seq>
+           <rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="image/jpeg" Item:Semantic="Primary"/></rdf:li>
+           <rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="video/mp4" Item:Semantic="MotionPhoto" Item:Length="12345"/></rdf:li>
+          </rdf:Seq></Container:Directory>
+         </rdf:Description></rdf:RDF></x:xmpmeta>
+        """
+        let rich = try RichJPEG.make()
+        var (segments, sos) = T.header(rich.data)
+        let xmpIndex = try XCTUnwrap(segments.firstIndex { $0.id == JPEGTestSegments.xmpID })
+        segments[xmpIndex] = T.segment(0xE1, Data(JPEGTestSegments.xmpID.utf8) + Data([0]) + Data(xmp.utf8))
+        let phone = T.assemble(segments, tail: rich.data[sos...]) + Data(repeating: 0x42, count: 64)   // "the video"
+
+        let output = try XCTUnwrap(ExportMetadata.jpeg(encoded: try encoded(), metadataFrom: try write(phone, "phone.jpg")))
+
+        let values = KeptMetadata.xmpValues(JPEGTestSegments.xmpPacket(output))
+        for gone in ["GCamera:MotionPhoto", "GCamera:MotionPhotoVersion", "GCamera:MotionPhotoPresentationTimestampUs",
+                     "GCamera:MicroVideo", "GCamera:MicroVideoOffset", "hdrgm:Version"] {
+            XCTAssertNil(values[gone], gone)
+        }
+        XCTAssertFalse(values.keys.contains { $0.hasPrefix("Container:") }, "\(values.keys.sorted())")
+        XCTAssertEqual(values["GCamera:SpecialTypeID"], "keep-me")
+        XCTAssertEqual(values["photoshop:City"], "Paris")
+    }
 }
