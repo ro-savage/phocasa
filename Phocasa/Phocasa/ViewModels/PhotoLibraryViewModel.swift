@@ -1452,9 +1452,9 @@ final class PhotoLibraryViewModel {
 
             let result: NSImage?
             if isRAW {
-                result = await ImageEditingService.shared.processRAW(url: url, parameters: params, maxSize: maxSize)
+                result = await ImageEditingService.shared.processRAW(url: url, parameters: params, maxSize: maxSize, lane: .preview)
             } else {
-                result = await ImageEditingService.shared.processStandard(url: url, parameters: params, maxSize: maxSize)
+                result = await ImageEditingService.shared.processStandard(url: url, parameters: params, maxSize: maxSize, lane: .preview)
             }
 
             if renderGeneration == generation {
@@ -1472,9 +1472,9 @@ final class PhotoLibraryViewModel {
 
             let result: NSImage?
             if isRAW {
-                result = await ImageEditingService.shared.processRAW(url: url, parameters: params)
+                result = await ImageEditingService.shared.processRAW(url: url, parameters: params, lane: .full)
             } else {
-                result = await ImageEditingService.shared.processStandard(url: url, parameters: params)
+                result = await ImageEditingService.shared.processStandard(url: url, parameters: params, lane: .full)
             }
 
             if renderGeneration == generation {
