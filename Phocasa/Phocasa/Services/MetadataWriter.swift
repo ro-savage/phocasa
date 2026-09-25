@@ -18,11 +18,6 @@ struct MetadataWriteItem: Sendable, Equatable {
         self.pairedRAWPath = pairedRAWPath
     }
 
-    /// The files this item writes, in order: `path`, then the paired RAW (through its sidecar).
-    var paths: [String] {
-        guard let raw = pairedRAWPath, !raw.isEmpty, raw != path else { return [path] }
-        return [path, raw]
-    }
 }
 
 /// The file operations `MetadataWriter` performs. `MetadataService` is the real one; tests inject a fake.
@@ -119,9 +114,16 @@ actor MetadataWriter {
     /// its own here, so both are coalesced and ordered like any other write, and the sidecar write stays
     /// serialised with that RAW's edit-parameter writes.
     nonisolated func enqueue(_ items: [MetadataWriteItem]) {
-        submit(items.flatMap { item in
-            item.paths.map { Submission(path: $0, operation: .metadata(rating: item.rating, keywords: item.keywords)) }
-        })
+        var submissions: [Submission] = []
+        submissions.reserveCapacity(items.count)
+        for item in items {
+            let operation = Operation.metadata(rating: item.rating, keywords: item.keywords)
+            submissions.append(Submission(path: item.path, operation: operation))
+            if let raw = item.pairedRAWPath, !raw.isEmpty, raw != item.path {
+                submissions.append(Submission(path: raw, operation: operation))
+            }
+        }
+        submit(submissions)
     }
 
     /// RAW edit parameters go through the same queue, so they can't race rating/keyword writes to the same sidecar.

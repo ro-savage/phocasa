@@ -1299,8 +1299,13 @@ final class PhotoLibraryViewModel {
     /// The photo's rating and keywords, for its file. A JPG+RAW pair writes both: the JPG and the RAW's
     /// sidecar (user decision, task 23).
     private func metadataWriteItem(for photo: PhotoAsset) -> MetadataWriteItem {
-        MetadataWriteItem(path: photo.displayPath, rating: photo.rating, keywords: photo.tags.map(\.fullName),
-                          pairedRAWPath: photo.hasRawPair ? photo.rawPath : nil)
+        // Each path is read once (model property reads aren't free on the main thread); this is `displayPath`
+        // and `hasRawPair` spelled out.
+        let jpgPath = photo.jpgPath
+        let rawPath = photo.rawPath
+        return MetadataWriteItem(path: jpgPath ?? rawPath ?? "", rating: photo.rating,
+                                 keywords: photo.tags.map(\.fullName),
+                                 pairedRAWPath: jpgPath == nil ? nil : rawPath)
     }
 
     /// Hands the writes to the serial `MetadataWriter`, which writes them off the main thread,
