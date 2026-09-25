@@ -132,10 +132,14 @@ private final class ReferenceRenderer {
     func processStandard(url: URL, parameters: EditParameters, maxSize: CGSize? = nil) -> CGImage? {
         guard let img = CIImage(contentsOf: url) else { return nil }
         var ciImage = orientedImage(img)
+        // A sized render scales the pixel-radius filters with it (post-wave-3 task C).
+        var scale = 1.0
         if let maxSize {
+            let width = ciImage.extent.width
             ciImage = scaleToFit(ciImage, maxSize: maxSize)
+            scale = ciImage.extent.width / width
         }
-        ciImage = applyStandardFilters(to: ciImage, parameters: parameters)
+        ciImage = applyStandardFilters(to: ciImage, parameters: parameters, scale: scale)
         ciImage = applyTransform(to: ciImage, parameters: parameters)
         let extent = ciImage.extent
         guard extent.width > 0, extent.height > 0 else { return nil }
@@ -158,7 +162,7 @@ private final class ReferenceRenderer {
         return CGImageDestinationFinalize(destination)
     }
 
-    private func applyStandardFilters(to image: CIImage, parameters: EditParameters) -> CIImage {
+    private func applyStandardFilters(to image: CIImage, parameters: EditParameters, scale: Double = 1) -> CIImage {
         var result = image
 
         // Exposure — direct EV mapping, works well
@@ -207,7 +211,7 @@ private final class ReferenceRenderer {
         // Sharpness — CIUnsharpMask with small radius for visible edge sharpening
         if parameters.sharpness > 0 {
             result = applyFilter("CIUnsharpMask", to: result, params: [
-                "inputRadius": 1.5,
+                "inputRadius": 1.5 * scale,
                 "inputIntensity": parameters.sharpness / 100.0 * 2.0
             ])
         }
@@ -223,13 +227,13 @@ private final class ReferenceRenderer {
         // Clarity — local contrast (large-radius unsharp mask) or softening
         if parameters.clarity > 0 {
             result = applyFilter("CIUnsharpMask", to: result, params: [
-                "inputRadius": 20.0,
+                "inputRadius": 20.0 * scale,
                 "inputIntensity": parameters.clarity / 100.0
             ])
         } else if parameters.clarity < 0 {
             let extent = result.extent
             result = applyFilter("CIGaussianBlur", to: result, params: [
-                "inputRadius": -parameters.clarity / 100.0 * 5.0
+                "inputRadius": -parameters.clarity / 100.0 * 5.0 * scale
             ])
             result = result.cropped(to: extent)
         }

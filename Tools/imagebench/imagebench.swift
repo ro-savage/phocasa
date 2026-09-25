@@ -391,27 +391,34 @@ func toneCurve(_ image: CIImage, _ h: Double, _ s: Double) -> CIImage {
         "inputPoint0": CIVector(x: 0, y: p0y), "inputPoint1": CIVector(x: 0.25, y: p1y), "inputPoint2": CIVector(x: 0.5, y: 0.5),
         "inputPoint3": CIVector(x: 0.75, y: p3y), "inputPoint4": CIVector(x: 1, y: p4y)])
 }
-func standardChain(_ img: CIImage, _ p: Params) -> CIImage {
+/// `scale`: the render's size against native. Like the app (task C), the unsharp-mask radii are in native pixels.
+func standardChain(_ img: CIImage, _ p: Params, scale: CGFloat = 1) -> CIImage {
     var r = img
     r = applyFilter("CIExposureAdjust", r, ["inputEV": p.exposure])
     r = toneCurve(r, p.highlights, p.shadows)
     r = applyFilter("CIColorControls", r, ["inputBrightness": p.brightness / 100 * 0.3, "inputContrast": 1 + p.contrast / 100 * 0.5,
                                           "inputSaturation": 1 + p.saturation / 100 * 0.5])
     r = applyFilter("CIVibrance", r, ["inputAmount": p.vibrance / 100])
-    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 1.5, "inputIntensity": p.sharpness / 100 * 2])
-    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 20.0, "inputIntensity": p.clarity / 100])
+    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 1.5 * scale, "inputIntensity": p.sharpness / 100 * 2])
+    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 20.0 * scale, "inputIntensity": p.clarity / 100])
     r = applyFilter("CIVignette", r, ["inputIntensity": p.vignette / 100 * 2, "inputRadius": 1.0])
     return r
 }
-func postRAWChain(_ img: CIImage, _ p: Params) -> CIImage {
+func postRAWChain(_ img: CIImage, _ p: Params, scale: CGFloat = 1) -> CIImage {
     var r = img
     r = applyFilter("CIVibrance", r, ["inputAmount": p.vibrance / 100])
     r = applyFilter("CIColorControls", r, ["inputBrightness": 0.0, "inputContrast": 1.0, "inputSaturation": 1 + p.saturation / 100 * 0.5])
     r = toneCurve(r, p.highlights, p.shadows)
-    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 1.5, "inputIntensity": p.sharpness / 100 * 2])
-    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 20.0, "inputIntensity": p.clarity / 100])
+    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 1.5 * scale, "inputIntensity": p.sharpness / 100 * 2])
+    r = applyFilter("CIUnsharpMask", r, ["inputRadius": 20.0 * scale, "inputIntensity": p.clarity / 100])
     r = applyFilter("CIVignette", r, ["inputIntensity": p.vignette / 100 * 2, "inputRadius": 1.0])
     return r
+}
+/// `image` scaled to fit `box`, and the scale (1 without a box).
+func scaledToFit(_ image: CIImage, _ box: CGSize?) -> (CIImage, CGFloat) {
+    guard let box else { return (image, 1) }
+    let scaled = scaleToFit(image, box)
+    return (scaled, scaled.extent.width / image.extent.width)
 }
 func scaleToFit(_ image: CIImage, _ maxSize: CGSize) -> CIImage {
     let s = min(maxSize.width / image.extent.width, maxSize.height / image.extent.height)
@@ -433,9 +440,8 @@ func renderTick(_ ctx: CIContext, _ src: CIImage, box: CGSize?) -> CGImage? {
     autoreleasepool {
         tick += 1
         var p = Params(); p.exposure = 0.3 + Double(tick % 100) * 0.003
-        var img = src
-        if let box { img = scaleToFit(img, box) }
-        img = standardChain(img, p)
+        var (img, scale) = scaledToFit(src, box)
+        img = standardChain(img, p, scale: scale)
         let cg = ctx.createCGImage(img, from: img.extent)
         _ = touchPixels(cg)  // large outputs are rendered lazily; force real pixels so timings are honest
         return cg
@@ -530,9 +536,8 @@ func ciDiag() {
                 let t = timeMs { () -> Int in autoreleasepool {
                     tick += 1
                     var p = Params(); p.exposure = 0.3 + Double(tick % 100) * 0.003
-                    var img = src
-                    if let box { img = scaleToFit(img, box) }
-                    img = standardChain(img, p)
+                    var (img, scale) = scaledToFit(src, box)
+                    img = standardChain(img, p, scale: scale)
                     let ext = img.extent
                     switch mode {
                     case "createCGImage (app)": return ctx.createCGImage(img, from: ext) == nil ? 0 : 1
@@ -581,9 +586,11 @@ func rawRender(_ ctx: CIContext, _ f: CIRAWFilter, draft: Bool, scaleFactor: Flo
         var p = Params(); p.exposure = 0.3 + Double(tick % 100) * 0.003
         f.isDraftModeEnabled = draft; f.scaleFactor = scaleFactor
         applyRAWParams(f, p)
-        guard var out = f.outputImage else { return nil }
-        if let box { out = scaleToFit(out, box) }
-        out = postRAWChain(out, p)
+        guard let decoded = f.outputImage else { return nil }
+        let native = f.nativeSize
+        let nativeWidth = [5, 6, 7, 8].contains(f.orientation.rawValue) ? native.height : native.width
+        var out = box.map { scaleToFit(decoded, $0) } ?? decoded
+        out = postRAWChain(out, p, scale: box == nil || nativeWidth <= 0 ? 1 : min(1, out.extent.width / nativeWidth))
         let cg = ctx.createCGImage(out, from: out.extent)
         _ = touchPixels(cg)
         return cg
