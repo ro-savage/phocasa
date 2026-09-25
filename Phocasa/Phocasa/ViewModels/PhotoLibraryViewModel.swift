@@ -1296,12 +1296,16 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Background Metadata Write-back
 
+    /// The photo's rating and keywords, for its file. A JPG+RAW pair writes both: the JPG and the RAW's
+    /// sidecar (user decision, task 23).
     private func metadataWriteItem(for photo: PhotoAsset) -> MetadataWriteItem {
-        MetadataWriteItem(path: photo.displayPath, rating: photo.rating, keywords: photo.tags.map(\.fullName))
+        MetadataWriteItem(path: photo.displayPath, rating: photo.rating, keywords: photo.tags.map(\.fullName),
+                          pairedRAWPath: photo.hasRawPair ? photo.rawPath : nil)
     }
 
     /// Hands the writes to the serial `MetadataWriter`, which writes them off the main thread,
-    /// in call order, keeping only the latest per file. Returns immediately.
+    /// in call order, keeping only the latest per file (a pair's JPG and sidecar count as two files).
+    /// Returns immediately.
     private func writeMetadataInBackground(_ items: [MetadataWriteItem]) {
         guard !items.isEmpty else { return }
         MetadataWriter.shared.enqueue(items)

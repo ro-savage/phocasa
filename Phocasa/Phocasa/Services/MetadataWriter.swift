@@ -1,12 +1,28 @@
 import Foundation
 import os
 
-/// One rating and keyword write-back. `path` is the photo's file: a JPG (or another standard image),
+/// One photo's rating and keyword write-back. `path` is the photo's file: a JPG (or another standard image),
 /// which gets the values embedded, or a RAW file, whose `.xmp` sidecar gets them.
 struct MetadataWriteItem: Sendable, Equatable {
     let path: String
     let rating: Int
     let keywords: [String]
+    /// For a JPG+RAW pair, the RAW file (`path` is then the JPG). Its `.xmp` sidecar gets the same rating and
+    /// keywords, so the two files never disagree.
+    let pairedRAWPath: String?
+
+    init(path: String, rating: Int, keywords: [String], pairedRAWPath: String? = nil) {
+        self.path = path
+        self.rating = rating
+        self.keywords = keywords
+        self.pairedRAWPath = pairedRAWPath
+    }
+
+    /// The files this item writes, in order: `path`, then the paired RAW (through its sidecar).
+    var paths: [String] {
+        guard let raw = pairedRAWPath, !raw.isEmpty, raw != path else { return [path] }
+        return [path, raw]
+    }
 }
 
 /// The file operations `MetadataWriter` performs. `MetadataService` is the real one; tests inject a fake.
@@ -98,8 +114,14 @@ actor MetadataWriter {
     // MARK: - API
 
     /// Queues rating and keyword writes. Returns immediately.
+    ///
+    /// An item for a JPG+RAW pair becomes two writes, the JPG and then the RAW's sidecar. Each is a path of
+    /// its own here, so both are coalesced and ordered like any other write, and the sidecar write stays
+    /// serialised with that RAW's edit-parameter writes.
     nonisolated func enqueue(_ items: [MetadataWriteItem]) {
-        submit(items.map { Submission(path: $0.path, operation: .metadata(rating: $0.rating, keywords: $0.keywords)) })
+        submit(items.flatMap { item in
+            item.paths.map { Submission(path: $0, operation: .metadata(rating: item.rating, keywords: item.keywords)) }
+        })
     }
 
     /// RAW edit parameters go through the same queue, so they can't race rating/keyword writes to the same sidecar.

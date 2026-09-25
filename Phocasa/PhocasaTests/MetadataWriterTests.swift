@@ -341,6 +341,69 @@ final class MetadataWriterTests: XCTestCase {
         XCTAssertEqual(fake.calls, [])
     }
 
+    // MARK: - JPG+RAW pairs (task 23)
+
+    func testPairItemWritesTheJPGThenTheRAWSidecar() async {
+        let fake = RecordingMetadataService()
+        let writer = MetadataWriter(writer: fake)
+
+        writer.enqueue([MetadataWriteItem(path: "p.jpg", rating: 3, keywords: ["k"], pairedRAWPath: "p.arw")])
+        await writer.flush()
+
+        XCTAssertEqual(fake.calls, [
+            .metadata(path: "p.jpg", rating: 3, keywords: ["k"]),
+            .metadata(path: "p.arw", rating: 3, keywords: ["k"]),
+        ])
+    }
+
+    func testPairWritesCoalescePerFile() async {
+        let fake = RecordingMetadataService()
+        let writer = MetadataWriter(writer: fake)
+        let gate = await startBlockedWrite(writer, fake)
+
+        for rating in 1...5 {
+            writer.enqueue([MetadataWriteItem(path: "p.jpg", rating: rating, keywords: [], pairedRAWPath: "p.arw")])
+        }
+        gate.signal()
+        await writer.flush()
+
+        XCTAssertEqual(Array(fake.calls.dropFirst()), [
+            .metadata(path: "p.jpg", rating: 5, keywords: []),
+            .metadata(path: "p.arw", rating: 5, keywords: []),
+        ])
+    }
+
+    func testPairSidecarWriteAndRAWEditsKeepTheirOrder() async {
+        let fake = RecordingMetadataService()
+        let writer = MetadataWriter(writer: fake)
+        let gate = await startBlockedWrite(writer, fake)
+
+        writer.enqueue([MetadataWriteItem(path: "p.jpg", rating: 2, keywords: [], pairedRAWPath: "p.arw")])
+        writer.enqueueEditParameters(EditParameters(exposure: 1), forRAWAt: "p.arw")
+        gate.signal()
+        await writer.flush()
+
+        XCTAssertEqual(fake.calls.filter { $0.path == "p.arw" }, [
+            .metadata(path: "p.arw", rating: 2, keywords: []),
+            .editParameters(path: "p.arw", exposure: 1),
+        ])
+        XCTAssertEqual(fake.peakConcurrency, 1)
+    }
+
+    func testItemsWithoutAPairWriteOneFile() async {
+        let fake = RecordingMetadataService()
+        let writer = MetadataWriter(writer: fake)
+
+        writer.enqueue([
+            MetadataWriteItem(path: "a.jpg", rating: 1, keywords: []),
+            MetadataWriteItem(path: "b.arw", rating: 2, keywords: [], pairedRAWPath: "b.arw"),
+            MetadataWriteItem(path: "c.jpg", rating: 3, keywords: [], pairedRAWPath: ""),
+        ])
+        await writer.flush()
+
+        XCTAssertEqual(fake.calls.map(\.path), ["a.jpg", "b.arw", "c.jpg"])
+    }
+
     // MARK: - Real files (MetadataService)
 
     func testRealWritesEndWithLatestRating() async throws {
