@@ -763,6 +763,41 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(Set(vm2.library.allPhotos.map(\.fileName)), ["a", "b", "c", "pair", "d", "rawonly"])
     }
 
+    /// `LibrarySnapshot` builds, off the main actor, what `loadExistingData()` builds on it: the same order, the same
+    /// facts (`PhotoFacts(_:tags:)`), the same counts, and the rows `StoredPhoto.fetchAll` reads.
+    func testSnapshotReadsWhatAFullLoadBuilds() async throws {
+        let (_, storeURL) = try await importedLibrary()
+        let container = try makeContainer(storeURL: storeURL)
+        let library = LibraryStore()
+        library.modelContext = container.mainContext
+        for newestFirst in [true, false] {
+            library.sort = LibrarySort(newestFirst: newestFirst)
+            library.loadExistingData()
+            let sort = library.sort
+            let snapshot = await Task.detached { LibrarySnapshot.read(from: container, sort: sort) }.value
+            let stored = await StoredPhoto.fetchAll(in: container)
+
+            XCTAssertEqual(snapshot.library.ids, library.allPhotos.map(\.persistentModelID))
+            XCTAssertEqual(snapshot.bin.ids, library.binPhotos.map(\.persistentModelID))
+            XCTAssertEqual(snapshot.library.facts.map(\.id), library.allFacts.map(\.id))
+            // The facts from the snapshot equal the ones built from each model on the main actor.
+            for (facts, photo) in zip(snapshot.library.facts + snapshot.bin.facts, library.allPhotos + library.binPhotos) {
+                let expected = PhotoFacts(photo)
+                XCTAssertEqual(facts.rating, expected.rating, photo.fileName)
+                XCTAssertEqual(facts.hasJPG, expected.hasJPG, photo.fileName)
+                XCTAssertEqual(facts.hasRAW, expected.hasRAW, photo.fileName)
+                XCTAssertEqual(facts.tagIDs, expected.tagIDs, photo.fileName)
+                XCTAssertEqual(facts.tagCategories, expected.tagCategories, photo.fileName)
+                // Tag lines in either order (a photo's tags have none); see `assertMatchesFreshLoad`.
+                XCTAssertEqual(Set(facts.searchKey.split(separator: "\n")), Set(expected.searchKey.split(separator: "\n")),
+                               photo.fileName)
+                XCTAssertEqual(facts.searchKey.split(separator: "\n").first, expected.searchKey.split(separator: "\n").first)
+            }
+            XCTAssertEqual(snapshot.libraryCounts, library.libraryCounts)
+            XCTAssertEqual(snapshot.storedRows.sorted { $0.key < $1.key }, stored.sorted { $0.key < $1.key })
+        }
+    }
+
     /// "Move to Bin" survives a relaunch that loads in the background too.
     func testMoveToBinSurvivesARelaunchThatLoadsInTheBackground() async throws {
         let (_, storeURL) = try await importedLibrary()

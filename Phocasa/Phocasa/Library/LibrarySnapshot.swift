@@ -58,8 +58,8 @@ struct LibrarySnapshot: Sendable {
         return list
     }
 
-    /// `PhotoFacts(_:tags:)`, off the main actor: the same fields, built the same way (`LibrarySnapshotTests` compares
-    /// the two).
+    /// `PhotoFacts(_:tags:)`, off the main actor: the same fields, built the same way
+    /// (`ScanTests.testSnapshotReadsWhatAFullLoadBuilds` compares the two).
     private static func facts(id: UUID, fileName: String, rating: Int, jpgPath: String?, rawPath: String?, tags: [Tag],
                               tagFacts: inout [PersistentIdentifier: SnapshotTagFacts]) -> PhotoFacts {
         var tagIDs = Set<UUID>()
