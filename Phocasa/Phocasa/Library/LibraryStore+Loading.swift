@@ -14,7 +14,7 @@ extension LibraryStore {
         /// Launch loads a store with more photos than this in the background (`loadInBackground()`). A smaller one
         /// loads at once, in about a frame at most (~33 µs a photo).
         var backgroundLoadThreshold = 500
-        /// Rows the background load fetches per main-actor turn: 9–12 ms each (measured, 10k library, while the
+        /// Rows the background load fetches per main-actor turn: 10–14 ms each (measured, 10k library, while the
         /// snapshot is read beside it), so a turn stays within a frame.
         var pageSize = 400
         /// What the last background load did. For tests and benchmarks.
@@ -85,7 +85,7 @@ extension LibraryStore {
     /// - Background contexts read the order, the facts, the counts and the stored rows (`LibrarySnapshot`).
     /// - Meanwhile the main actor fetches every row as a model of its own context, `loading.pageSize` rows per turn:
     ///   the grid needs the models, and that fetch (about 23 µs a row) can't leave the main actor. Then the tags, and
-    ///   the models in the snapshot's order, a turn at a time. No turn takes much longer than one page (~12 ms).
+    ///   the models in the snapshot's order, a turn at a time. No turn takes longer than about one page (≤ 14 ms).
     /// - Last, in one turn, the library is shown whole.
     ///
     /// Dropped if a full load has run since `generation` (the value of `loading.generation` when the launch asked for

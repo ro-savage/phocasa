@@ -26,8 +26,8 @@ struct LibrarySnapshot: Sendable {
     /// Every row as the launch rescan compares it with the disk (what `StoredPhoto.fetchAll(in:)` reads).
     var storedRows: [StoredPhoto] = []
 
-    /// Rows are read in this many unordered parts, alongside the ordered fetch. Measured at 10k: 2 parts read the
-    /// snapshot in ~230 ms against ~375 ms for one context doing it all (3 parts gain nothing more).
+    /// Rows are read in this many unordered parts, alongside the ordered fetch. Measured at 10k (fresh container): 2
+    /// parts read the snapshot in 272–286 ms against 381–397 ms for one context doing it all; 3 gain nothing more.
     private static let parallelParts = 2
 
     /// `read(from:sort:)` on a global queue.
