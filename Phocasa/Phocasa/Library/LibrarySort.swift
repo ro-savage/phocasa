@@ -214,6 +214,42 @@ struct LibrarySort: Equatable, Sendable {
         return (mergedPhotos, mergedFacts)
     }
 
+    // MARK: - Re-ordering after keys changed
+
+    /// Each photo's place in the order oldest first (0 is the oldest), from plain values, so it can be planned off the
+    /// main actor. Equal keys keep their order in `keys`.
+    static func ranks(of keys: [(id: UUID, key: Key)]) -> [UUID: Int] {
+        let order = keys.indices.sorted { a, b in
+            keys[a].key != keys[b].key ? keys[a].key < keys[b].key : a < b
+        }
+        var ranks = [UUID: Int](minimumCapacity: order.count)
+        for (rank, index) in order.enumerated() { ranks[keys[index].id] = rank }
+        return ranks
+    }
+
+    /// `photos` (with its facts) put in this order by `ranks(of:)`, reading no model: each ranked photo goes to its
+    /// rank's place. Photos without a rank (added since the ranks were planned) are then merged in by key.
+    func reorder(_ photos: [PhotoAsset], _ facts: [PhotoFacts], ranks: [UUID: Int]) -> ([PhotoAsset], [PhotoFacts]) {
+        var slots = [Int](repeating: -1, count: ranks.count)
+        var unranked: [(photo: PhotoAsset, facts: PhotoFacts)] = []
+        for index in facts.indices {
+            if let rank = ranks[facts[index].id] {
+                slots[newestFirst ? ranks.count - 1 - rank : rank] = index
+            } else {
+                unranked.append((photos[index], facts[index]))
+            }
+        }
+        var orderedPhotos: [PhotoAsset] = []
+        var orderedFacts: [PhotoFacts] = []
+        orderedPhotos.reserveCapacity(photos.count)
+        orderedFacts.reserveCapacity(facts.count)
+        for index in slots where index >= 0 {
+            orderedPhotos.append(photos[index])
+            orderedFacts.append(facts[index])
+        }
+        return merge(unranked, into: orderedPhotos, orderedFacts)
+    }
+
     // MARK: - Direction
 
     /// Switches between newest and oldest first. Lists kept in the old order are put in the new one with

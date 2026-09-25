@@ -167,6 +167,36 @@ final class CaptureDateOrderTests: LibraryTestCase {
         }
     }
 
+    // MARK: - Re-ordering after capture dates change
+
+    /// `ranks(of:)` plans the order from plain values; `reorder` places ranked photos by rank, reading no model, and
+    /// merges in photos the plan didn't know by key. The result equals a fresh fetch, both ways.
+    func testReorderByRanksMatchesAFreshFetch() {
+        var photos: [PhotoAsset] = []
+        for i in 0..<12 { photos.append(insert("p\(i)", captured: nil, created: TimeInterval(1000 + i))) }
+        library.loadExistingData()
+        // Capture dates arrive for most photos (reversing their order), and two photos are added after the plan.
+        var newDates: [UUID: Date] = [:]
+        for (i, photo) in photos.enumerated() where i % 5 != 0 { newDates[photo.id] = date(TimeInterval(500 - i)) }
+        let keys = photos.map { (id: $0.id, key: LibrarySort.key(captureDate: newDates[$0.id], creationDate: $0.creationDate)) }
+        let ranks = LibrarySort.ranks(of: keys)
+        for photo in photos { photo.captureDate = newDates[photo.id] }
+        let late = [insert("late1", captured: 495, created: 1), insert("late2", captured: nil, created: 5000)]
+
+        for newestFirst in [true, false] {
+            let sort = LibrarySort(newestFirst: newestFirst)
+            let listed = photos + late
+            let (ordered, orderedFacts) = sort.reorder(listed, listed.map { PhotoFacts($0) }, ranks: ranks)
+            XCTAssertEqual(names(ordered), names(sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)),
+                           "newestFirst \(newestFirst)")
+            XCTAssertEqual(orderedFacts.map(\.id), ids(ordered))
+            // A list holding only some of the ranked photos (the bin) keeps just those.
+            let some = Array(photos.prefix(4))
+            let (subset, _) = sort.reorder(some, some.map { PhotoFacts($0) }, ranks: ranks)
+            XCTAssertEqual(names(subset), names(ordered.filter { photo in some.contains { $0 === photo } }))
+        }
+    }
+
     // MARK: - Bin
 
     func testMovingToTheBinAndRestoringKeepCaptureOrder() {

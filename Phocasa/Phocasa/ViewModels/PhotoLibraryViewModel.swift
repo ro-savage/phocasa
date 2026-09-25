@@ -42,6 +42,7 @@ final class PhotoLibraryViewModel {
     /// launch goes after it here (`await library.waitForScans()` waits for that rescan).
     func setModelContext(_ context: ModelContext) {
         library.open(context)
+        library.backfillCaptureDatesAfterScans()
         loadPresets()
     }
 
