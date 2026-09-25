@@ -282,6 +282,28 @@ final class ThumbnailDiskCacheTests: XCTestCase {
         XCTAssertEqual(cachedFiles().count, 2)
     }
 
+    func testStoresAreDroppedWhileTooManyBytesAreWaiting() throws {
+        // Pending stores hold decoded images; a backlog must not grow into a second, unbounded memory cache.
+        let big = try image(1024, 768)
+        let imageBytes = big.bytesPerRow * big.height
+        let cache = ThumbnailDiskCache(directory: cacheDir, maxPendingBytes: imageBytes * 2)
+
+        for i in 0..<50 {
+            cache.store(big, for: key("/photos/\(i).jpg"))
+        }
+        cache.waitForPendingWork()
+
+        let stored = cachedFiles().count
+        XCTAssertGreaterThanOrEqual(stored, 1)
+        XCTAssertLessThan(stored, 50, "stores beyond the pending-bytes limit are dropped, not queued")
+
+        // Once the backlog has drained, stores are accepted again.
+        let later = key("/photos/later.jpg")
+        cache.store(big, for: later)
+        cache.waitForPendingWork()
+        XCTAssertNotNil(cache.image(for: later))
+    }
+
     // MARK: - Removal
 
     func testRemoveAllForPathRemovesEveryBucket() throws {
@@ -632,6 +654,22 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
         tempDir.appendingPathComponent("cache-\(UUID().uuidString)", isDirectory: true)
     }
 
+    /// Fills `directory` with every path's thumbnail at `size`, decoding concurrently. A store can be dropped while
+    /// the disk queue is backed up, so passes repeat until a fresh loader finds everything on disk.
+    private func populate(_ directory: URL, paths: [String], size: CGFloat) async {
+        for _ in 0..<5 {
+            let loader = ImageLoader(diskCache: ThumbnailDiskCache(directory: directory))
+            await withTaskGroup(of: Void.self) { group in
+                for path in paths {
+                    group.addTask { _ = await loader.loadThumbnail(for: path, maxSize: size) }
+                }
+            }
+            loader.diskCache?.waitForPendingWork()
+            if loader.originalDecodeCount == 0 { return }
+        }
+        XCTFail("the disk cache didn't fill up")
+    }
+
     /// `count` 6000×4000 JPEGs with photo-like entropy (a gradient under tiled noise), EXIF orientation 6.
     private func makeSources(count: Int) throws -> [String] {
         let width = 6000, height = 4000, tile = 512
@@ -668,12 +706,8 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
     func testWarmDiskVsColdDecode() async throws {
         let paths = try makeSources(count: 100)
         let directory = newCacheDirectory()
-        // Populate the disk cache; this also brings the originals into the page cache for the cold runs.
-        let populate = ImageLoader(diskCache: ThumbnailDiskCache(directory: directory))
-        for path in paths {
-            _ = await populate.loadThumbnail(for: path, maxSize: 512)
-        }
-        populate.diskCache?.waitForPendingWork()
+        // This also brings the originals into the page cache for the cold runs.
+        await populate(directory, paths: paths, size: 512)
 
         var cold: [Double] = [], warm: [Double] = []
         let disk = ThumbnailDiskCache(directory: directory)
@@ -705,13 +739,7 @@ final class ThumbnailDiskCacheBenchmarks: XCTestCase {
     func testFastScrollColdAndRelaunch() async throws {
         let paths = try makeSources(count: 200)
         let warmDirectory = newCacheDirectory()
-        let populate = ImageLoader(diskCache: ThumbnailDiskCache(directory: warmDirectory))
-        await withTaskGroup(of: Void.self) { group in
-            for path in paths {
-                group.addTask { _ = await populate.loadThumbnail(for: path, maxSize: 380) }
-            }
-        }
-        populate.diskCache?.waitForPendingWork()
+        await populate(warmDirectory, paths: paths, size: 380)
 
         var last20: [[Double]] = [[], [], []], all: [[Double]] = [[], [], []]
         for run in 0..<5 {

@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 /// - **Staleness:** the file name carries the photo's size and modification date, so a changed photo misses.
 /// - **Reads** (`image(for:)`) are synchronous, on the caller's thread: the thumbnail scheduler's workers.
 /// - **Writes** (encoding, stores, removals, LRU touches, trimming) run in order on one private utility queue.
+///   Queued stores hold decoded images, so a store is dropped while more than `maxPendingBytes` are waiting.
 /// - **LRU:** a hit sets the cached file's modification date to now. Every `trimInterval` stores, and on
 ///   `trimIfNeeded()`, the oldest files are deleted once the total passes `byteLimit`, down to 90% of it.
 /// - **Outside deletion:** someone may empty the folder at any time (the user clearing `~/Library/Caches`). Anything
@@ -59,22 +60,27 @@ final class ThumbnailDiskCache: @unchecked Sendable {
     let byteLimit: Int
     /// Stores between automatic trims.
     let trimInterval: Int
+    /// Decoded bytes that queued stores may hold before new stores are dropped.
+    let maxPendingBytes: Int
 
     private let queue = DispatchQueue(label: "com.phocasa.thumbnail-disk-cache", qos: .utility)
 
-    /// Paths with a queued `removeAll(forPath:)`, and how many. Reads of them miss until the removal has run.
     private let lock = NSLock()
+    /// Paths with a queued `removeAll(forPath:)`, and how many. Reads of them miss until the removal has run.
     private var pendingRemovals: [String: Int] = [:]
+    /// Decoded bytes held by queued stores.
+    private var pendingStoreBytes = 0
 
     // Only touched on `queue`.
     /// Bytes on disk, from the last scan plus what has been written and deleted since. nil until the first scan.
     private var knownBytes: Int?
     private var storesSinceTrim = 0
 
-    init(directory: URL, byteLimit: Int = 1 << 30, trimInterval: Int = 100) {
+    init(directory: URL, byteLimit: Int = 1 << 30, trimInterval: Int = 100, maxPendingBytes: Int = 64 << 20) {
         self.directory = directory
         self.byteLimit = byteLimit
         self.trimInterval = max(1, trimInterval)
+        self.maxPendingBytes = maxPendingBytes
     }
 
     // MARK: - API
@@ -96,9 +102,19 @@ final class ThumbnailDiskCache: @unchecked Sendable {
         return image
     }
 
-    /// Encodes `image` as a JPEG and writes it on the utility queue. Images with transparency aren't stored.
+    /// Encodes `image` as a JPEG and writes it on the utility queue. Images with transparency aren't stored, and
+    /// neither is anything while the queue is backed up (the thumbnail is simply stored the next time it's decoded).
     func store(_ image: CGImage, for key: Key) {
+        let bytes = image.bytesPerRow * image.height
+        let accepted = lock.withLock {
+            // One store is always allowed, however large.
+            guard pendingStoreBytes == 0 || pendingStoreBytes + bytes <= maxPendingBytes else { return false }
+            pendingStoreBytes += bytes
+            return true
+        }
+        guard accepted else { return }
         queue.async { [self] in
+            defer { lock.withLock { pendingStoreBytes -= bytes } }
             guard Self.isOpaque(image), let data = Self.encodeJPEG(image) else { return }
             write(data, for: key)
         }
