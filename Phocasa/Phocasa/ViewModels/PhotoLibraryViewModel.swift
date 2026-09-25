@@ -70,6 +70,7 @@ final class PhotoLibraryViewModel {
     var editingRAW: Bool = false
     var editParameters: EditParameters = EditParameters()
     var editedPreviewImage: NSImage?
+    var fullResEditImage: NSImage?
     var showOriginal: Bool = false
     var showSideBySide: Bool = false
     var showJPGComparison: Bool = false
@@ -101,6 +102,7 @@ final class PhotoLibraryViewModel {
     private var availablePhotoIDs: Set<UUID> = []
     private var needsAvailabilityCheck = true
     private var previewTask: Task<Void, Never>?
+    private var fullResRenderTask: Task<Void, Never>?
 
     func setModelContext(_ context: ModelContext) {
         self.modelContext = context
@@ -978,6 +980,8 @@ final class PhotoLibraryViewModel {
         }
         isEditing = false
         editedPreviewImage = nil
+        fullResEditImage = nil
+        fullResRenderTask?.cancel()
         showOriginal = false
         showSideBySide = false
         showJPGComparison = false
@@ -1045,6 +1049,8 @@ final class PhotoLibraryViewModel {
         guard isEditing, let photo = selectedDetailPhoto else { return }
 
         previewTask?.cancel()
+        fullResRenderTask?.cancel()
+        fullResEditImage = nil
         renderGeneration += 1
         let generation = renderGeneration
         let params = editParameters
@@ -1068,6 +1074,26 @@ final class PhotoLibraryViewModel {
 
             if renderGeneration == generation {
                 editedPreviewImage = result
+                renderFullResEdit(url: url, params: params, isRAW: isRAW, generation: generation)
+            }
+        }
+    }
+
+    private func renderFullResEdit(url: URL, params: EditParameters, isRAW: Bool, generation: Int) {
+        fullResRenderTask?.cancel()
+        fullResRenderTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, renderGeneration == generation else { return }
+
+            let result: NSImage?
+            if isRAW {
+                result = await ImageEditingService.shared.processRAW(url: url, parameters: params)
+            } else {
+                result = await ImageEditingService.shared.processStandard(url: url, parameters: params)
+            }
+
+            if renderGeneration == generation {
+                fullResEditImage = result
             }
         }
     }
@@ -1161,6 +1187,7 @@ final class PhotoLibraryViewModel {
                 editParameters = EditParameters()
                 try? modelContext?.save()
                 editedPreviewImage = nil
+                fullResEditImage = nil
             }
         }
     }

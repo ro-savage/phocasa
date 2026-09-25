@@ -8,17 +8,26 @@ struct PhotoGridView: View {
     }
 
     var body: some View {
-        ScrollViewReader { scrollProxy in
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 8) {
-                    ForEach(viewModel.photos, id: \.id) { photo in
-                        PhotoGridItemView(
-                            photo: photo,
-                            isSelected: viewModel.selectedPhotos.contains(photo.id),
-                            onRate: { rating in
-                                viewModel.setRating(rating, for: photo)
-                            }
-                        )
+        GeometryReader { geometry in
+            let availableWidth = geometry.size.width - 32 // ScrollView padding
+            let spacing: CGFloat = 8
+            let cols = CGFloat(viewModel.gridColumns)
+            let cellWidth = (availableWidth - spacing * (cols - 1)) / cols
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            let thumbSize = max(300, cellWidth * scale)
+
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        ForEach(viewModel.photos, id: \.id) { photo in
+                            PhotoGridItemView(
+                                photo: photo,
+                                isSelected: viewModel.selectedPhotos.contains(photo.id),
+                                thumbnailSize: thumbSize,
+                                onRate: { rating in
+                                    viewModel.setRating(rating, for: photo)
+                                }
+                            )
                         .id(photo.id)
                         .onTapGesture(count: 2) {
                             viewModel.openDetail(for: photo)
@@ -47,6 +56,7 @@ struct PhotoGridView: View {
                     }
                 }
             }
+        }
         }
         .sheet(isPresented: $viewModel.showGridTagEditor) {
             TagEditorView(viewModel: viewModel, photo: viewModel.tagEditorTarget)

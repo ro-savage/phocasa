@@ -105,7 +105,7 @@ struct PhotoDetailView: View {
             return originalImage ?? displayedImage
         }
         if viewModel.isEditing {
-            return viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage
+            return viewModel.fullResEditImage ?? viewModel.editedPreviewImage ?? renderedEditImage ?? displayedImage
         }
         return renderedEditImage ?? displayedImage
     }

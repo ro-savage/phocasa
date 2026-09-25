@@ -12,7 +12,9 @@ final class ImageLoader: @unchecked Sendable {
     }
 
     func loadThumbnail(for path: String, maxSize: CGFloat = 300) async -> NSImage? {
-        let cacheKey = path as NSString
+        // Bucket the size to nearest 100 to avoid excessive cache fragmentation
+        let sizeBucket = Int(maxSize / 100) * 100
+        let cacheKey = "\(path)_\(sizeBucket)" as NSString
         if let cached = thumbnailCache.object(forKey: cacheKey) {
             return cached
         }

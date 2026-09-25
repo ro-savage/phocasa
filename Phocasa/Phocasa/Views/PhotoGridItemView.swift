@@ -3,6 +3,7 @@ import SwiftUI
 struct PhotoGridItemView: View {
     let photo: PhotoAsset
     let isSelected: Bool
+    let thumbnailSize: CGFloat
     let onRate: (Int) -> Void
 
     @State private var thumbnail: NSImage?
@@ -64,21 +65,16 @@ struct PhotoGridItemView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
         )
-        .task(id: photo.displayPath) {
+        .task(id: "\(photo.displayPath)_\(Int(thumbnailSize))") {
             await loadThumbnail()
         }
     }
 
     private func loadThumbnail() async {
-        if let data = photo.thumbnailData, let img = NSImage(data: data) {
-            thumbnail = img
-            return
-        }
-
         let path = photo.displayPath
         guard !path.isEmpty else { return }
 
-        if let img = await ImageLoader.shared.loadThumbnail(for: path) {
+        if let img = await ImageLoader.shared.loadThumbnail(for: path, maxSize: thumbnailSize) {
             thumbnail = img
         }
     }
