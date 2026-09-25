@@ -71,27 +71,8 @@ struct ContentView: View {
             }
     }
 
-    @ViewBuilder
     private var mainContent: some View {
-        if viewModel.showingDetail, let photo = viewModel.selectedDetailPhoto {
-            HStack(spacing: 0) {
-                PhotoDetailView(viewModel: viewModel, photo: photo)
-                    .frame(minWidth: 600, minHeight: 600)
-
-                if let session = viewModel.editSession {
-                    Divider()
-                    EditSidebarView(session: session, viewModel: viewModel)
-                }
-            }
-        } else {
-            NavigationSplitView {
-                SidebarView(library: viewModel.library)
-                    .frame(minWidth: 200)
-            } detail: {
-                PhotoGridView(viewModel: viewModel)
-                    .frame(minWidth: 400, minHeight: 300)
-            }
-        }
+        MainContentView(viewModel: viewModel)
     }
 
     private func handleKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {

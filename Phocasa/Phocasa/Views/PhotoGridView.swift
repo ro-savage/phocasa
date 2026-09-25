@@ -2,6 +2,8 @@ import SwiftUI
 
 struct PhotoGridView: View {
     @Bindable var viewModel: PhotoLibraryViewModel
+    /// The grid is hidden under the detail view: its cells start no thumbnail loads.
+    var thumbnailsPaused = false
     @Environment(\.displayScale) private var displayScale
 
     nonisolated private static let spacing: CGFloat = 8
@@ -45,7 +47,8 @@ struct PhotoGridView: View {
                                 },
                                 onOpen: {
                                     viewModel.openDetail(for: photo)
-                                }
+                                },
+                                thumbnailsPaused: thumbnailsPaused
                             )
                         .id(photo.id)
                         .contextMenu {
