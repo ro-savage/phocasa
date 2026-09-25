@@ -258,18 +258,19 @@ final class SavedEditState {
     }
 
     /// `render` is drawn with more device pixels than it has. Zoomed in: render it natively. At fit (the viewport
-    /// grew): render it to fill `viewport`, if the one on screen doesn't.
+    /// grew): render it to fill `viewport` (natively once that needs the photo's full resolution), if the one on
+    /// screen doesn't.
     func needsMorePixels(for photo: PhotoAsset, zoomedIn: Bool, fitting viewport: CGSize?) {
         guard let current = render, let fitted = current.fittedMaxSize else { return }   // native already
         let target: CGSize?
         if zoomedIn {
             target = nil
         } else {
-            guard let viewport, let source = current.sourceSize,
-                  let wanted = EditRenderSize.fitMaxSize(native: source, parameters: current.key.parameters,
-                                                         viewport: viewport) else { return }
+            guard let viewport, let source = current.sourceSize else { return }
+            // Nil: the viewport needs the photo's full resolution.
+            let wanted = EditRenderSize.fitMaxSize(native: source, parameters: current.key.parameters, viewport: viewport)
             guard !EditRenderSize.covers(fitted, wanted) else { return }
-            target = viewport
+            target = wanted == nil ? nil : viewport
         }
         if let upgrade, upgrade.target == target { return }
         generation += 1

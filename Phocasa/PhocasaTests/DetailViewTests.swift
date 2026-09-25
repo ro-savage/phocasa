@@ -526,6 +526,18 @@ final class DetailEditRenderSizeTests: XCTestCase {
         XCTAssertEqual(pixelSize(refit?.image), CGSize(width: 1800, height: 1200))
     }
 
+    /// The viewport grew past the photo's own size: the fitted render gives way to the native one.
+    func testSavedEditStateRendersNativeWhenTheViewportOutgrowsThePhoto() async throws {
+        let photo = try insertPhoto(savedEdit: exposure(1))
+        let state = SavedEditState()
+        await state.resolve(for: photo, fitting: CGSize(width: 1200, height: 1000), reusing: nil)
+
+        state.needsMorePixels(for: photo, zoomedIn: false, fitting: CGSize(width: 3000, height: 2500))
+
+        let native = await waitFor { state.render?.fittedMaxSize == nil ? state.render : nil }
+        XCTAssertEqual(pixelSize(native?.image), CGSize(width: 2400, height: 1600))
+    }
+
     /// Navigating away drops an upgrade still running for the previous photo.
     func testSavedEditStateUpgradeDoesNotLandOnTheNextPhoto() async throws {
         let first = try insertPhoto(savedEdit: exposure(1), name: "first.jpg")
