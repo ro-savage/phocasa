@@ -572,6 +572,207 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["first", "late"])
     }
 
+    // MARK: - Launch of a big library (background load)
+
+    /// A library imported by a first launch (small, so it loads at once): tagged, rated, uncategorised and non-ASCII
+    /// tags, a JPG+RAW pair, a RAW-only photo, distinct dates, one photo in the bin. Returns its folder and store, for
+    /// a relaunch.
+    private func importedLibrary() async throws -> (photos: URL, storeURL: URL) {
+        let photos = try makeTempDir("photos")
+        let files: [(String, Int?, [String])] = [
+            ("a.jpg", 3, ["people:Ann", "Été"]), ("b.jpg", nil, ["places:home"]), ("c.jpg", nil, []),
+            ("pair.jpg", 1, ["people:Bo"]), ("d.jpg", 5, ["people:Bo", "places:away"]), ("e.jpg", nil, []),
+        ]
+        for (day, file) in files.enumerated() {
+            try setCreated(try makeJPEG(file.0, in: photos, rating: file.1, keywords: file.2), Double(day + 1) * 86_400)
+        }
+        for name in ["pair.arw", "rawonly.arw"] {
+            let url = photos.appendingPathComponent(name)
+            try Data("not a real raw".utf8).write(to: url)
+            try setCreated(url, name == "pair.arw" ? 4 * 86_400 : 10 * 86_400)
+        }
+        let storeURL = try makeTempDir("store").appendingPathComponent("scan.store")
+        let context = try makeContainer(storeURL: storeURL).mainContext
+        context.insert(PhotoLibrary(rootFolderPath: photos.path))
+        try context.save()
+        let vm = PhotoLibraryViewModel()
+        vm.setModelContext(context)
+        try await waitForScan(vm)
+        XCTAssertNil(vm.library.loading.lastBackgroundLoad, "a small library loads at once")
+        XCTAssertEqual(vm.library.allPhotos.count, 7)
+        vm.deletePhoto(try XCTUnwrap(vm.library.allPhotos.first { $0.fileName == "e" }))
+        return (photos, storeURL)
+    }
+
+    /// Relaunches the store at `storeURL` as a big library: its load runs in the background, in pages of two rows.
+    private func relaunchAsBigLibrary(_ storeURL: URL) throws -> PhotoLibraryViewModel {
+        let vm = PhotoLibraryViewModel()
+        vm.library.loading.backgroundLoadThreshold = 0
+        vm.library.loading.pageSize = 2
+        vm.setModelContext(try makeContainer(storeURL: storeURL).mainContext)
+        return vm
+    }
+
+    func testRelaunchOfABigLibraryLoadsItInTheBackground() async throws {
+        let (_, storeURL) = try await importedLibrary()
+
+        let vm = try relaunchAsBigLibrary(storeURL)
+
+        // setModelContext() returned without loading...
+        XCTAssertTrue(vm.library.allPhotos.isEmpty)
+        XCTAssertTrue(vm.library.photos.isEmpty)
+        XCTAssertTrue(vm.library.isScanning, "the grid shows no empty-library message meanwhile")
+        XCTAssertEqual(vm.library.scanProgress, "Loading library...")
+        XCTAssertNotNil(vm.library.currentLibrary, "so a rescan requested now queues")
+        // ...and the load, then the launch rescan, run behind it.
+        await vm.library.waitForScans()
+        let report = try XCTUnwrap(vm.library.loading.lastBackgroundLoad)
+        XCTAssertTrue(report.applied)
+        XCTAssertGreaterThanOrEqual(report.turns, 4, "a page of two rows per turn, then the apply")
+        XCTAssertEqual(vm.library.lastScanReport?.discovered, 7, "the launch rescan ran after it")
+        XCTAssertEqual(vm.library.lastScanReport?.updated, 0)
+        XCTAssertEqual(vm.library.lastScanReport?.usedWalkReadAhead, true, "it walked the folder during the load")
+        XCTAssertEqual(vm.library.lastScanReport?.usedRowsReadAhead, true, "and took the rows the load read")
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["rawonly", "d", "pair", "c", "b", "a"])
+        XCTAssertEqual(vm.library.binPhotos.map(\.fileName), ["e"])
+        assertMatchesFreshLoad(vm, "a relaunch that loaded in the background")
+    }
+
+    /// Every main-actor turn during the load sees either no library or the whole of it: never photos from one
+    /// snapshot with counts from another, or a partial list.
+    func testBackgroundLoadNeverShowsAHalfBuiltLibrary() async throws {
+        let (_, storeURL) = try await importedLibrary()
+        struct Sample: Equatable {
+            var photos, allPhotos, allFacts, binPhotos, binCount, rated, tags, tagCounts, categories: Int
+        }
+        var samples: [Sample] = []
+        var vm: PhotoLibraryViewModel!
+        let sampler = Task { @MainActor in
+            while !Task.isCancelled {
+                if let library = vm?.library {
+                    samples.append(Sample(
+                        photos: library.photos.count, allPhotos: library.allPhotos.count,
+                        allFacts: library.allFacts.count, binPhotos: library.binPhotos.count, binCount: library.binCount,
+                        rated: library.ratingCounts.values.reduce(0, +), tags: library.allTags.count,
+                        tagCounts: library.tagCounts.count, categories: library.tagCategories.count))
+                }
+                await Task.yield()
+            }
+        }
+
+        vm = try relaunchAsBigLibrary(storeURL)
+        await vm.library.waitForScans()
+        sampler.cancel()
+        _ = await sampler.value
+
+        let empty = Sample(photos: 0, allPhotos: 0, allFacts: 0, binPhotos: 0, binCount: 0, rated: 0, tags: 0,
+                           tagCounts: 0, categories: 0)
+        let whole = Sample(photos: 6, allPhotos: 6, allFacts: 6, binPhotos: 1, binCount: 1, rated: 6, tags: 5,
+                           tagCounts: 5, categories: 2)
+        XCTAssertGreaterThan(samples.count, 3)
+        XCTAssertTrue(samples.contains(empty) && samples.contains(whole), "the sampler saw both sides of the load")
+        XCTAssertEqual(samples.filter { $0 != empty && $0 != whole }, [], "half-built states")
+    }
+
+    /// A full load while the background load runs (from `refreshAvailability()`, say) is newer, so the background
+    /// load is dropped rather than applied over it.
+    func testFullLoadDuringTheBackgroundLoadWins() async throws {
+        let (_, storeURL) = try await importedLibrary()
+        let vm = try relaunchAsBigLibrary(storeURL)
+
+        vm.loadExistingData()
+        XCTAssertEqual(vm.library.allPhotos.count, 6)
+        await vm.library.waitForScans()
+
+        XCTAssertEqual(vm.library.loading.lastBackgroundLoad?.applied, false)
+        XCTAssertEqual(vm.library.allPhotos.count, 6)
+        assertMatchesFreshLoad(vm, "a full load during the background load")
+    }
+
+    /// The sort, filters and search can change while the library loads; the loaded library follows them.
+    func testSortFilterAndSearchChangedDuringTheBackgroundLoad() async throws {
+        let (_, storeURL) = try await importedLibrary()
+        let vm = try relaunchAsBigLibrary(storeURL)
+
+        vm.library.toggleSortOrder()
+        vm.library.applyFilter(.jpgOnly)
+        vm.library.searchText = "people"
+        vm.library.applySearch()
+        await vm.library.waitForScans()
+
+        XCTAssertEqual(vm.library.loading.lastBackgroundLoad?.applied, true)
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["a", "b", "c", "pair", "d", "rawonly"])
+        XCTAssertEqual(vm.library.photos.map(\.fileName), ["a", "pair", "d"])
+        assertMatchesFreshLoad(vm, "sort, filter and search changed during the load")
+    }
+
+    /// The background load trusts the last scan, like the synchronous one: it shows photos whose files have gone,
+    /// until the launch rescan hides them.
+    func testBackgroundLoadShowsStoredPhotosThenTheRescanHidesMissingOnes() async throws {
+        let (photos, storeURL) = try await importedLibrary()
+        try FileManager.default.removeItem(at: photos.appendingPathComponent("c.jpg"))
+        var namesWhenLoaded: Set<String>?
+        let vm = PhotoLibraryViewModel()
+        vm.library.loading.backgroundLoadThreshold = 0
+        vm.library.loading.backgroundLoadDidApply = { namesWhenLoaded = Set(vm.library.allPhotos.map(\.fileName)) }
+        vm.setModelContext(try makeContainer(storeURL: storeURL).mainContext)
+        await vm.library.waitForScans()
+
+        XCTAssertEqual(namesWhenLoaded, ["a", "b", "c", "pair", "d", "rawonly"])
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["a", "b", "pair", "d", "rawonly"])
+        XCTAssertEqual(vm.library.lastScanReport?.missing, 1)
+        assertMatchesFreshLoad(vm, "the launch rescan after a background load")
+    }
+
+    /// `waitForScans()` (task 33's after-launch hook) waits for the background load, the launch rescan and a scan
+    /// queued behind them.
+    func testWaitForScansWaitsForTheBackgroundLoadAndTheScansBehindIt() async throws {
+        let (photos, storeURL) = try await importedLibrary()
+        let vm = try relaunchAsBigLibrary(storeURL)
+        try makeJPEG("late.jpg", in: photos)
+        vm.library.rescanCurrentLibrary() // queued behind the load
+
+        await vm.library.waitForScans()
+
+        XCTAssertFalse(vm.library.isScanning)
+        XCTAssertEqual(vm.library.loading.lastBackgroundLoad?.applied, true)
+        XCTAssertTrue(vm.library.allPhotos.contains { $0.fileName == "late" })
+        XCTAssertEqual(vm.library.allPhotos.count, 7)
+        XCTAssertEqual(vm.library.lastScanReport?.usedWalkReadAhead, false,
+                       "a scan requested after launch walks the folder again")
+        assertMatchesFreshLoad(vm, "after waitForScans")
+    }
+
+    /// The launch rescan uses the rows the background load read only while they are still the store's.
+    func testLaunchRescanReadsTheStoreAgainWhenItMayHaveChanged() async throws {
+        let (_, storeURL) = try await importedLibrary()
+
+        // Unsaved changes when the rescan starts (it saves them first).
+        let vm = try relaunchAsBigLibrary(storeURL)
+        vm.library.currentLibrary?.bookmarkData = Data([1])
+        await vm.library.waitForScans()
+        XCTAssertEqual(vm.library.lastScanReport?.usedWalkReadAhead, true)
+        XCTAssertEqual(vm.library.lastScanReport?.usedRowsReadAhead, false)
+        assertMatchesFreshLoad(vm, "unsaved changes at launch")
+
+        // A full load after the background load read the store.
+        let vm2 = try relaunchAsBigLibrary(storeURL)
+        vm2.library.loading.backgroundLoadDidApply = { vm2.loadExistingData() }
+        await vm2.library.waitForScans()
+        XCTAssertEqual(vm2.library.lastScanReport?.usedRowsReadAhead, false)
+        XCTAssertEqual(Set(vm2.library.allPhotos.map(\.fileName)), ["a", "b", "c", "pair", "d", "rawonly"])
+    }
+
+    /// "Move to Bin" survives a relaunch that loads in the background too.
+    func testMoveToBinSurvivesARelaunchThatLoadsInTheBackground() async throws {
+        let (_, storeURL) = try await importedLibrary()
+        let vm = try relaunchAsBigLibrary(storeURL)
+        await vm.library.waitForScans()
+
+        XCTAssertEqual(vm.library.binPhotos.map(\.fileName), ["e"])
+        XCTAssertFalse(vm.library.allPhotos.contains { $0.fileName == "e" })
+    }
+
     // MARK: - Incremental updates after scans
 
     /// A library of six photos a day apart (days 1–6), two tagged and some rated, rescanned once loaded.

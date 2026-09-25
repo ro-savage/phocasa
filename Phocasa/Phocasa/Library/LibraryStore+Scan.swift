@@ -11,6 +11,19 @@ extension LibraryStore {
         var queuedURL: URL?
         /// Total of the metadata reads in progress, while `scanProgress` shows their count.
         var metadataProgressTotal: Int?
+        /// What the launch rescan reads ahead (`readAheadForLaunchRescan()`). Any other scan request drops it.
+        var readAhead: ReadAhead?
+    }
+
+    /// What the launch rescan of a big library uses instead of reading again once the background load is done.
+    struct ReadAhead {
+        /// The folder the launch rescan scans.
+        let url: URL
+        /// Its walk, started at launch alongside the background load.
+        let walk: Task<[DiscoveredPhoto], Never>
+        /// The stored rows the background load read, and `loading.generation` once it was applied. The rescan uses
+        /// them only if nothing has loaded or changed the store since.
+        var rows: (rows: [StoredPhoto], generation: Int)?
     }
 
     // MARK: - Folder Opening
@@ -52,7 +65,8 @@ extension LibraryStore {
         }
     }
 
-    /// Returns once no scan is running or queued, the launch rescan included.
+    /// Returns once no scan is running or queued, the launch rescan included, and once a launch's background load
+    /// (`loadInBackground()`) has been applied.
     func waitForScans() async {
         while let task = scanning.task {
             await task.value
@@ -70,6 +84,9 @@ extension LibraryStore {
         var missing = 0
         /// Whether the scan ended in a full `loadExistingData()`.
         var reloaded = false
+        /// Whether the scan used the folder walk, and the stored rows, that the launch read ahead (`ReadAhead`).
+        var usedWalkReadAhead = false
+        var usedRowsReadAhead = false
         /// Time the scan spent in its synchronous main-actor sections (spec §B1, §B2).
         var mainActorTime: Duration = .zero
     }
@@ -78,22 +95,42 @@ extension LibraryStore {
     /// never holds the main actor for more than a few tens of milliseconds at a time.
     private static let scanInsertChunkSize = 256
 
-    /// Starts a scan of `url`, or queues one if a scan is running. `isScanning` is true when this returns
-    /// (`DataPathBenchmarks.waitForScan` relies on that), and stays true until every queued scan is done.
+    /// Starts a scan of `url`, or queues one if a scan (or the launch's background load) is running. `isScanning` is
+    /// true when this returns (`DataPathBenchmarks.waitForScan` relies on that), and stays true until every queued
+    /// scan is done.
     private func scanFolder(url: URL) {
         guard modelContext != nil else { return }
         isScanning = true
-        if scanning.task != nil {
-            scanning.queuedURL = url
-            return
+        scanning.queuedURL = url
+        scanning.readAhead = nil // read before this request: the scan it asks for reads again
+        if scanning.task == nil {
+            startScanQueue()
         }
-        scanProgress = "Scanning folder..."
+    }
+
+    /// With a big library the launch rescan waits for the background load, so it starts walking its folder now,
+    /// alongside the load, and takes the stored rows from the load's snapshot (`LibrarySnapshot.storedRows`): both
+    /// would otherwise be read again after the load.
+    func readAheadForLaunchRescan() {
+        guard let url = scanning.queuedURL else { return }
+        let scanner = self.scanner
+        scanning.readAhead = ReadAhead(url: url, walk: Task.detached(priority: .userInitiated) {
+            await scanner.scan(folderURL: url)
+        })
+    }
+
+    /// Runs the scan queue: first the launch's background load, when `open(_:)` passes the load generation it asked
+    /// at (`loadInBackground(unlessLoadedAfter:)`), then each queued scan until none is left.
+    func startScanQueue(loadingFirstUnlessLoadedAfter loadGeneration: Int? = nil) {
+        isScanning = true
+        scanProgress = loadGeneration == nil ? "Scanning folder..." : "Loading library..."
         scanning.task = Task { @MainActor in
-            var next: URL? = url
-            while let folder = next {
-                await self.performScan(of: folder)
-                next = self.scanning.queuedURL
+            if let loadGeneration {
+                await self.loadInBackground(unlessLoadedAfter: loadGeneration)
+            }
+            while let folder = self.scanning.queuedURL {
                 self.scanning.queuedURL = nil
+                await self.performScan(of: folder)
             }
             self.scanning.task = nil
             self.isScanning = false
@@ -112,18 +149,26 @@ extension LibraryStore {
         var sectionStart = clock.now
 
         scanProgress = "Scanning folder..."
+        let readAhead = scanning.readAhead?.url == url ? scanning.readAhead : nil
+        scanning.readAhead = nil
         // The stored rows are read through another context, which can't see unsaved changes.
-        if context.hasChanges { try? context.save() }
+        let hadChanges = context.hasChanges
+        if hadChanges { try? context.save() }
         let container = context.container
         let scanner = self.scanner
         // What the library shows now, which the end of the scan patches.
         let generation = loading.generation
         let previouslyMissing = missingPhotoIDs
+        // Rows read ahead by the launch's background load are the store as it is only if nothing has loaded or changed
+        // it since.
+        let rowsReadAhead = readAhead?.rows.flatMap { !hadChanges && $0.generation == generation ? $0.rows : nil }
+        report.usedWalkReadAhead = readAhead != nil
+        report.usedRowsReadAhead = rowsReadAhead != nil
         report.mainActorTime += clock.now - sectionStart
 
-        // Off the main actor: the store and the file system are read at the same time.
-        async let storedRows = StoredPhoto.fetchAll(in: container)
-        async let foundPhotos = scanner.scan(folderURL: url)
+        // Off the main actor: the store and the file system are read at the same time (or were read ahead).
+        async let storedRows = Self.storedRows(readAhead: rowsReadAhead, in: container)
+        async let foundPhotos = Self.walk(url, readAhead: readAhead?.walk, with: scanner)
         let stored = await storedRows
         let discovered = await foundPhotos
         var plan = await ScanPlan.make(stored: stored, discovered: discovered, previouslyMissing: previouslyMissing)
@@ -227,6 +272,19 @@ extension LibraryStore {
     /// Rows fetched per main-actor turn when a scan brings its new photos into the in-memory library: about 14 ms
     /// each (measured, 10k library), so a big import never holds the main actor for long.
     private static let scanFetchChunkSize = 500
+
+    private nonisolated static func storedRows(readAhead: [StoredPhoto]?, in container: ModelContainer) async
+        -> [StoredPhoto]
+    {
+        if let readAhead { return readAhead }
+        return await StoredPhoto.fetchAll(in: container)
+    }
+
+    private nonisolated static func walk(_ url: URL, readAhead: Task<[DiscoveredPhoto], Never>?,
+                                         with scanner: FolderScanner) async -> [DiscoveredPhoto] {
+        if let readAhead { return await readAhead.value }
+        return await scanner.scan(folderURL: url)
+    }
 
     private func showMetadataProgress(done: Int, total: Int) {
         guard scanning.metadataProgressTotal == total else { return } // that phase is over

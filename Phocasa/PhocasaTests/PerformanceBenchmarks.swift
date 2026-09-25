@@ -98,6 +98,12 @@ final class DataPathBenchmarks: XCTestCase {
         vm.library.lastScanReport.map { ms($0.mainActorTime) }
     }
 
+    /// Main-actor time of a launch's background load (task 32), over all its turns and its longest turn. To run this
+    /// harness against code without it, make this return nil: those lines are then left out.
+    private func backgroundLoadMs(_ vm: PhotoLibraryViewModel) -> (total: Double, longest: Double)? {
+        vm.library.loading.lastBackgroundLoad.map { (ms($0.mainActorTime), ms($0.longestTurn)) }
+    }
+
     private func reportIfAny(_ tag: String, _ label: String, _ samples: [Double]) {
         if !samples.isEmpty { report(tag, label, samples) }
     }
@@ -165,8 +171,15 @@ final class DataPathBenchmarks: XCTestCase {
         do {
             let c2 = try makeContainer(storeURL: storeURL)
             let vm2 = PhotoLibraryViewModel()
+            let start = clock.now
             let t = clock.measure { vm2.setModelContext(c2.mainContext) }
             print("BENCH|\(tag)|COLD setModelContext (fetch+stat+counts+tags)|ms=\(f(ms(t)))|allPhotos=\(vm2.library.allPhotos.count)")
+            // (added by task 32) The library can load after setModelContext() returns: until it is in memory.
+            await vm2.library.waitForScans()
+            print("BENCH|\(tag)|COLD setModelContext until the library is loaded (waitForScans)|ms=\(f(ms(clock.now - start)))|allPhotos=\(vm2.library.allPhotos.count)")
+            if let load = backgroundLoadMs(vm2) {
+                print("BENCH|\(tag)|COLD background load: main-actor time / longest turn|ms=\(f(load.total))|longest_ms=\(f(load.longest))")
+            }
         }
         do {
             let c3 = try makeContainer(storeURL: storeURL)
@@ -204,6 +217,7 @@ final class DataPathBenchmarks: XCTestCase {
         // --- Warm paths on the seeding context ---
         let vm = PhotoLibraryViewModel()
         vm.setModelContext(context)
+        await vm.library.waitForScans() // (added by task 32) a big library loads after setModelContext() returns
         vm.library.refreshAvailability()
         XCTAssertEqual(vm.library.allPhotos.count, n)
 
@@ -394,21 +408,34 @@ final class DataPathBenchmarks: XCTestCase {
 
         // 7v: launch on a fresh container, like opening the app: the synchronous part, then its rescan.
         var launchSync: [Double] = [], launchScan: [Double] = [], launchMainActor: [Double] = []
+        var loadMainActor: [Double] = [], loadLongest: [Double] = [], launchTotal: [Double] = [] // (added by task 32)
         for _ in 0..<3 {
             let launchContext = try makeContainer(storeURL: storeURL).mainContext
             let launchVM = PhotoLibraryViewModel()
             let start = clock.now
             launchVM.setModelContext(launchContext)
-            launchSync.append(ms(clock.now - start))
+            let sync = ms(clock.now - start)
+            launchSync.append(sync)
             try await waitForScan(launchVM)
             launchScan.append(ms(clock.now - start))
-            if let t = lastScanMainActorMs(launchVM) { launchMainActor.append(t) }
+            let scan = lastScanMainActorMs(launchVM)
+            if let scan { launchMainActor.append(scan) }
+            let load = backgroundLoadMs(launchVM)
+            if let load {
+                loadMainActor.append(load.total)
+                loadLongest.append(load.longest)
+            }
+            launchTotal.append(sync + (load?.total ?? 0) + (scan ?? 0))
             XCTAssertEqual(launchVM.library.allPhotos.count, 10_000)
             retained.append(launchVM)
         }
         report(tag, "7v launch: setModelContext() with a library, fresh container (synchronous part)", launchSync)
         report(tag, "7v launch: setModelContext() until its rescan ends (!isScanning)", launchScan)
         reportIfAny(tag, "7v launch rescan: main-actor time (scan task)", launchMainActor)
+        // (added by task 32) With a big library the load runs after setModelContext() returns, in main-actor turns.
+        reportIfAny(tag, "7v launch background load: main-actor time (all turns)", loadMainActor)
+        reportIfAny(tag, "7v launch background load: longest main-actor turn", loadLongest)
+        report(tag, "7v launch: all main-actor time (synchronous part + background load + rescan)", launchTotal)
 
         // 7w: rescan of the unchanged library, warm.
         let vm = PhotoLibraryViewModel()
