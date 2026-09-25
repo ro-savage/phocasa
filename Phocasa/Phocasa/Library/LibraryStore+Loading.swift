@@ -14,8 +14,9 @@ extension LibraryStore {
         /// Launch loads a store with more photos than this in the background (`loadInBackground()`). A smaller one
         /// loads at once, in about a frame at most (~33 µs a photo).
         var backgroundLoadThreshold = 500
-        /// Rows the background load fetches per main-actor turn: about 12 ms each (measured, 10k library).
-        var pageSize = 500
+        /// Rows the background load fetches per main-actor turn: 9–12 ms each (measured, 10k library, while the
+        /// snapshot is read beside it), so a turn stays within a frame.
+        var pageSize = 400
         /// What the last background load did. For tests and benchmarks.
         var lastBackgroundLoad: BackgroundLoadReport?
         /// Test hook: called right after a background load has been applied, before the launch rescan starts.
@@ -81,7 +82,7 @@ extension LibraryStore {
     }
 
     /// `loadExistingData()` for a big library at launch, without blocking the main actor (spec §B1).
-    /// - A background context reads the order, the facts, the counts and the stored rows (`LibrarySnapshot`).
+    /// - Background contexts read the order, the facts, the counts and the stored rows (`LibrarySnapshot`).
     /// - Meanwhile the main actor fetches every row as a model of its own context, `loading.pageSize` rows per turn:
     ///   the grid needs the models, and that fetch (about 23 µs a row) can't leave the main actor. Then the tags, and
     ///   the models in the snapshot's order, a turn at a time. No turn takes much longer than one page (~12 ms).
@@ -110,9 +111,8 @@ extension LibraryStore {
         scanProgress = "Loading library..."
         let container = context.container
         let sort = self.sort
-        let snapshotRead = Task.detached(priority: .userInitiated) {
-            LibrarySnapshot.read(from: container, sort: sort)
-        }
+        // Awaited on every path out, even when a full load ran meanwhile, so no read outlives the load.
+        async let snapshotRead = LibrarySnapshot.readInBackground(from: container, sort: sort)
         defer { loading.lastBackgroundLoad = report }
 
         // Every row as a model of this context, in no particular order (the snapshot has the order). Holding them
@@ -135,8 +135,7 @@ extension LibraryStore {
             tags = fetchTags(in: context) // ~9 ms, so a turn of its own
             loaded = await nextTurn()
         }
-        // Waited for even when a full load ran meanwhile (and has everything), so no read outlives the load.
-        let snapshot = await snapshotRead.value
+        let snapshot = await snapshotRead
         guard loaded && loading.generation == generation && modelContext === context else { return }
         turnStart = clock.now
 
