@@ -83,7 +83,7 @@
   - Existing tests that depend on the launch behaviour must pass unchanged.
   - `findOrCreateTag` stays public and behaves the same: `ViewModelTests` uses it.
 
-- [ ] **Step 6: Measure.** Run the benchmarks again. Add `7z first scan of 1k new photos: main-actor time`: time the synchronous main-actor section of `scanFolder` with a `ContinuousClock` accumulator, exposed through an internal test hook.
+- [ ] **Step 6: Measure.** **Harness caveat:** `DataPathBenchmarks.waitForScan` assumes `rescanCurrentLibrary()` sets `isScanning = true` before it returns. Keep that synchronous, or give the harness a proper way to await the scan. Otherwise `7x`, `FIRST` and `SECOND` silently measure ~0 ms. Run the benchmarks again. Add `7z first scan of 1k new photos: main-actor time`: time the synchronous main-actor section of `scanFolder` with a `ContinuousClock` accumulator, exposed through an internal test hook.
 
 - [ ] **Step 7: Full suite, warnings, results file, commit.**
 

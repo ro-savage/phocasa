@@ -51,7 +51,9 @@ DD="$TMPDIR/phocasa-dd-<task-id>"      # e.g. phocasa-dd-10
 # Build
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -configuration Debug -derivedDataPath "$DD" build 2>&1 | tail -5
 
-# Full test suite (look for "** TEST SUCCEEDED **"; count warnings with: grep -c "warning:")
+# Full test suite (look for "** TEST SUCCEEDED **"; count warnings with: grep -c "warning:").
+# After task 00 the baseline is "Executed 125 tests, with 3 tests skipped": 122 real tests + 3 gated benchmarks.
+# Existing warnings (spec §F5 + one test warning): ImageLoader.swift:52, MetadataService.swift:99, ViewModelTests.swift:753.
 $XB -project Phocasa/Phocasa.xcodeproj -scheme Phocasa -destination 'platform=macOS' -derivedDataPath "$DD" test > "$DD.test.log" 2>&1; tail -3 "$DD.test.log"
 grep -E "error:|failed \(|Executed [0-9]+ tests" "$DD.test.log" | sort -u
 
@@ -69,7 +71,7 @@ export IMAGEBENCH_DIR="$TMPDIR/phocasa-imagebench-<task-id>"
 IB="$TMPDIR/imagebench-<task-id>"
 (cd Tools/imagebench && swiftc -O -swift-version 5 imagebench.swift -o "$IB") \
   && "$IB" gen && "$IB" copies && "$IB" <orient|thumb|detail|conc|ci>
-"$IB" clean   # removes about 2.5 GB of generated test images; always run it before you finish
+"$IB" clean   # removes about 3 GB of generated test images; always run it before you finish
 ```
 
 **RAW files:** never search for, open or copy camera RAW files on this machine: they live in the user's photo
@@ -77,6 +79,12 @@ folders. `imagebench raw` runs only when `IMAGEBENCH_RAW` is set to an explicit 
 real RAW must `XCTSkip` unless `PHOCASA_TEST_RAW` (set via `TEST_RUNNER_PHOCASA_TEST_RAW`) names a file. Only the
 coordinator sets these, and only to a file the user has provided. If neither is set, skip the RAW measurement and
 say so in your results; the spec's RAW numbers stand as the reference.
+
+The user has provided a **read-only** folder of real camera files, `~/PhocasaBenchRAW` (190 JPG+ARW pairs, 16 MP,
+4912×3264). The coordinator passes its path to the tasks that need it. Treat it as read-only input: never write, rename
+or create files in it (it is `chmod a-w`), never scan it with a view model that could write metadata back, and never
+commit a test or benchmark that depends on it. If a local check must write (for example, saving RAW edits), copy at
+most one pair into your own temp directory and delete it when you're done.
 
 Running the tests launches `Phocasa.app` as the test host, and a window will flash. That's expected.
 
@@ -106,6 +114,12 @@ This is what prevents merge conflicts. You may edit only the files and regions y
 - don't edit it;
 - work around it in your own files if you can;
 - list it under **"Needs from other tasks"** in your report.
+
+### Benchmark harness
+
+`Phocasa/PhocasaTests/PerformanceBenchmarks.swift` calls many view-model APIs (listed in `results/00.md`). Whoever
+renames or removes one of them updates the harness in the same branch. Adding lines: task 10 in wave 1, task 20 in
+wave 2, task 30/31 in wave 3. Other tasks put their gated benchmarks in their own test files.
 
 ### Wave 1
 
