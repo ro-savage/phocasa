@@ -386,6 +386,23 @@ final class DataPathBenchmarks: XCTestCase {
         try await benchAsync(tag, "7y FolderScanner.scan alone", runs: 3) {
             _ = await FolderScanner().scan(folderURL: filesDir)
         }
+
+        // 8d (added by task 32): a permanent delete of one photo from the bin, which used to end in a full reload.
+        // Its files go into a temp folder, never the Trash. Last, since it shrinks the library.
+        let trash = try makeTempDir("trash\(n)")
+        vm.library.fileTrasher = FileTrasher { url in
+            try FileManager.default.moveItem(at: url, to: trash.appendingPathComponent(UUID().uuidString))
+        }
+        vm.library.applyFilter(.all)
+        let doomed = Array(vm.library.photos.prefix(6)) // 1 warm-up + 5 runs
+        for photo in doomed { vm.deletePhoto(photo) }
+        var nextDoomed = 0
+        try await benchAsync(tag, "8d confirmPermanentDelete one photo from the bin (until done)") {
+            vm.photosToDelete = [doomed[nextDoomed]]
+            nextDoomed += 1
+            await vm.confirmPermanentDelete()?.value
+        }
+        XCTAssertEqual(vm.library.binCount, 0)
     }
 
     func testBench2k() async throws { try skipUnlessBenchmarking(); try await runSuite(n: 2_000) }

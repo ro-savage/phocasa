@@ -927,6 +927,81 @@ final class ScanTests: XCTestCase {
         assertMatchesFreshLoad(vm, "a load during the scan")
     }
 
+    // MARK: - Deletes update the library in memory
+
+    /// Files a delete trashes go into a temp folder, never the user's Trash.
+    private func useTempTrash(_ vm: PhotoLibraryViewModel) throws {
+        let trash = try makeTempDir("trash")
+        vm.library.fileTrasher = FileTrasher { url in
+            try FileManager.default.moveItem(at: url, to: trash.appendingPathComponent(UUID().uuidString))
+        }
+    }
+
+    /// A permanent delete of a few photos from the bin, then of many (the patch and the merge paths): no reload.
+    func testPermanentDeletesUpdateTheLibraryInMemoryLikeAFreshLoad() async throws {
+        let photos = try makeTempDir("photos")
+        for i in 0..<14 {
+            try setCreated(try makeJPEG("p\(i).jpg", in: photos, rating: i % 4, keywords: i % 3 == 0 ? ["k:\(i % 2)"] : []),
+                           Double(i + 1) * 86_400)
+        }
+        let (vm, _, container) = try await openLibrary(at: photos)
+        try useTempTrash(vm)
+        vm.library.applyFilter(.rated(1))
+        for photo in vm.library.allPhotos.filter({ $0.rating != 0 }) { vm.deletePhoto(photo) }
+        XCTAssertEqual(vm.library.binCount, 10)
+        let generation = vm.library.loading.generation
+
+        vm.library.applyFilter(.bin)
+        vm.photosToDelete = Array(vm.library.binPhotos.prefix(2))
+        await vm.confirmPermanentDelete()?.value
+        XCTAssertEqual(vm.library.binCount, 8)
+        XCTAssertEqual(vm.library.photos.count, 8)
+        assertMatchesFreshLoad(vm, "2 photos deleted from the bin")
+
+        vm.emptyBin()
+        await vm.confirmPermanentDelete()?.value
+        XCTAssertEqual(vm.library.binCount, 0)
+        XCTAssertTrue(vm.library.photos.isEmpty)
+        XCTAssertEqual(try storedPhotos(container).count, 4)
+        XCTAssertEqual(vm.library.loading.generation, generation, "no full reload")
+        assertMatchesFreshLoad(vm, "the bin emptied")
+        vm.library.applyFilter(.all)
+        assertMatchesFreshLoad(vm, "back to the library")
+    }
+
+    /// With the RAW filter on, a delete takes the RAW off pairs (they leave the filtered grid) and sends a RAW-only
+    /// photo to the bin: no reload.
+    func testFileTypeDeleteUpdatesTheLibraryInMemoryLikeAFreshLoad() async throws {
+        let photos = try makeTempDir("photos")
+        for i in 0..<4 {
+            let jpg = try makeJPEG("pair\(i).jpg", in: photos, rating: i, keywords: ["k:\(i % 2)"])
+            try setCreated(jpg, Double(i + 1) * 86_400)
+            let raw = photos.appendingPathComponent("pair\(i).arw")
+            try Data("not a real raw".utf8).write(to: raw)
+            try setCreated(raw, Double(i + 1) * 86_400)
+        }
+        let rawOnly = photos.appendingPathComponent("solo.arw")
+        try Data("not a real raw".utf8).write(to: rawOnly)
+        let (vm, _, _) = try await openLibrary(at: photos)
+        try useTempTrash(vm)
+        vm.library.applyFilter(.rawOnly)
+        XCTAssertEqual(vm.library.photos.count, 5)
+        let generation = vm.library.loading.generation
+
+        vm.selection.selectedPhotos = Set(vm.library.photos.filter { $0.fileName != "pair0" }.map(\.id))
+        await vm.deleteSelected()?.value
+
+        XCTAssertEqual(vm.library.photos.map(\.fileName), ["pair0"])
+        XCTAssertEqual(vm.library.binPhotos.map(\.fileName), ["solo"])
+        XCTAssertEqual(vm.library.rawCount, 1)
+        XCTAssertEqual(vm.library.jpgCount, 4)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: photos.appendingPathComponent("pair1.arw").path))
+        XCTAssertEqual(vm.library.loading.generation, generation, "no full reload")
+        assertMatchesFreshLoad(vm, "a file-type delete with the RAW filter on")
+        vm.library.applyFilter(.all)
+        assertMatchesFreshLoad(vm, "then all photos")
+    }
+
     // MARK: - Scan plan (pure)
 
     private func found(_ name: String, folder: String = "/f", jpg: Bool = true, raw: Bool = false,

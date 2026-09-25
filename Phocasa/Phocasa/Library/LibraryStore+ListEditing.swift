@@ -143,6 +143,13 @@ extension LibraryStore {
         sortTagCategories()
     }
 
+    /// A file-type delete is done (`deleteFileType`): `binned` photos went to the bin, and each of `changed` lost its
+    /// JPG or its RAW, which changes its facts (and so perhaps whether a filtered grid shows it). No reload.
+    func fileTypeDeleteDidFinish(binned: [PhotoAsset], changed: [PhotoAsset]) {
+        applyFactChanges(changed)
+        relocate(binned, ids: binned.map(\.id), toBin: true)
+    }
+
     /// The photos and facts without `ids`, or nil when none of them is there.
     private func removing(
         _ ids: Set<UUID>, from photos: [PhotoAsset], _ facts: [PhotoFacts],
