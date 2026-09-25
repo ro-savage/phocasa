@@ -1,0 +1,286 @@
+import Foundation
+
+// Pure, in-memory filtering, search and sidebar counting over plain-value snapshots of photos.
+//
+// Reading a property of a SwiftData model costs about 0.8 µs, so filtering 10k models on every
+// click cost hundreds of milliseconds (spec §A1–§A2). `PhotoFacts` copies out the few values that
+// filtering, search and counting need, once per photo, and everything here works on those copies.
+
+/// The group a sidebar filter belongs to. Filters in the same group are ORed; groups are ANDed.
+enum FilterCategory: Hashable, Sendable {
+    /// `.all` and `.bin`: they choose the view, and never exclude photos.
+    case special
+    case rating
+    case fileType
+    case tag
+}
+
+enum SidebarFilter: Hashable, Sendable {
+    case all
+    case unrated
+    case rated(Int)
+    case tag(UUID)
+    case tagCategory(String)
+    case bin
+    case jpgOnly
+    case rawOnly
+
+    var category: FilterCategory {
+        switch self {
+        case .all, .bin: return .special
+        case .unrated, .rated: return .rating
+        case .jpgOnly, .rawOnly: return .fileType
+        case .tag, .tagCategory: return .tag
+        }
+    }
+
+    /// Whether this single filter accepts the photo. Special filters accept everything.
+    func matches(_ facts: PhotoFacts) -> Bool {
+        switch self {
+        case .all, .bin: return true
+        case .unrated: return facts.rating == 0
+        case .rated(let stars): return facts.rating == stars
+        case .jpgOnly: return facts.hasJPG
+        case .rawOnly: return facts.hasRAW
+        case .tag(let tagID): return facts.tagIDs.contains(tagID)
+        case .tagCategory(let category): return facts.tagCategories.contains(category)
+        }
+    }
+}
+
+// MARK: - Facts
+
+/// Plain-value snapshot of what filtering, search and counting read.
+struct PhotoFacts: Equatable, Sendable {
+    let id: UUID
+    var rating: Int
+    var hasJPG: Bool
+    var hasRAW: Bool
+    var tagIDs: Set<UUID>
+    /// Non-empty categories of the photo's tags.
+    var tagCategories: Set<String>
+    /// Lowercased file name, tag names and tag categories, joined with "\n".
+    var searchKey: String
+
+    init(id: UUID, rating: Int, hasJPG: Bool, hasRAW: Bool,
+         tagIDs: Set<UUID>, tagCategories: Set<String>, searchKey: String) {
+        self.id = id
+        self.rating = rating
+        self.hasJPG = hasJPG
+        self.hasRAW = hasRAW
+        self.tagIDs = tagIDs
+        self.tagCategories = tagCategories
+        self.searchKey = searchKey
+    }
+
+    @MainActor init(_ photo: PhotoAsset) {
+        var tags = TagFactsCache()
+        self.init(photo, tags: &tags)
+    }
+
+    /// Builds facts reading each tag model at most once across calls that share `tags`.
+    @MainActor init(_ photo: PhotoAsset, tags: inout TagFactsCache) {
+        var tagIDs = Set<UUID>()
+        var tagCategories = Set<String>()
+        var searchKey = photo.fileName.lowercased()
+        for tag in photo.tags {
+            let facts = tags.facts(for: tag)
+            tagIDs.insert(facts.id)
+            if !facts.category.isEmpty { tagCategories.insert(facts.category) }
+            searchKey += facts.searchKeySuffix
+        }
+        self.init(
+            id: photo.id,
+            rating: photo.rating,
+            hasJPG: photo.jpgPath != nil,
+            hasRAW: photo.rawPath != nil,
+            tagIDs: tagIDs,
+            tagCategories: tagCategories,
+            searchKey: searchKey
+        )
+    }
+}
+
+/// The values of one tag that photo facts need.
+struct TagFacts: Equatable, Sendable {
+    let id: UUID
+    let category: String
+    /// "\n" + lowercased name, plus "\n" + lowercased category when it isn't empty.
+    let searchKeySuffix: String
+
+    @MainActor init(_ tag: Tag) {
+        let name = tag.name
+        let category = tag.category
+        id = tag.id
+        self.category = category
+        searchKeySuffix = category.isEmpty
+            ? "\n" + name.lowercased()
+            : "\n" + name.lowercased() + "\n" + category.lowercased()
+    }
+}
+
+/// Caches `TagFacts` by object identity, so building facts for thousands of photos reads each tag
+/// model once instead of once per photo. Entries retain their tag, so an identifier can't be reused.
+@MainActor struct TagFactsCache {
+    private var entries: [ObjectIdentifier: (tag: Tag, facts: TagFacts)] = [:]
+
+    init(tags: [Tag] = []) {
+        entries.reserveCapacity(tags.count)
+        for tag in tags { entries[ObjectIdentifier(tag)] = (tag, TagFacts(tag)) }
+    }
+
+    mutating func facts(for tag: Tag) -> TagFacts {
+        let key = ObjectIdentifier(tag)
+        if let entry = entries[key] { return entry.facts }
+        let facts = TagFacts(tag)
+        entries[key] = (tag, facts)
+        return facts
+    }
+}
+
+// MARK: - Counts
+
+struct FacetCounts: Equatable, Sendable {
+    var ratings: [Int: Int] = [:]
+    var tags: [UUID: Int] = [:]
+    var categories: [String: Int] = [:]
+    var jpg = 0
+    var raw = 0
+}
+
+// MARK: - Query
+
+struct PhotoQuery: Equatable, Sendable {
+    var filters: Set<SidebarFilter> = []
+    var searchText: String = ""
+
+    /// True when nothing can exclude a photo: no rating, file-type or tag filter, and no search.
+    var matchesEverything: Bool {
+        searchText.isEmpty && filters.allSatisfy { $0.category == .special }
+    }
+
+    /// Filters AND search.
+    func matches(_ facts: PhotoFacts) -> Bool {
+        matchesFilters(facts) && matchesSearch(facts)
+    }
+
+    /// OR within a filter category, AND across categories. `ignoring` drops one category, which is
+    /// how faceted counts are defined.
+    func matchesFilters(_ facts: PhotoFacts, ignoring: FilterCategory? = nil) -> Bool {
+        let groups = FilterGroups(filters)
+        return (ignoring == .rating || groups.matchesRating(facts))
+            && (ignoring == .fileType || groups.matchesFileType(facts))
+            && (ignoring == .tag || groups.matchesTag(facts))
+    }
+
+    /// Case-insensitive `contains` over the file name, tag names and tag categories.
+    func matchesSearch(_ facts: PhotoFacts) -> Bool {
+        SearchNeedle(searchText).matches(facts)
+    }
+
+    /// Indices of the facts that match filters and search, in their original order.
+    func matchingIndices(in facts: [PhotoFacts]) -> [Int] {
+        let groups = FilterGroups(filters)
+        let needle = SearchNeedle(searchText)
+        var result: [Int] = []
+        result.reserveCapacity(facts.count)
+        for i in facts.indices where groups.matchesAll(facts[i]) && needle.matches(facts[i]) {
+            result.append(i)
+        }
+        return result
+    }
+
+    /// Sidebar badge counts, in one pass. Search is ignored. With filters, each facet counts the
+    /// photos that match every filter outside its own category: rating counts ignore rating filters,
+    /// tag and category counts ignore tag filters, JPG/RAW counts ignore file-type filters.
+    /// A category counts at most once per photo.
+    func facetCounts(over facts: [PhotoFacts]) -> FacetCounts {
+        let groups = FilterGroups(filters)
+        var counts = FacetCounts()
+        for i in facts.indices {
+            let photo = facts[i]
+            let rating = groups.matchesRating(photo)
+            let fileType = groups.matchesFileType(photo)
+            let tag = groups.matchesTag(photo)
+            if fileType && tag {
+                counts.ratings[photo.rating, default: 0] += 1
+            }
+            if rating && fileType {
+                for id in photo.tagIDs { counts.tags[id, default: 0] += 1 }
+                for category in photo.tagCategories { counts.categories[category, default: 0] += 1 }
+            }
+            if rating && tag {
+                if photo.hasJPG { counts.jpg += 1 }
+                if photo.hasRAW { counts.raw += 1 }
+            }
+        }
+        return counts
+    }
+}
+
+/// The query's filters, grouped by category once, so that checking a photo is a few set lookups.
+private struct FilterGroups {
+    private var ratings: Set<Int> = []
+    private var hasRatingFilter = false
+    private var wantsJPG = false
+    private var wantsRAW = false
+    private var tagIDs: Set<UUID> = []
+    private var tagCategories: Set<String> = []
+    private var hasTagFilter = false
+
+    init(_ filters: Set<SidebarFilter>) {
+        for filter in filters {
+            switch filter {
+            case .all, .bin: break
+            case .unrated: ratings.insert(0); hasRatingFilter = true
+            case .rated(let stars): ratings.insert(stars); hasRatingFilter = true
+            case .jpgOnly: wantsJPG = true
+            case .rawOnly: wantsRAW = true
+            case .tag(let id): tagIDs.insert(id); hasTagFilter = true
+            case .tagCategory(let category): tagCategories.insert(category); hasTagFilter = true
+            }
+        }
+    }
+
+    func matchesAll(_ facts: PhotoFacts) -> Bool {
+        matchesRating(facts) && matchesFileType(facts) && matchesTag(facts)
+    }
+
+    func matchesRating(_ facts: PhotoFacts) -> Bool {
+        !hasRatingFilter || ratings.contains(facts.rating)
+    }
+
+    func matchesFileType(_ facts: PhotoFacts) -> Bool {
+        guard wantsJPG || wantsRAW else { return true }
+        return (wantsJPG && facts.hasJPG) || (wantsRAW && facts.hasRAW)
+    }
+
+    func matchesTag(_ facts: PhotoFacts) -> Bool {
+        guard hasTagFilter else { return true }
+        // A photo has a handful of tags; walk its (small) sets rather than the filter's.
+        if !tagIDs.isEmpty {
+            for id in facts.tagIDs where tagIDs.contains(id) { return true }
+        }
+        if !tagCategories.isEmpty {
+            for category in facts.tagCategories where tagCategories.contains(category) { return true }
+        }
+        return false
+    }
+}
+
+/// Lowercased search text. Fields in a search key are separated by "\n", so a needle that contains
+/// "\n" could only match across two fields: it never matches (the search field is single-line).
+private struct SearchNeedle {
+    private let text: String?
+    private let impossible: Bool
+
+    init(_ searchText: String) {
+        text = searchText.isEmpty ? nil : searchText.lowercased()
+        impossible = text?.contains("\n") ?? false
+    }
+
+    func matches(_ facts: PhotoFacts) -> Bool {
+        guard let text else { return true }
+        return !impossible && facts.searchKey.contains(text)
+    }
+}

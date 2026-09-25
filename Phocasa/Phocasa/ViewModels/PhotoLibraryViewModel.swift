@@ -1,39 +1,6 @@
 import SwiftUI
 import SwiftData
 
-enum SidebarFilter: Hashable {
-    case all
-    case unrated
-    case rated(Int)
-    case tag(UUID)
-    case tagCategory(String)
-    case bin
-    case jpgOnly
-    case rawOnly
-
-    var filterCategory: String {
-        switch self {
-        case .all, .bin: return "special"
-        case .unrated, .rated: return "rating"
-        case .jpgOnly, .rawOnly: return "fileType"
-        case .tag, .tagCategory: return "tag"
-        }
-    }
-
-    func matches(_ photo: PhotoAsset) -> Bool {
-        switch self {
-        case .all: return true
-        case .bin: return photo.isDeleted
-        case .unrated: return photo.rating == 0
-        case .rated(let stars): return photo.rating == stars
-        case .jpgOnly: return photo.jpgPath != nil
-        case .rawOnly: return photo.rawPath != nil
-        case .tag(let tagId): return photo.tags.contains { $0.id == tagId }
-        case .tagCategory(let category): return photo.tags.contains { $0.category == category }
-        }
-    }
-}
-
 @Observable @MainActor
 final class PhotoLibraryViewModel {
     var photos: [PhotoAsset] = []
@@ -694,8 +661,8 @@ final class PhotoLibraryViewModel {
             }
         } else {
             // Auto-combine: replace within same category, keep different categories
-            let newCategory = filter.filterCategory
-            activeFilters = activeFilters.filter { $0.filterCategory != newCategory }
+            let newCategory = filter.category
+            activeFilters = activeFilters.filter { $0.category != newCategory }
             activeFilters.insert(filter)
         }
 
@@ -710,11 +677,12 @@ final class PhotoLibraryViewModel {
         }
 
         var filtered = allPhotos
-        let byCategory = Dictionary(grouping: activeFilters) { $0.filterCategory }
+        let byCategory = Dictionary(grouping: activeFilters) { $0.category }
 
         for (_, filters) in byCategory {
             filtered = filtered.filter { photo in
-                filters.contains { $0.matches(photo) }
+                let facts = PhotoFacts(photo)
+                return filters.contains { $0.matches(facts) }
             }
         }
 
@@ -730,7 +698,7 @@ final class PhotoLibraryViewModel {
         let filters = Array(activeFilters)
 
         // Rating counts: base = photos filtered by everything EXCEPT ratings
-        let nonRating = filters.filter { $0.filterCategory != "rating" }
+        let nonRating = filters.filter { $0.category != .rating }
         let ratingBase = applyFilterGroup(nonRating)
         var newRatingCounts: [Int: Int] = [:]
         for photo in ratingBase {
@@ -739,7 +707,7 @@ final class PhotoLibraryViewModel {
         ratingCounts = newRatingCounts
 
         // Tag + category counts: base = photos filtered by everything EXCEPT tags
-        let nonTag = filters.filter { $0.filterCategory != "tag" }
+        let nonTag = filters.filter { $0.category != .tag }
         let tagBase = applyFilterGroup(nonTag)
         var newCatCounts: [String: Int] = [:]
         var newTagCounts: [UUID: Int] = [:]
@@ -756,7 +724,7 @@ final class PhotoLibraryViewModel {
         tagCounts = newTagCounts
 
         // File type counts: base = photos filtered by everything EXCEPT file type
-        let nonFileType = filters.filter { $0.filterCategory != "fileType" }
+        let nonFileType = filters.filter { $0.category != .fileType }
         let fileTypeBase = applyFilterGroup(nonFileType)
         var jpgC = 0
         var rawC = 0
@@ -772,11 +740,12 @@ final class PhotoLibraryViewModel {
         guard !filters.isEmpty else { return allPhotos }
 
         var filtered = allPhotos
-        let byCategory = Dictionary(grouping: filters) { $0.filterCategory }
+        let byCategory = Dictionary(grouping: filters) { $0.category }
 
         for (_, categoryFilters) in byCategory {
             filtered = filtered.filter { photo in
-                categoryFilters.contains { $0.matches(photo) }
+                let facts = PhotoFacts(photo)
+                return categoryFilters.contains { $0.matches(facts) }
             }
         }
         return filtered
