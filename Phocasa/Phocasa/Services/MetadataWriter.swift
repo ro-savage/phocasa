@@ -155,6 +155,13 @@ actor MetadataWriter {
         await withCheckedContinuation { idleWaiters.append($0) }
     }
 
+    /// Runs `body` on the writer's queue, between two writes, so no metadata write can interleave with it. Exports
+    /// replace a photo's file through this: a rating write in progress on the same file would otherwise swap the old
+    /// pixels back in. (A write enqueued meanwhile runs afterwards, on the new file.)
+    func runExclusively<T: Sendable>(_ body: @Sendable () -> T) -> T {
+        body()
+    }
+
     // MARK: - Inbox
 
     private nonisolated func submit(_ submissions: [Submission]) {

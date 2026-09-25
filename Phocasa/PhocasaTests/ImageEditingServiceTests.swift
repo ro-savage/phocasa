@@ -142,7 +142,8 @@ private final class ReferenceRenderer {
         return ciContext.createCGImage(ciImage, from: extent)
     }
 
-    /// `exportStandardToJPEG` + `writeJPEG` (without the file-date capture/restore).
+    /// `exportStandardToJPEG`'s render and encode (without the metadata it carries over, or the file-date
+    /// capture/restore).
     func exportStandardToJPEG(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double = 0.95) -> Bool {
         guard let rawImage = CIImage(contentsOf: sourceURL) else { return false }
         var ciImage = orientedImage(rawImage)
@@ -425,9 +426,9 @@ final class ImageEditingServiceTests: XCTestCase {
         for (label, params) in Self.parameterSets where labels.contains(label) {
             let serviceOut = tempDir.appendingPathComponent("service-\(label).jpg")
             let referenceOut = tempDir.appendingPathComponent("reference-\(label).jpg")
-            let ok = await ImageEditingService.shared.exportStandardToJPEG(
+            let result = await ImageEditingService.shared.exportStandardToJPEG(
                 sourceURL: sourceURL, parameters: params, outputURL: serviceOut, quality: 1.0)
-            XCTAssertTrue(ok, label)
+            XCTAssertEqual(result, .written, label)
             XCTAssertTrue(reference.exportStandardToJPEG(sourceURL: sourceURL, parameters: params,
                                                          outputURL: referenceOut, quality: 1.0), label)
 

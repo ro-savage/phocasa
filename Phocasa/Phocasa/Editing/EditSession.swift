@@ -432,15 +432,17 @@ final class EditSession {
     // MARK: - Export
 
     /// Renders the RAW with the current parameters to a JPEG: over the paired JPG (`replaceExisting`), or to a new
-    /// `<stem>-raw-edit.jpg`, which becomes the photo's JPG. Returns whether the file was written.
-    func exportRAWToJPG(replaceExisting: Bool) async -> Bool {
-        guard let rawPath = photo.rawPath else { return false }
+    /// `<stem>-raw-edit.jpg`, which becomes the photo's JPG. The JPEG carries the original metadata
+    /// (`metadataSources(forRAWExportTo:replacing:)`) and then gets the photo's rating and keywords.
+    func exportRAWToJPG(replaceExisting: Bool) async -> ExportResult {
+        guard let rawPath = photo.rawPath else { return .failed }
 
         let rawURL = URL(fileURLWithPath: rawPath)
         let params = parameters
 
         let outputURL: URL
-        if replaceExisting, let jpgPath = photo.jpgPath {
+        let replacing = replaceExisting && photo.jpgPath != nil
+        if replacing, let jpgPath = photo.jpgPath {
             outputURL = URL(fileURLWithPath: jpgPath)
         } else {
             let dir = rawURL.deletingLastPathComponent()
@@ -448,31 +450,51 @@ final class EditSession {
             outputURL = dir.appendingPathComponent("\(stem)-raw-edit.jpg")
         }
 
-        let success = await service.exportRAWToJPEG(rawURL: rawURL, parameters: params, outputURL: outputURL)
-        if success {
+        let result = await service.exportRAWToJPEG(
+            rawURL: rawURL, parameters: params, outputURL: outputURL,
+            metadataSources: metadataSources(forRAWExportTo: outputURL, replacing: replacing))
+        if result == .written {
             // Update the photo's jpgPath if a new file was created
             if !replaceExisting || photo.jpgPath == nil {
                 photo.jpgPath = outputURL.path
             }
             try? modelContext?.save()
+            writeRatingAndKeywords(to: outputURL)
         }
-        return success
+        return result
     }
 
-    /// Bakes the current parameters into the JPG file and clears its saved edits. Returns whether the file was
-    /// written.
-    func exportJPGPermanent() async -> Bool {
-        guard let jpgPath = photo.jpgPath else { return false }
+    /// Where a RAW export takes its metadata from, in order of preference:
+    /// - replacing the paired JPG: that JPG, read before it's replaced, and nothing else (it must keep its own);
+    /// - a new file: the pair's camera JPG (the photo's JPG unless that is the export itself, as after an earlier
+    ///   export, else the JPG beside the RAW with its stem), then the RAW.
+    private func metadataSources(forRAWExportTo output: URL, replacing: Bool) -> [URL] {
+        guard let rawPath = photo.rawPath else { return [] }
+        let raw = URL(fileURLWithPath: rawPath)
+        if replacing { return [output] }
+        let fm = FileManager.default
+        let cameraJPG = photo.jpgPath.map(URL.init(fileURLWithPath:)).flatMap { $0.path == output.path ? nil : $0 }
+            ?? ["jpg", "JPG", "jpeg", "JPEG"].lazy
+                .map { raw.deletingPathExtension().appendingPathExtension($0) }
+                .first { $0.path != output.path && fm.fileExists(atPath: $0.path) }
+        return (cameraJPG.map { [$0] } ?? []) + [raw]
+    }
+
+    /// Bakes the current parameters into the JPG file, keeping its metadata, and clears its saved edits. Nothing is
+    /// written, and the edit stays, if the metadata can't be kept.
+    func exportJPGPermanent() async -> ExportResult {
+        guard let jpgPath = photo.jpgPath else { return .failed }
 
         let url = URL(fileURLWithPath: jpgPath)
         let params = parameters
 
-        let success = await service.exportStandardToJPEG(sourceURL: url, parameters: params, outputURL: url)
-        guard success else { return false }
+        let result = await service.exportStandardToJPEG(sourceURL: url, parameters: params, outputURL: url)
+        guard result == .written else { return result }
+        writeRatingAndKeywords(to: url)
         // Clear saved edit parameters since they're baked in
         photo.jpgEditParametersData = nil
         try? modelContext?.save()
-        guard !hasEnded else { return true }
+        guard !hasEnded else { return result }
         // The file changed under the cached source: render the baked file, not the old pixels. A baked crop also
         // changed its size.
         service.clearCache()
@@ -480,6 +502,14 @@ final class EditSession {
         previewImage = nil
         setFullImage(nil)
         parameters = EditParameters()
-        return true
+        return result
+    }
+
+    /// An export carries the source's metadata; Phocasa's own rating and keywords then go in like any rating write
+    /// (into the file, or its sidecar when the file can't take them without losing something). The export itself
+    /// never goes through this: it changes pixels, and the writer's thumbnail re-key is for metadata-only rewrites.
+    private func writeRatingAndKeywords(to url: URL) {
+        MetadataWriter.shared.enqueue([MetadataWriteItem(path: url.path, rating: photo.rating,
+                                                         keywords: photo.tags.map(\.fullName))])
     }
 }
