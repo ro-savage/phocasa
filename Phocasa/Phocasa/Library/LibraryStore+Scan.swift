@@ -4,11 +4,14 @@ import Foundation
 extension LibraryStore {
     /// State only the scan code uses, stored in `scanning`.
     struct ScanState {
-        /// The scan in progress. Scans run one at a time (spec §B3).
+        /// The scan queue while it runs (`startScanQueue`): scans run one at a time (spec §B3), and a library folder's
+        /// removal runs on it too.
         var task: Task<Void, Never>?
-        /// A scan requested while one was running; it runs once that one ends. Repeated requests coalesce, and
-        /// the latest folder wins.
-        var queuedURL: URL?
+        /// The library folders (by id) whose scans wait, in the order asked. Every folder asked for is scanned; a
+        /// request for a folder already waiting joins it.
+        var queued: [UUID] = []
+        /// Where Open Folder found a waiting folder that moved (`handleFolderSelected(url:)`), for its scan.
+        var requestedURLs: [UUID: URL] = [:]
         /// Total of the metadata reads in progress, while `scanProgress` shows their count.
         var metadataProgressTotal: Int?
         /// What the launch rescan reads ahead (`readAheadForLaunchRescan()`). Any other scan request drops it.
@@ -17,7 +20,8 @@ extension LibraryStore {
 
     /// What the launch rescan of a big library uses instead of reading again once the background load is done.
     struct ReadAhead {
-        /// The folder the launch rescan scans.
+        /// The library folder the launch rescan scans first, and where it is.
+        let folderID: UUID
         let url: URL
         /// Its walk, started at launch alongside the background load.
         let walk: Task<[DiscoveredPhoto], Never>
@@ -62,41 +66,59 @@ extension LibraryStore {
 
     // MARK: - Folder Opening
 
+    /// "Open Folder…": the folder becomes a library folder and is scanned. Every folder opened stays one, and a rescan
+    /// scans each of them.
+    /// - A folder that is a library folder, or is inside one, isn't another: that library folder is scanned.
+    /// - A folder where a library folder that isn't there now has gone (its bookmark finds it there, or it's the same
+    ///   folder on its drive mounted under another name) is that library folder, moved: it's scanned there, and its
+    ///   photos keep their rows (`ScanPlan`'s match by path).
+    /// - Otherwise it's a new library folder, and the library folders inside it become part of it.
     func handleFolderSelected(url: URL) {
-        guard url.startAccessingSecurityScopedResource() else { return }
-
-        let bookmarkData = try? url.bookmarkData(
-            options: [.withSecurityScope],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        )
-
+        _ = url.startAccessingSecurityScopedResource() // Phocasa isn't sandboxed: its access doesn't depend on this
         guard let context = modelContext else { return }
+        let path = Self.canonicalPath(of: url)
+        let folderURL = URL(fileURLWithPath: path, isDirectory: true)
+        let bookmark = Self.bookmark(of: folderURL)
 
-        if let library = currentLibrary {
-            library.rootFolderPath = url.path
-            library.bookmarkData = bookmarkData
-        } else {
-            let library = PhotoLibrary(rootFolderPath: url.path, bookmarkData: bookmarkData)
-            context.insert(library)
-            currentLibrary = library
+        if let existing = libraryFolders.first(where: { Self.isPath(path, inOrAt: $0.rootFolderPath) }) {
+            if existing.rootFolderPath == path, let bookmark { existing.bookmarkData = bookmark }
+            try? context.save()
+            return queueScan(of: existing)
         }
-
-        scanFolder(url: url)
+        if let moved = libraryFolders.first(where: { isMovedLibraryFolder($0, nowAt: path) }) {
+            if let bookmark { moved.bookmarkData = bookmark }
+            try? context.save()
+            return queueScan(of: moved, at: folderURL)
+        }
+        let absorbed = libraryFolders.filter { Self.isPath($0.rootFolderPath, inOrAt: path) }
+        for folder in absorbed {
+            forgetLibraryFolder(folder)
+            context.delete(folder)
+        }
+        let library = PhotoLibrary(rootFolderPath: path, bookmarkData: bookmark)
+        context.insert(library)
+        try? context.save()
+        setLibraryFolders(libraryFolders + [library])
+        queueScan(of: library)
     }
 
+    /// Rescans every library folder, one after the other (the toolbar's Rescan, and launch). A folder that isn't there
+    /// is skipped (it says why: `folderIssues`), and the others are still scanned.
     func rescanCurrentLibrary() {
-        guard let library = currentLibrary else { return }
-
-        var isStale = false
-        if let bookmarkData = library.bookmarkData,
-           let url = try? URL(resolvingBookmarkData: bookmarkData, options: [.withSecurityScope], relativeTo: nil, bookmarkDataIsStale: &isStale) {
-            _ = url.startAccessingSecurityScopedResource()
-            scanFolder(url: url)
-        } else {
-            let url = URL(fileURLWithPath: library.rootFolderPath)
-            scanFolder(url: url)
+        // A folder inside (or at) one listed before it is scanned with that one. Opening folders never leaves such
+        // pairs, but a store could hold two rows for one folder.
+        var scanned: [String] = []
+        for folder in libraryFolders {
+            let path = folder.rootFolderPath
+            guard !scanned.contains(where: { Self.isPath(path, inOrAt: $0) }) else { continue }
+            scanned.append(path)
+            queueScan(of: folder)
         }
+    }
+
+    /// Rescans one library folder (the sidebar's Rescan).
+    func rescan(_ folder: PhotoLibrary) {
+        queueScan(of: folder)
     }
 
     /// Returns once no scan is running or queued, the launch rescan included, and once a launch's background load
@@ -115,6 +137,8 @@ extension LibraryStore {
         var inserted = 0
         /// Existing rows (in the library or the bin) whose paths or size the scan changed.
         var updated = 0
+        /// Stored rows the scan found at new paths (moved, renamed, or on a drive mounted under another name).
+        var relinked = 0
         var missing = 0
         /// Whether the scan ended in a full `loadExistingData()`.
         var reloaded = false
@@ -131,26 +155,28 @@ extension LibraryStore {
     /// never holds the main actor for more than a few tens of milliseconds at a time.
     private static let scanInsertChunkSize = 256
 
-    /// Starts a scan of `url`, or queues one if a scan (or the launch's background load) is running. `isScanning` is
-    /// true when this returns (`DataPathBenchmarks.waitForScan` relies on that), and stays true until every queued
-    /// scan is done.
-    private func scanFolder(url: URL) {
+    /// Starts a scan of the library folder, or queues it if a scan (or the launch's background load, or a folder's
+    /// removal) is running; `url` is where Open Folder found it, when it moved. `isScanning` is true when this returns
+    /// (`DataPathBenchmarks.waitForScan` relies on that), and stays true until every queued scan is done.
+    private func queueScan(of folder: PhotoLibrary, at url: URL? = nil) {
         guard modelContext != nil else { return }
         isScanning = true
-        scanning.queuedURL = url
+        if let url { scanning.requestedURLs[folder.id] = url }
+        if !scanning.queued.contains(folder.id) { scanning.queued.append(folder.id) }
         scanning.readAhead = nil // read before this request: the scan it asks for reads again
         if scanning.task == nil {
             startScanQueue()
         }
     }
 
-    /// With a big library the launch rescan waits for the background load, so it starts walking its folder now,
+    /// With a big library the launch rescan waits for the background load, so it starts walking its first folder now,
     /// alongside the load, and takes the stored rows from the load's snapshot (`LibrarySnapshot.storedRows`): both
     /// would otherwise be read again after the load.
     func readAheadForLaunchRescan() {
-        guard let url = scanning.queuedURL else { return }
+        guard let id = scanning.queued.first, let folder = libraryFolder(withID: id) else { return }
+        let url = location(of: folder).url
         let scanner = self.scanner
-        scanning.readAhead = ReadAhead(url: url, walk: Task.detached(priority: .userInitiated) {
+        scanning.readAhead = ReadAhead(folderID: id, url: url, walk: Task.detached(priority: .userInitiated) {
             await scanner.scan(folderURL: url)
         })
     }
@@ -158,34 +184,48 @@ extension LibraryStore {
     /// Runs the scan queue: first the launch's background load, when `open(_:)` passes the load generation it asked
     /// at (`loadInBackground(unlessLoadedAfter:)`), then each queued scan until none is left.
     func startScanQueue(loadingFirstUnlessLoadedAfter loadGeneration: Int? = nil) {
-        isScanning = true
-        scanProgress = loadGeneration == nil ? "Scanning folder..." : "Loading library..."
-        scanning.task = Task { @MainActor in
+        startScanQueue(progress: loadGeneration == nil ? "Scanning..." : "Loading library...") {
             if let loadGeneration {
                 await self.loadInBackground(unlessLoadedAfter: loadGeneration)
             }
-            while let folder = self.scanning.queuedURL {
-                self.scanning.queuedURL = nil
-                await self.performScan(of: folder)
+        }
+    }
+
+    /// Runs the scan queue: `first`, then each queued scan until none is left.
+    func startScanQueue(progress: String, first: @escaping @MainActor () async -> Void) {
+        isScanning = true
+        scanProgress = progress
+        scanning.task = Task { @MainActor in
+            await first()
+            while !self.scanning.queued.isEmpty {
+                let id = self.scanning.queued.removeFirst()
+                // A folder removed, or taken into one opened above it, since it was queued isn't scanned.
+                if let folder = self.libraryFolder(withID: id) {
+                    await self.performScan(of: folder)
+                }
             }
             self.scanning.task = nil
             self.isScanning = false
         }
     }
 
-    /// One scan. The file system walk, the read of the stored rows, the diff, the stat of photos the scan
-    /// didn't find and the metadata reads all run off the main actor. The main actor only writes: it changes
-    /// the rows that differ, inserts the new photos and saves. Then it patches the in-memory library with what
-    /// changed (`updateLibrary(adding:facts:removing:)`) instead of reloading it, so an unchanged rescan costs
-    /// nothing and one that adds k photos costs O(k log n) (spec §B1, §B2).
-    private func performScan(of url: URL) async {
+    /// One scan of a library folder. The file system walk, the read of the stored rows, the diff, the stat of photos
+    /// the scan didn't find, the metadata reads and the match of moved photos all run off the main actor. The main
+    /// actor only writes: it changes the rows that differ, relinks the moved ones, inserts the new photos and saves.
+    /// Then it patches the in-memory library with what changed (`updateLibrary(adding:facts:removing:)`) instead of
+    /// reloading it, so an unchanged rescan costs nothing and one that adds k photos costs O(k log n) (spec §B1, §B2).
+    private func performScan(of folder: PhotoLibrary) async {
         guard let context = modelContext else { return }
         let clock = ContinuousClock()
         var report = ScanReport()
         var sectionStart = clock.now
 
-        scanProgress = "Scanning folder..."
-        let readAhead = scanning.readAhead?.url == url ? scanning.readAhead : nil
+        let folderID = folder.id
+        let location = location(of: folder)
+        let url = location.url
+        scanning.requestedURLs[folderID] = nil
+        scanProgress = "Scanning “\(url.lastPathComponent)”..."
+        let readAhead = scanning.readAhead.flatMap { $0.folderID == folderID && $0.url == url ? $0 : nil }
         scanning.readAhead = nil
         // The stored rows are read through another context, which can't see unsaved changes: if they can't be saved
         // (photos a scan inserted, say), the diff would find those photos new again.
@@ -212,6 +252,7 @@ extension LibraryStore {
         // A folder that isn't there (a drive unplugged, a folder moved): no walk and no diff, so nothing is added,
         // changed or found missing. Its photos, whose files can't be reached, are hidden until a scan finds it again.
         if let issue = unavailableFolderIssue(url) {
+            folderIssues[folderID] = issue
             do {
                 hidePhotos(under: url.path, rows: try await Self.storedRows(readAhead: rowsReadAhead, in: container))
             } catch {
@@ -219,6 +260,7 @@ extension LibraryStore {
             }
             return scanDidStop(issue, report: &report)
         }
+        folderIssues[folderID] = nil
 
         // Off the main actor: the store and the file system are read at the same time (or were read ahead).
         async let storedRows = Self.storedRows(readAhead: rowsReadAhead, in: container)
@@ -231,8 +273,10 @@ extension LibraryStore {
             return scanDidStop(.storeUnreadable(error.localizedDescription), report: &report)
         }
         let discovered = await foundPhotos
+        // The other library folders' rows are their own scans' to check.
+        let otherRoots = libraryFolders.filter { $0.id != folderID }.map(\.rootFolderPath)
         var plan = await ScanPlan.make(stored: stored, discovered: discovered, previouslyMissing: previouslyMissing,
-                                       root: url.path)
+                                       root: url.path, movedFrom: location.movedFrom, otherRoots: otherRoots)
         report.discovered = plan.discoveredCount
 
         if !plan.newPhotos.isEmpty {
@@ -245,6 +289,8 @@ extension LibraryStore {
                 Task { @MainActor in self.showMetadataProgress(done: done, total: total) }
             }
             scanning.metadataProgressTotal = nil
+            // With their capture dates read, new photos that are stored photos moved keep those rows.
+            plan = await plan.relinkingMovedPhotos()
         }
 
         // New photos without keywords go in through a background context (see `ScanPlan.canInsertInBackground`).
@@ -260,8 +306,28 @@ extension LibraryStore {
         }
 
         sectionStart = clock.now
-        let changed = applyScanUpdates(plan.updates, in: context)
+        var changed = applyScanUpdates(plan.updates, in: context)
         report.updated = changed.count
+
+        // Moved photos: a whole drive's worth can move at once, so a chunk at a time, like the inserts below.
+        if !plan.relinks.isEmpty {
+            scanProgress = "Updating \(plan.relinks.count) moved photos..."
+            var relinked: [PhotoAsset] = []
+            var start = 0
+            while start < plan.relinks.count {
+                if start > 0 {
+                    try? context.save()
+                    report.mainActorTime += clock.now - sectionStart
+                    await Task.yield()
+                    sectionStart = clock.now
+                }
+                let end = min(start + Self.scanInsertChunkSize, plan.relinks.count)
+                relinked += applyScanRelinks(plan.relinks[start..<end], in: context)
+                start = end
+            }
+            report.relinked = relinked.count
+            changed += relinked
+        }
 
         var insertedHere: [PhotoAsset] = []
         var createdTags = false
@@ -293,11 +359,17 @@ extension LibraryStore {
         }
 
         // What the scan found is available; see `ScanPlan.missingIDs` for what it didn't find.
-        missingPhotoIDs = plan.missingIDs
+        missingPhotoIDs = plan.missingSet(after: missingPhotoIDs)
         report.missing = plan.missingIDs.count
 
         scanWillSave?(context)
-        currentLibrary?.lastScanDate = Date()
+        // Unless it was removed, or taken into a folder opened above it, meanwhile (or now, moved into another).
+        if location.movedFrom != nil, libraryFolders.contains(where: { $0 === folder }) {
+            libraryFolderDidMove(folder, to: url)
+        }
+        if libraryFolders.contains(where: { $0 === folder }) {
+            folder.lastScanDate = Date()
+        }
         if context.hasChanges {
             do {
                 try context.save()
@@ -340,8 +412,9 @@ extension LibraryStore {
             }
         }
 
-        scanProgress = "Found \(plan.discoveredCount) photos (\(report.inserted) new)"
-        scanIssue = report.issue
+        let moved = report.relinked > 0 ? ", \(report.relinked) moved" : ""
+        scanProgress = "Found \(plan.discoveredCount) photos (\(report.inserted) new\(moved))"
+        scanIssue = report.issue ?? firstFolderIssue()
         // The folder is there: writes that waited for its drive can be made now.
         MetadataWriter.shared.retryWaitingWrites()
         report.mainActorTime += clock.now - sectionStart
@@ -421,6 +494,26 @@ extension LibraryStore {
         return changed
     }
 
+    /// Points the rows of moved photos at the files the scan found: their paths, folder, name and size. Nothing else
+    /// changes (rating, tags, edits, dates, and the bin flag, which the fetch just before keeps; see
+    /// `applyScanUpdates`). Rows deleted since the scan read the store are skipped.
+    private func applyScanRelinks(_ relinks: ArraySlice<ScanPlan.Relink>, in context: ModelContext) -> [PhotoAsset] {
+        let ids = relinks.map(\.id)
+        let rows = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
+        let rowsByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var changed: [PhotoAsset] = []
+        for relink in relinks {
+            guard let photo = rowsByID[relink.id] else { continue }
+            if photo.jpgPath != relink.jpgPath { photo.jpgPath = relink.jpgPath }
+            if photo.rawPath != relink.rawPath { photo.rawPath = relink.rawPath }
+            if photo.folderPath != relink.folderPath { photo.folderPath = relink.folderPath }
+            if photo.fileName != relink.fileName { photo.fileName = relink.fileName }
+            if photo.fileSize != relink.fileSize { photo.fileSize = relink.fileSize }
+            changed.append(photo)
+        }
+        return changed
+    }
+
     private struct TagKey: Hashable {
         let category: String
         let name: String
@@ -442,16 +535,7 @@ extension LibraryStore {
                                    uniquingKeysWith: { first, _ in first })
         }
         for found in newPhotos {
-            let asset = PhotoAsset(
-                fileName: found.fileName,
-                jpgPath: found.jpgPath,
-                rawPath: found.rawPath,
-                folderPath: found.folderPath,
-                creationDate: found.creationDate,
-                fileSize: found.fileSize
-            )
-            asset.rating = found.metadata?.rating ?? 0
-            asset.captureDate = found.metadata?.captureDate
+            let asset = ScanPlan.newRow(for: found)
             context.insert(asset)
             inserted.append(asset)
 
