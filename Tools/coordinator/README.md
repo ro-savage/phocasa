@@ -139,6 +139,12 @@ Launch a **Debug** build of the binary in one of two ways instead (`LibraryLocat
 
 ### Driving the app: lessons from wave 2
 
+- **Target the app by its process ID, not its name (post-wave-3 task D).** A test host that another agent is running
+  (hosted-window tests, `ScaleChecks`) is also a process called "Phocasa", and `tell process "Phocasa"` may pick it:
+  a window move, a key or a Cmd-Q then goes to the test host, and its in-memory library looks like yours gone empty.
+  Use `tell application "System Events" to tell (first process whose unix id is $PID)`, with the `PID` from the
+  launch, for every pin, key and quit.
+
 - **Focus moves.** Another window can come to the front between commands, or the window can move. Before *every*
   click or key, pin the window in the same shell command:
   `osascript -e 'tell application "System Events" to tell process "Phocasa"' -e 'set frontmost to true' -e 'set position of window 1 to {40, 60}' -e 'set size of window 1 to {1400, 900}' -e 'end tell' -e 'delay 0.3'`.
