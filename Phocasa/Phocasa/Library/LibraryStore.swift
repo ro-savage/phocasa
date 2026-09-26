@@ -45,6 +45,9 @@ final class LibraryStore {
     /// Files being moved to the Trash by deletes still running, when there are more than
     /// `trashProgressMinimum` (the status bar shows it).
     var trashProgress: TrashProgress?
+    /// The last delete that left photos as they were because files couldn't be moved to the Trash, for the alert; nil
+    /// once dismissed.
+    var deleteProblem: DeleteProblem?
 
     // Sidebar counts, for the active filters (published by `publishCounts()`).
     private(set) var ratingCounts: [Int: Int] = [:]

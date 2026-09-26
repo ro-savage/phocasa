@@ -136,10 +136,13 @@ extension LibraryStore {
 
     // MARK: - Deleting Files
     // The files are moved to the Trash on `fileTrasher`, off the main actor (spec §G5); the store changes once they
-    // are there. A photo whose delete is still running can't be deleted again meanwhile.
+    // are there, and only for the files that went (or were gone already): a file that couldn't be moved (locked,
+    // read-only, a share without a Trash) or whose drive isn't connected keeps its photo as it was, and
+    // `deleteProblem` says how many and why. A photo whose delete is still running can't be deleted again meanwhile.
 
     /// Deletes one file type of each photo (with the RAW or JPG filter active): a pair loses that file, moved to the
-    /// Trash; a photo with only one file, or both filters active, goes to the bin instead.
+    /// Trash; a photo with only one file, or both filters active, goes to the bin instead. A pair whose file can't be
+    /// moved keeps it.
     func deleteFileType(of photosToRemove: [PhotoAsset], raw deleteRAW: Bool, jpg deleteJPG: Bool) async {
         enum Change { case toBin, dropRAW, dropJPG }
         var changes: [(photo: PhotoAsset, change: Change)] = []
@@ -161,9 +164,17 @@ extension LibraryStore {
         }
         guard !changes.isEmpty else { return }
 
-        await moveToTrash(files)
+        let outcomes = Self.outcomesByPath(files, await moveToTrash(files))
 
+        var applied: [(photo: PhotoAsset, change: Change)] = []
+        var problems: [(path: String, outcome: TrashOutcome)] = []
         for (photo, change) in changes {
+            photosBeingDeleted.remove(photo.id)
+            let path = change == .dropRAW ? photo.rawPath : change == .dropJPG ? photo.jpgPath : nil
+            if let path, let outcome = outcomes[path], !outcome.fileIsGone {
+                problems.append((path, outcome)) // the file is still there: the pair keeps it
+                continue
+            }
             switch change {
             case .toBin:
                 photo.isInBin = true
@@ -174,27 +185,62 @@ extension LibraryStore {
                 photo.jpgPath = nil
                 photo.jpgEditParametersData = nil
             }
-            photosBeingDeleted.remove(photo.id)
+            applied.append((photo, change))
         }
         try? modelContext?.save()
-        fileTypeDeleteDidFinish(binned: changes.filter { $0.change == .toBin }.map(\.photo),
-                                changed: changes.filter { $0.change != .toBin }.map(\.photo))
+        fileTypeDeleteDidFinish(binned: applied.filter { $0.change == .toBin }.map(\.photo),
+                                changed: applied.filter { $0.change != .toBin }.map(\.photo))
+        if !problems.isEmpty {
+            deleteProblem = DeleteProblem(photoCount: problems.count, attemptedCount: changes.count,
+                                          fileType: deleteRAW ? "RAW" : "JPG", problems: problems)
+        }
     }
 
-    /// Moves the photos' files (and RAW sidecars) to the Trash, then deletes the photos from the store.
+    /// Moves the photos' files (and RAW sidecars) to the Trash, then deletes from the store the photos whose files
+    /// went (or were gone already). A photo with a file that couldn't be moved stays in the bin, less the files that
+    /// did go; a sidecar left behind doesn't keep its photo.
     func deletePermanently(_ photosToDelete: [PhotoAsset]) async {
         guard let context = modelContext else { return }
         let photos = photosToDelete.filter { photosBeingDeleted.insert($0.id).inserted }
         guard !photos.isEmpty else { return }
 
-        await moveToTrash(photos.flatMap { Self.files(of: $0, jpg: true, raw: true) })
+        let files = photos.flatMap { Self.files(of: $0, jpg: true, raw: true) }
+        let outcomes = Self.outcomesByPath(files, await moveToTrash(files))
 
-        updateLibrary(adding: [], facts: [], removing: Set(photos.map(\.id))) // in memory, before the models go
+        var deleted: [PhotoAsset] = []
+        var kept: [PhotoAsset] = []
+        var problems: [(path: String, outcome: TrashOutcome)] = []
         for photo in photos {
             photosBeingDeleted.remove(photo.id)
+            let jpg = photo.jpgPath.map { ($0, outcomes[$0] ?? .alreadyGone) }
+            let raw = photo.rawPath.map { ($0, outcomes[$0] ?? .alreadyGone) }
+            let stuck = [jpg, raw].compactMap { $0 }.filter { !$0.1.fileIsGone }
+            if stuck.isEmpty {
+                deleted.append(photo)
+                continue
+            }
+            problems += stuck.map { (path: $0.0, outcome: $0.1) }
+            // It stays in the bin, pointing only at the files still there.
+            if jpg?.1.fileIsGone == true { photo.jpgPath = nil }
+            if raw?.1.fileIsGone == true { photo.rawPath = nil }
+            kept.append(photo)
+        }
+
+        updateLibrary(adding: [], facts: [], removing: Set(deleted.map(\.id))) // in memory, before the models go
+        for photo in deleted {
             context.delete(photo)
         }
         try? context.save()
+        if !kept.isEmpty {
+            photosDidChange(kept)
+            deleteProblem = DeleteProblem(photoCount: kept.count, attemptedCount: photos.count, fileType: nil,
+                                          problems: problems)
+        }
+    }
+
+    /// Each file's outcome by path (`outcomes[i]` is `files[i]`'s).
+    private static func outcomesByPath(_ files: [URL], _ outcomes: [TrashOutcome]) -> [String: TrashOutcome] {
+        Dictionary(zip(files.map(\.path), outcomes), uniquingKeysWith: { first, _ in first })
     }
 
     /// The files a delete moves to the Trash: the photo's JPG (`jpg`) and/or its RAW (`raw`) together with the RAW's
@@ -217,16 +263,19 @@ extension LibraryStore {
     /// Files trashed per trip to `fileTrasher`, so the progress can update in between.
     private static let trashChunkSize = 10
 
-    /// Moves each of `files` that exists to the Trash, a few at a time, keeping `trashProgress` current.
-    private func moveToTrash(_ files: [URL]) async {
-        guard !files.isEmpty else { return }
+    /// Moves each of `files` that exists to the Trash, a few at a time, keeping `trashProgress` current. Returns what
+    /// happened to each (`outcomes[i]` is `files[i]`'s).
+    private func moveToTrash(_ files: [URL]) async -> [TrashOutcome] {
+        guard !files.isEmpty else { return [] }
         trashPending.total += files.count
         publishTrashProgress()
+        var outcomes: [TrashOutcome] = []
+        outcomes.reserveCapacity(files.count)
         var start = 0
         while start < files.count {
             let end = min(start + Self.trashChunkSize, files.count)
             let chunk = Array(files[start..<end])
-            await fileTrasher.trash(chunk)
+            outcomes += await fileTrasher.trash(chunk)
             trashPending.done += chunk.count
             publishTrashProgress()
             start = end
@@ -235,6 +284,7 @@ extension LibraryStore {
             trashPending = TrashProgress(done: 0, total: 0) // every running delete has trashed its files
             publishTrashProgress()
         }
+        return outcomes
     }
 
     private func publishTrashProgress() {
@@ -262,5 +312,57 @@ extension LibraryStore {
     private func writeMetadataInBackground(_ items: [MetadataWriteItem]) {
         guard !items.isEmpty else { return }
         MetadataWriter.shared.enqueue(items)
+    }
+}
+
+/// A delete that left photos as they were because some of their files couldn't be moved to the Trash: how many, and
+/// why, for the alert (`LibraryStore.deleteProblem`).
+struct DeleteProblem: Equatable {
+    /// Photos the delete left in place, all or in part.
+    let photoCount: Int
+    /// Photos it was asked to delete.
+    let attemptedCount: Int
+    /// "RAW" or "JPG" for a file-type delete; nil for a permanent delete.
+    let fileType: String?
+    /// One line per reason: a drive that isn't connected, or a file and why it couldn't be moved.
+    let reasons: [String]
+
+    /// Reasons listed before "And N more."
+    static let reasonLimit = 5
+
+    init(photoCount: Int, attemptedCount: Int, fileType: String?, problems: [(path: String, outcome: TrashOutcome)]) {
+        self.photoCount = photoCount
+        self.attemptedCount = attemptedCount
+        self.fileType = fileType
+        var reasons: [String] = []
+        var drives = Set<String>()
+        for (path, outcome) in problems {
+            switch outcome {
+            case .volumeUnavailable(let name):
+                if drives.insert(name).inserted { reasons.append("“\(name)” isn’t connected.") }
+            case .failed(let reason):
+                reasons.append("“\((path as NSString).lastPathComponent)”: \(reason)")
+            case .trashed, .alreadyGone:
+                break
+            }
+        }
+        self.reasons = reasons
+    }
+
+    var title: String { "Some Files Weren’t Moved to the Trash" }
+
+    var message: String {
+        let summary: String
+        if let fileType {
+            let photos = photoCount == 1 ? "1 photo" : "\(photoCount) photos"
+            summary = "The \(fileType) file\(photoCount == 1 ? "" : "s") of \(photos) couldn’t be moved to the Trash, "
+                + "so \(photoCount == 1 ? "that photo keeps it" : "those photos keep them")."
+        } else {
+            summary = "\(photoCount) of \(attemptedCount) photos couldn’t be moved to the Trash, so "
+                + (photoCount == 1 ? "it’s" : "they’re") + " still in the Bin."
+        }
+        var lines = Array(reasons.prefix(Self.reasonLimit))
+        if reasons.count > Self.reasonLimit { lines.append("And \(reasons.count - Self.reasonLimit) more.") }
+        return ([summary] + lines).joined(separator: "\n")
     }
 }

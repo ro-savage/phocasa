@@ -122,7 +122,150 @@ final class FileTrasherTests: LibraryTestCase {
         XCTAssertTrue(library.photosBeingDeleted.isEmpty)
     }
 
+    // MARK: - Files that can't be moved
+
+    /// Makes the file at `path` locked (Finder's "Locked", the user-immutable flag), unlocked again at tear-down so the
+    /// temp folder can be removed.
+    private func lock(_ path: String) throws {
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: path) }
+    }
+
+    /// Each file gets its own outcome: moved, already gone (its volume is there), on a volume that isn't mounted (it may
+    /// well still be there), or there but not movable (locked, in a read-only folder), with the reason.
+    func testTrasherReportsWhatHappenedToEachFile() async throws {
+        let volumes = try makeTempDir()
+        let drive = volumes.appendingPathComponent("Drive", isDirectory: true)
+        try FileManager.default.createDirectory(at: drive, withIntermediateDirectories: true)
+        let movable = drive.appendingPathComponent("a.jpg")
+        try Data([1]).write(to: movable)
+        let locked = drive.appendingPathComponent("locked.jpg")
+        try Data([1]).write(to: locked)
+        try lock(locked.path)
+        let readOnlyFolder = drive.appendingPathComponent("ro", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnlyFolder, withIntermediateDirectories: true)
+        let inReadOnly = readOnlyFolder.appendingPathComponent("b.jpg")
+        try Data([1]).write(to: inReadOnly)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnlyFolder.path)
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnlyFolder.path)
+        }
+        let gone = drive.appendingPathComponent("gone.jpg")
+        let unplugged = volumes.appendingPathComponent("Unplugged/c.jpg")
+        let trashDir = self.trashDir!
+        let trasher = FileTrasher(trashItem: { url in
+            try FileManager.default.moveItem(at: url, to: trashDir.appendingPathComponent(url.lastPathComponent))
+        }, volumes: VolumeCheck(volumesDirectory: volumes.path))
+
+        let outcomes = await trasher.trash([movable, locked, inReadOnly, gone, unplugged])
+
+        XCTAssertEqual(outcomes.count, 5)
+        XCTAssertEqual(outcomes.first, .trashed)
+        guard case .failed(let reason) = outcomes[1] else { return XCTFail("locked: \(outcomes[1])") }
+        XCTAssertFalse(reason.isEmpty)
+        guard case .failed = outcomes[2] else { return XCTFail("read-only folder: \(outcomes[2])") }
+        XCTAssertEqual(outcomes[3], .alreadyGone)
+        XCTAssertEqual(outcomes[4], .volumeUnavailable(name: "Unplugged"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: locked.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: inReadOnly.path))
+    }
+
+    /// Emptying the bin with a locked file: that photo stays in the bin, in the store and in memory, the others go, and
+    /// the owner is told how many couldn't be moved and why. (It used to be deleted from the store anyway, and the next
+    /// scan brought it back as a new photo, out of the bin.)
+    func testPermanentDeleteKeepsPhotosWhoseFilesCouldNotBeMoved() async throws {
+        let kept = try insertPhoto("locked", inBin: true)
+        let deleted = try insertPhoto("free", inBin: true)
+        try lock(try XCTUnwrap(kept.jpgPath))
+        library.loadExistingData()
+        library.viewingBin = true
+        library.refreshVisiblePhotos()
+        useTestTrash()
+
+        await library.deletePermanently([kept, deleted])
+
+        XCTAssertEqual(log.names, ["free.jpg"])
+        XCTAssertEqual(try filesLeft(), ["locked.jpg"])
+        XCTAssertEqual(library.binPhotos.map(\.id), [kept.id])
+        XCTAssertEqual(library.photos.map(\.id), [kept.id])
+        XCTAssertEqual(library.binCount, 1)
+        let rows = try ModelContext(container).fetch(FetchDescriptor<PhotoAsset>())
+        XCTAssertEqual(rows.map(\.id), [kept.id])
+        XCTAssertEqual(rows.first?.isInBin, true)
+        let problem = try XCTUnwrap(library.deleteProblem)
+        XCTAssertEqual(problem.photoCount, 1)
+        XCTAssertEqual(problem.attemptedCount, 2)
+        XCTAssertTrue(problem.message.contains("locked.jpg"), problem.message)
+        XCTAssertTrue(library.photosBeingDeleted.isEmpty)
+    }
+
+    /// Emptying the bin while the drive is unplugged: nothing is deleted (the files may well still be there), and the
+    /// owner is told the drive isn't connected. A file that is simply gone, on a volume that is there, counts as deleted.
+    func testPermanentDeleteOfFilesOnADriveThatIsNotConnectedChangesNothing() async throws {
+        let volumes = try makeTempDir()
+        let offline = PhotoAsset(fileName: "away", jpgPath: volumes.appendingPathComponent("Photos/2024/away.jpg").path,
+                                 folderPath: volumes.appendingPathComponent("Photos/2024").path,
+                                 creationDate: Date(), fileSize: 2)
+        offline.isInBin = true
+        context.insert(offline)
+        let vanished = PhotoAsset(fileName: "vanished", jpgPath: photosDir.appendingPathComponent("vanished.jpg").path,
+                                  folderPath: photosDir.path, creationDate: Date(), fileSize: 2)
+        vanished.isInBin = true
+        context.insert(vanished)
+        try context.save()
+        library.loadExistingData()
+        let log = self.log!
+        library.fileTrasher = FileTrasher(trashItem: { log.append($0) },
+                                          volumes: VolumeCheck(volumesDirectory: volumes.path))
+
+        await library.deletePermanently([offline, vanished])
+
+        XCTAssertEqual(log.count, 0, "nothing to move")
+        XCTAssertEqual(library.binPhotos.map(\.id), [offline.id])
+        XCTAssertEqual(try ModelContext(container).fetch(FetchDescriptor<PhotoAsset>()).map(\.id), [offline.id])
+        let problem = try XCTUnwrap(library.deleteProblem)
+        XCTAssertEqual(problem.photoCount, 1)
+        XCTAssertTrue(problem.message.contains("“Photos” isn’t connected"), problem.message)
+    }
+
+    /// A pair whose JPG went to the Trash but whose RAW is locked stays in the bin as the RAW, so it never points at a
+    /// file in the Trash.
+    func testPermanentDeleteThatMovesPartOfAPairKeepsTheRest() async throws {
+        let photo = try insertPhoto("pair", raw: true, inBin: true)
+        try lock(try XCTUnwrap(photo.rawPath))
+        library.loadExistingData()
+        useTestTrash()
+
+        await library.deletePermanently([photo])
+
+        XCTAssertEqual(log.names, ["pair.jpg"])
+        XCTAssertNil(photo.jpgPath)
+        XCTAssertNotNil(photo.rawPath)
+        XCTAssertEqual(library.binPhotos.map(\.id), [photo.id])
+        XCTAssertEqual(library.binFacts.first?.hasJPG, false)
+        XCTAssertEqual(library.deleteProblem?.photoCount, 1)
+    }
+
     // MARK: - File-type delete
+
+    /// A file-type delete whose RAW can't be moved leaves that pair as it was, and says so. (It used to clear `rawPath`
+    /// regardless, and the next scan brought the RAW back.)
+    func testFileTypeDeleteKeepsTheFileItCouldNotMove() async throws {
+        let stuck = try insertPhoto("stuck", raw: true)
+        let free = try insertPhoto("free", raw: true)
+        try lock(try XCTUnwrap(stuck.rawPath))
+        library.loadExistingData()
+        useTestTrash()
+
+        await library.deleteFileType(of: [stuck, free], raw: true, jpg: false)
+
+        XCTAssertEqual(log.names, ["free.arw"])
+        XCTAssertNotNil(stuck.rawPath)
+        XCTAssertNil(free.rawPath)
+        XCTAssertEqual(library.rawCount, 1)
+        XCTAssertEqual(library.deleteProblem?.photoCount, 1)
+        XCTAssertTrue(library.photosBeingDeleted.isEmpty)
+    }
 
     func testFileTypeDeleteTrashesTheRAWAndItsSidecarThenKeepsTheJPG() async throws {
         let photo = try insertPhoto("pair", raw: true, sidecar: true)
