@@ -15,7 +15,7 @@ struct MainContentView: View {
 
         ZStack {
             NavigationSplitView {
-                SidebarView(library: viewModel.library)
+                SidebarView(viewModel: viewModel)
                     .frame(minWidth: 200)
             } detail: {
                 PhotoGridView(viewModel: viewModel, thumbnailsPaused: showsDetail)

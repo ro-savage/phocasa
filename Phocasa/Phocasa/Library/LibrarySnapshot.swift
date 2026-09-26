@@ -46,6 +46,8 @@ struct LibrarySnapshot: Sendable {
         var jpgPath: String?
         var rawPath: String?
         var fileSize: Int64
+        var captureDate: Date?
+        var creationDate: Date?
     }
 
     /// Reads the snapshot through new contexts on `container`, which only read. Don't call it on the main thread.
@@ -106,7 +108,8 @@ struct LibrarySnapshot: Sendable {
                 list.ids.append(id)
                 list.facts.append(row.facts)
                 snapshot.storedRows.append(StoredPhoto(id: row.facts.id, key: row.key, jpgPath: row.jpgPath,
-                                                       rawPath: row.rawPath, fileSize: row.fileSize, isInBin: inBin))
+                                                       rawPath: row.rawPath, fileSize: row.fileSize, isInBin: inBin,
+                                                       captureDate: row.captureDate, creationDate: row.creationDate))
             }
             if inBin { snapshot.bin = list } else { snapshot.library = list }
         }
@@ -121,7 +124,8 @@ struct LibrarySnapshot: Sendable {
         return Row(facts: facts(id: photo.id, fileName: fileName, rating: photo.rating, jpgPath: jpgPath,
                                 rawPath: rawPath, tags: photo.tags, tagFacts: &tagFacts),
                    key: DiscoveredPhoto.key(folderPath: photo.folderPath, fileName: fileName),
-                   jpgPath: jpgPath, rawPath: rawPath, fileSize: photo.fileSize)
+                   jpgPath: jpgPath, rawPath: rawPath, fileSize: photo.fileSize, captureDate: photo.captureDate,
+                   creationDate: photo.creationDate)
     }
 
     /// `PhotoFacts(_:tags:)`, off the main actor: the same fields, built the same way

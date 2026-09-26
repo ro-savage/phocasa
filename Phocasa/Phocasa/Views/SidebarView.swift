@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct SidebarView: View {
-    let library: LibraryStore
+    let viewModel: PhotoLibraryViewModel
+
+    private var library: LibraryStore { viewModel.library }
 
     var body: some View {
         List {
@@ -77,6 +79,8 @@ struct SidebarView: View {
                 }
             }
 
+            LibraryFoldersSection(viewModel: viewModel)
+
             Section {
                 sidebarRow(filter: .bin, badge: library.binCount) {
                     Label("Bin", systemImage: "trash")
@@ -84,6 +88,19 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // "Remove from Library…" (a library folder's context menu) takes its photos out of the library: asked first.
+        .confirmationDialog(
+            viewModel.pendingFolderRemoval?.title ?? "",
+            isPresented: Binding(get: { viewModel.pendingFolderRemoval != nil },
+                                 set: { if !$0 { viewModel.pendingFolderRemoval = nil } }),
+            titleVisibility: .visible,
+            presenting: viewModel.pendingFolderRemoval
+        ) { request in
+            Button("Remove from Library", role: .destructive) { viewModel.confirmFolderRemoval(request) }
+            Button("Cancel", role: .cancel) {}
+        } message: { request in
+            Text(request.message)
+        }
     }
 
     private func isFilterActive(_ filter: SidebarFilter) -> Bool {

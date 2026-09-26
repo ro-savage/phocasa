@@ -28,4 +28,23 @@ struct VolumeCheck: Sendable {
         guard let folder = volumeFolder(of: path) else { return true }
         return FileManager.default.fileExists(atPath: folder)
     }
+
+    /// Whether `path` is the folder `recorded` names, on its volume mounted under another name. macOS mounts a volume
+    /// whose name is taken (by another volume, or a folder left behind in `/Volumes`) as "Name 1", "Name 2"…, so a drive
+    /// can come back at `/Volumes/Photos 1/2024` for `/Volumes/Photos/2024`, and later go back. Only the names are
+    /// compared: the same path on the volume, and the same volume name less that number.
+    func isSameFolderOnRenamedVolume(_ path: String, as recorded: String) -> Bool {
+        guard let volume = volumeFolder(of: path), let recordedVolume = volumeFolder(of: recorded),
+              volume != recordedVolume,
+              path.dropFirst(volume.count) == recorded.dropFirst(recordedVolume.count) else { return false }
+        return Self.nameWithoutMountNumber(volume) == Self.nameWithoutMountNumber(recordedVolume)
+    }
+
+    /// A volume's name without the " 1" macOS adds when the name is taken.
+    private static func nameWithoutMountNumber(_ volumeFolder: String) -> Substring {
+        let name = Substring((volumeFolder as NSString).lastPathComponent)
+        guard let space = name.lastIndex(of: " ") else { return name }
+        let number = name[name.index(after: space)...]
+        return !number.isEmpty && number.allSatisfy({ $0.isASCII && $0.isNumber }) ? name[..<space] : name
+    }
 }

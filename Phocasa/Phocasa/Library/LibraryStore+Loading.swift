@@ -51,7 +51,7 @@ extension LibraryStore {
             rescanCurrentLibrary()
             return
         }
-        currentLibrary = (try? context.fetch(FetchDescriptor<PhotoLibrary>()))?.first // so a rescan can queue now
+        setLibraryFolders((try? context.fetch(FetchDescriptor<PhotoLibrary>())) ?? []) // so the rescans can queue now
         startScanQueue(loadingFirstUnlessLoadedAfter: loading.generation)
         rescanCurrentLibrary() // queued behind the load
         readAheadForLaunchRescan()
@@ -70,12 +70,12 @@ extension LibraryStore {
         let tags: [Tag]
         let fetchedPhotos: [PhotoAsset]
         let fetchedBin: [PhotoAsset]
-        let photoLibrary: PhotoLibrary?
+        let folders: [PhotoLibrary]
         do {
             tags = try fetchTags(in: context)
             fetchedPhotos = try sort.fetch(where: #Predicate { !$0.isInBin }, in: context)
             fetchedBin = try sort.fetch(where: #Predicate { $0.isInBin }, in: context)
-            photoLibrary = try context.fetch(FetchDescriptor<PhotoLibrary>()).first
+            folders = try context.fetch(FetchDescriptor<PhotoLibrary>())
         } catch {
             libraryReadDidFail(error)
             return
@@ -91,7 +91,7 @@ extension LibraryStore {
         binPhotos = fetchedBin
         binFacts = makeFacts(for: binPhotos)
 
-        finishLoad(tags: tags, library: photoLibrary)
+        finishLoad(tags: tags, folders: folders)
     }
 
     private func libraryReadDidFail(_ error: any Error) {
@@ -153,12 +153,12 @@ extension LibraryStore {
             if fetched.count < pageSize { break }
         }
         var tags: [Tag] = []
-        var photoLibrary: PhotoLibrary?
+        var folders: [PhotoLibrary] = []
         var readError: (any Error)?
         if loaded {
             do {
                 tags = try fetchTags(in: context) // ~9 ms, so a turn of its own
-                photoLibrary = try context.fetch(FetchDescriptor<PhotoLibrary>()).first
+                folders = try context.fetch(FetchDescriptor<PhotoLibrary>())
             } catch {
                 readError = error
             }
@@ -213,7 +213,7 @@ extension LibraryStore {
         binPhotos = bin.photos
         binFacts = bin.facts
         let complete = missingPhotoIDs.isEmpty && library.facts.count == snapshot.library.facts.count
-        finishLoad(tags: tags, counts: complete ? snapshot.libraryCounts : nil, library: photoLibrary)
+        finishLoad(tags: tags, counts: complete ? snapshot.libraryCounts : nil, folders: folders)
         scanning.readAhead?.rows = (snapshot.storedRows, loading.generation)
         report.applied = true
         endTurn()
@@ -242,8 +242,8 @@ extension LibraryStore {
     }
 
     /// The end of every full load, once the library and the bin are in place: counts (`counts`, when the caller has
-    /// them for `allFacts` already), tag lists, the grid, and `library`, the `PhotoLibrary` it read.
-    private func finishLoad(tags: [Tag], counts: FacetCounts? = nil, library: PhotoLibrary?) {
+    /// them for `allFacts` already), tag lists, the grid, and the library `folders` it read.
+    private func finishLoad(tags: [Tag], counts: FacetCounts? = nil, folders: [PhotoLibrary]) {
         libraryReadFailure = nil
         loading.generation += 1
         libraryVersion += 1
@@ -253,7 +253,7 @@ extension LibraryStore {
         setTagLists(tags)
         refreshVisiblePhotos()
         sortTagCategories()
-        currentLibrary = library
+        setLibraryFolders(folders)
     }
 
     func makeFacts(for photos: [PhotoAsset]) -> [PhotoFacts] {

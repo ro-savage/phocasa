@@ -23,6 +23,8 @@ final class PhotoLibraryViewModel {
     var photosToRevert: [PhotoAsset] = []
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
+    /// A library folder's "Remove from Library…" waiting for its confirmation (`requestFolderRemoval(_:)`).
+    var pendingFolderRemoval: FolderRemoval?
 
     // MARK: - Image Editing State
     /// The edit in progress: its photo, parameters, renders, comparison and crop state. Exists only while editing.
@@ -83,6 +85,34 @@ final class PhotoLibraryViewModel {
 
     func openFolder() {
         showFolderPicker = true
+    }
+
+    // MARK: - Library Folders
+
+    /// Asks for "Remove from Library…" to be confirmed, with how many photos would leave (counted off the main actor
+    /// first). Not while a scan runs (`LibraryStore.canRemoveLibraryFolders`).
+    func requestFolderRemoval(_ folder: PhotoLibrary) {
+        guard library.canRemoveLibraryFolders else { return }
+        let name = (folder.rootFolderPath as NSString).lastPathComponent
+        let path = folder.rootFolderPath
+        Task {
+            let count = await library.photoCount(inFolder: folder)
+            guard library.canRemoveLibraryFolders, library.libraryFolders.contains(where: { $0 === folder }) else { return }
+            pendingFolderRemoval = FolderRemoval(folder: folder, name: name, path: path, photoCount: count)
+        }
+    }
+
+    /// "Remove from Library…", confirmed: the folder's photos leave the library (their files stay as they are). The
+    /// detail view closes first if it shows one of them, and the selection loses them.
+    @discardableResult
+    func confirmFolderRemoval(_ request: FolderRemoval) -> Task<Void, Never>? {
+        pendingFolderRemoval = nil
+        // Before the models go: the detail view must not go on showing (or saving an edit of) a removed photo.
+        if showingDetail, let photo = selectedDetailPhoto, request.contains(photo) {
+            closeDetail()
+        }
+        guard let removal = library.removeLibraryFolder(request.folder) else { return nil }
+        return Task { selection.deselect(await removal.value) }
     }
 
     // MARK: - Rating and Tagging the Selection
