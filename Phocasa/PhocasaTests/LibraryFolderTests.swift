@@ -1,5 +1,7 @@
 import XCTest
 import SwiftData
+import SwiftUI
+import AppKit
 @testable import Phocasa
 
 /// Every folder the owner opens stays a library folder (a `PhotoLibrary` row each), and a rescan scans each of them.
@@ -187,6 +189,38 @@ final class LibraryFolderTests: LibraryScanTestCase {
         XCTAssertEqual(photo.rating, 3)
         XCTAssertEqual(names(vm.library.allPhotos), ["b", "moving"])
         assertMatchesFreshLoad(vm, "a photo moved between library folders")
+    }
+
+    // MARK: - The sidebar
+
+    /// The sidebar shows the folders section when there are library folders (hosted window: what it draws, the names
+    /// and the "Not connected" mark, is checked in the real app), and the mark says why a folder isn't there.
+    func testTheSidebarShowsTheLibraryFoldersAndWhyOneIsNotThere() async throws {
+        let volumes = try makeTempDir("volumes")
+        let onDrive = try makeFolder(volumes.appendingPathComponent("Photo Drive/Holidays"))
+        let local = try makeFolder(try makeTempDir("local").appendingPathComponent("Phone"))
+        try makeJPEG("a.jpg", in: local)
+        let (vm, _) = try await openLibrary(folders: [onDrive, local])
+        vm.library.volumes = VolumeCheck(volumesDirectory: volumes.path)
+        try FileManager.default.moveItem(at: volumes.appendingPathComponent("Photo Drive"),
+                                         to: try makeTempDir("unplugged").appendingPathComponent("Photo Drive"))
+        try await rescan(vm)
+        let driveFolder = try XCTUnwrap(vm.library.libraryFolders.first { $0.rootFolderPath == onDrive.path })
+        let issue = try XCTUnwrap(vm.library.folderIssues[driveFolder.id])
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 700),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let before = LibraryFoldersSection.bodyEvaluations
+        window.contentView = NSHostingView(rootView: SidebarView(viewModel: vm))
+        window.orderFront(nil)
+        try await Task.sleep(for: .milliseconds(500)) // the main run loop lays the window out meanwhile
+
+        XCTAssertGreaterThan(LibraryFoldersSection.bodyEvaluations, before, "the section is in the sidebar")
+        XCTAssertEqual(LibraryFoldersSection.mark(for: issue), "Not connected")
+        XCTAssertEqual(LibraryFoldersSection.mark(for: .folderNotFound(path: onDrive.path)), "Can’t be found")
+        XCTAssertEqual(LibraryFoldersSection.name(of: onDrive.path), "Holidays")
     }
 
     // MARK: - Removing a folder

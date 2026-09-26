@@ -11,10 +11,11 @@ struct LibraryToolbar: ToolbarContent {
                 Label("Open Folder", systemImage: "folder.badge.plus")
             }
 
-            if viewModel.library.currentLibrary != nil {
+            if !viewModel.library.libraryFolders.isEmpty {
                 Button(action: { viewModel.library.rescanCurrentLibrary() }) {
                     Label("Rescan", systemImage: "arrow.clockwise")
                 }
+                .help("Rescan every library folder")
             }
         }
 
