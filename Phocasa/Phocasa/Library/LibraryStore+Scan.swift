@@ -33,6 +33,10 @@ extension LibraryStore {
         case storeUnreadable(String)
         /// The scan's changes couldn't be saved. They wait in the context, and a later save writes them.
         case storeUnsaved(String)
+        /// The library's folder is on a drive (or share) that isn't connected: `volume` is its name.
+        case folderNotConnected(path: String, volume: String)
+        /// The library's folder isn't there, on a volume that is: moved, renamed or deleted.
+        case folderNotFound(path: String)
 
         var statusText: String {
             switch self {
@@ -40,6 +44,18 @@ extension LibraryStore {
                 "Scan stopped: Phocasa couldn’t read its library (\(reason)). Nothing was added or changed."
             case .storeUnsaved(let reason):
                 "The scan’s changes couldn’t be saved (\(reason)). Rescan to try again."
+            case .folderNotConnected(_, let volume):
+                "“\(volume)” isn’t connected. Connect the drive and choose Rescan."
+            case .folderNotFound(let path):
+                "“\((path as NSString).lastPathComponent)” can’t be found. It may have been moved, renamed or deleted."
+            }
+        }
+
+        /// The library's folder, when the issue is that it isn't there.
+        var unavailableFolder: String? {
+            switch self {
+            case .folderNotConnected(let path, _), .folderNotFound(let path): path
+            case .storeUnreadable, .storeUnsaved: nil
             }
         }
     }
@@ -193,6 +209,17 @@ extension LibraryStore {
         report.usedRowsReadAhead = rowsReadAhead != nil
         report.mainActorTime += clock.now - sectionStart
 
+        // A folder that isn't there (a drive unplugged, a folder moved): no walk and no diff, so nothing is added,
+        // changed or found missing. Its photos, whose files can't be reached, are hidden until a scan finds it again.
+        if let issue = unavailableFolderIssue(url) {
+            do {
+                hidePhotos(under: url.path, rows: try await Self.storedRows(readAhead: rowsReadAhead, in: container))
+            } catch {
+                return scanDidStop(.storeUnreadable(error.localizedDescription), report: &report)
+            }
+            return scanDidStop(issue, report: &report)
+        }
+
         // Off the main actor: the store and the file system are read at the same time (or were read ahead).
         async let storedRows = Self.storedRows(readAhead: rowsReadAhead, in: container)
         async let foundPhotos = Self.walk(url, readAhead: readAhead?.walk, with: scanner)
@@ -317,6 +344,29 @@ extension LibraryStore {
         scanIssue = report.issue
         report.mainActorTime += clock.now - sectionStart
         lastScanReport = report
+    }
+
+    /// Why the folder at `url` can't be scanned, or nil when it's there.
+    private func unavailableFolderIssue(_ url: URL) -> ScanIssue? {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return nil
+        }
+        if let volume = volumes.volumeName(of: url.path), !volumes.isVolumeAvailable(for: url.path) {
+            return .folderNotConnected(path: url.path, volume: volume)
+        }
+        return .folderNotFound(path: url.path)
+    }
+
+    /// Hides the library photos whose files are under `folder` (from the stored `rows`), as missing: without a look at
+    /// the disk, which can't reach them. A scan that finds them shows them again (`ScanPlan.foundAgainIDs`).
+    private func hidePhotos(under folder: String, rows: [StoredPhoto]) {
+        let prefix = folder.hasSuffix("/") ? folder : folder + "/"
+        let hiding = Set(rows.lazy.filter { !$0.isInBin && ($0.jpgPath ?? $0.rawPath ?? "").hasPrefix(prefix) }.map(\.id))
+            .subtracting(missingPhotoIDs)
+        guard !hiding.isEmpty else { return }
+        missingPhotoIDs.formUnion(hiding)
+        updateLibrary(adding: [], facts: [], removing: hiding)
     }
 
     /// A scan that stops before it changes anything: the status bar says why until a scan goes through.

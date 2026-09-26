@@ -79,6 +79,25 @@ struct PhotoGridView: View {
                     } description: {
                         Text(failure)
                     }
+                } else if !viewModel.library.viewingBin, let issue = viewModel.library.scanIssue,
+                          let folder = issue.unavailableFolder {
+                    ContentUnavailableView {
+                        if case .folderNotConnected(_, let volume) = issue {
+                            Label("“\(volume)” Isn’t Connected", systemImage: "externaldrive.badge.xmark")
+                        } else {
+                            Label("“\((folder as NSString).lastPathComponent)” Can’t Be Found",
+                                  systemImage: "questionmark.folder")
+                        }
+                    } description: {
+                        if case .folderNotConnected = issue {
+                            Text("Connect the drive and choose Rescan. Your photos are still in the library.\n\(folder)")
+                        } else {
+                            Text("It may have been moved, renamed or deleted. Choose Rescan once it’s back, or Open "
+                                 + "Folder to choose where it is now.\n\(folder)")
+                        }
+                    } actions: {
+                        Button("Rescan") { viewModel.library.rescanCurrentLibrary() }
+                    }
                 } else if viewModel.library.viewingBin {
                     ContentUnavailableView {
                         Label("Bin is Empty", systemImage: "trash")

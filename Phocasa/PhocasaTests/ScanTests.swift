@@ -523,18 +523,70 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["inside", "outside"])
     }
 
-    func testScanOfMissingRootFolderHidesItsPhotos() async throws {
-        let photos = try makeTempDir("photos")
+    /// A library folder that isn't there (moved, renamed, deleted) isn't walked or diffed: nothing is added or changed,
+    /// and the library says the folder can't be found rather than "Open a folder to get started". Its photos are hidden
+    /// meanwhile (their files can't be reached), and come back, without duplicates, once it's back.
+    func testScanOfMissingRootFolderSkipsTheDiffAndSaysSo() async throws {
+        let parent = try makeTempDir("parent")
+        let photos = parent.appendingPathComponent("Photos", isDirectory: true)
+        try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
         try makeJPEG("a.jpg", in: photos)
         try makeJPEG("b.jpg", in: photos)
         let (vm, _, container) = try await openLibrary(at: photos)
         XCTAssertEqual(vm.library.allPhotos.count, 2)
+        let scannedAt = vm.library.currentLibrary?.lastScanDate
+        let parked = parent.appendingPathComponent("Parked", isDirectory: true)
 
-        try FileManager.default.removeItem(at: photos) // like an unplugged drive
+        try FileManager.default.moveItem(at: photos, to: parked)
         try await rescan(vm)
 
-        XCTAssertTrue(vm.library.allPhotos.isEmpty)
-        XCTAssertEqual(try storedPhotos(container).count, 2, "rows are kept, only hidden")
+        XCTAssertEqual(vm.library.scanIssue, .folderNotFound(path: photos.path))
+        XCTAssertEqual(vm.library.statusMessage, "“Photos” can’t be found. It may have been moved, renamed or deleted.")
+        XCTAssertTrue(vm.library.allPhotos.isEmpty, "hidden while their files can't be reached")
+        XCTAssertEqual(vm.library.lastScanReport?.discovered, 0)
+        XCTAssertEqual(vm.library.currentLibrary?.lastScanDate, scannedAt, "no scan happened")
+        XCTAssertEqual(try storedPhotos(container).count, 2, "rows are kept")
+
+        try FileManager.default.moveItem(at: parked, to: photos)
+        try await rescan(vm)
+
+        XCTAssertNil(vm.library.scanIssue)
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["a", "b"])
+        XCTAssertEqual(try storedPhotos(container).count, 2, "no duplicates")
+        assertMatchesFreshLoad(vm, "the folder came back")
+    }
+
+    /// A library on a drive that isn't connected (`/Volumes/<name>` gone): the same, and the library says which drive
+    /// to connect. A photo from elsewhere whose file is there stays shown.
+    func testScanOfALibraryOnADriveThatIsNotConnectedSaysWhichDrive() async throws {
+        let volumes = try makeTempDir("volumes")
+        let drive = volumes.appendingPathComponent("Photo Drive", isDirectory: true)
+        let photos = drive.appendingPathComponent("2024", isDirectory: true)
+        try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
+        try makeJPEG("a.jpg", in: photos)
+        let elsewhere = try makeTempDir("elsewhere")
+        let outside = try makeJPEG("outside.jpg", in: elsewhere)
+        let (vm, _, container) = try await openLibrary(at: photos) { context in
+            context.insert(PhotoAsset(fileName: "outside", jpgPath: outside.path, folderPath: elsewhere.path,
+                                      creationDate: Date(), fileSize: 1))
+        }
+        vm.library.volumes = VolumeCheck(volumesDirectory: volumes.path)
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["a", "outside"])
+        let unplugged = try makeTempDir("unplugged").appendingPathComponent("Photo Drive")
+
+        try FileManager.default.moveItem(at: drive, to: unplugged)
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.scanIssue, .folderNotConnected(path: photos.path, volume: "Photo Drive"))
+        XCTAssertEqual(vm.library.statusMessage, "“Photo Drive” isn’t connected. Connect the drive and choose Rescan.")
+        XCTAssertEqual(vm.library.allPhotos.map(\.fileName), ["outside"])
+
+        try FileManager.default.moveItem(at: unplugged, to: drive)
+        try await rescan(vm)
+
+        XCTAssertNil(vm.library.scanIssue)
+        XCTAssertEqual(Set(vm.library.allPhotos.map(\.fileName)), ["a", "outside"])
+        XCTAssertEqual(try storedPhotos(container).count, 2)
     }
 
     func testRescanRequestedDuringScanRunsAfterIt() async throws {

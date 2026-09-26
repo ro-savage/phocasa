@@ -114,6 +114,8 @@ final class LibraryStore {
     @ObservationIgnored var scanWillSave: ((ModelContext) -> Void)?
     /// Where deletes move files to the Trash, off the main actor. Tests put in one that never touches the real Trash.
     @ObservationIgnored var fileTrasher = FileTrasher.shared
+    /// Tells a library folder on a drive that isn't connected from one that's gone. Tests pass a temp "Volumes" folder.
+    @ObservationIgnored var volumes = VolumeCheck()
     /// Every file of the deletes still running, and how many are in the Trash already.
     @ObservationIgnored var trashPending = TrashProgress(done: 0, total: 0)
     /// Photos with a delete still running. Another delete of them does nothing (it would delete them twice).
