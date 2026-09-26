@@ -373,6 +373,14 @@ final class MetadataService: Sendable {
         }
         // Some writers (ImageIO's JPEG writer among them) end the packet with NUL bytes; they're kept as they are.
         let body = existing.prefix(existing.count - existing.reversed().prefix { $0 == 0 }.count)
+        // A packet that already says exactly this is kept as it is, so writing the same values again changes no byte
+        // (a text edit would re-lay-out `dc:subject`). No keywords needs an empty Bag when the caller asks for one.
+        if let scan = XMPPacketScan(Data(body)), scan.ratings == ["\(rating)"],
+           keywords.isEmpty
+               ? (scan.subjects == [[]] || (scan.subjects.isEmpty && emptyKeywords == .leaveOut))
+               : scan.subjects == [keywords] {
+            return UpdatedXMPPacket(packet: existing, checkedByImageIO: true)
+        }
         let edit = XMPTextEdit.setting(rating: rating, keywords: keywords, emptyKeywords: emptyKeywords, in: Data(body))
         // Values changed in place leave the XML's structure as it was, so ImageIO reads every other value as before
         // (and the caller's read-back checks the new ones): no need to parse the packet with ImageIO here.
