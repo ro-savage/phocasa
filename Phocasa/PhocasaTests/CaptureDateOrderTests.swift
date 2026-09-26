@@ -93,7 +93,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
     }
 
     /// The fetch, `insertionIndex` and `merge` agree on one order, with dated, undated and tied photos, both ways.
-    func testFetchInsertionAndMergeAgreeWithMixedDates() {
+    func testFetchInsertionAndMergeAgreeWithMixedDates() throws {
         var photos: [PhotoAsset] = []
         let seeds: [(TimeInterval?, TimeInterval?)] = [
             (3000, 10), (nil, 3500), (1000, 20), (nil, 500), (3000, 40), (2000, nil), (nil, nil), (5000, 1), (nil, 2500),
@@ -102,7 +102,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
         let facts = photos.map { PhotoFacts($0) }
         for newestFirst in [true, false] {
             let sort = LibrarySort(newestFirst: newestFirst)
-            let fetched = sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)
+            let fetched = try sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)
             let keys = fetched.map(LibrarySort.sortKey(of:))
             for i in 1..<keys.count {
                 XCTAssertTrue(sort.precedes(keys[i - 1], keys[i]), "newestFirst \(newestFirst): \(names(fetched))")
@@ -123,7 +123,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
     }
 
     /// Each fetch result is in order however the dated and undated photos interleave.
-    func testFetchInterleavesLongRunsOfDatedAndUndatedPhotos() {
+    func testFetchInterleavesLongRunsOfDatedAndUndatedPhotos() throws {
         // 60 dated and 40 undated photos, keys spread over the same range.
         for i in 0..<100 {
             let key = TimeInterval((i * 37) % 100) * 100
@@ -135,7 +135,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
         }
         for newestFirst in [true, false] {
             let sort = LibrarySort(newestFirst: newestFirst)
-            let keys = sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context).map(LibrarySort.sortKey(of:))
+            let keys = try sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context).map(LibrarySort.sortKey(of:))
             XCTAssertEqual(keys.count, 100)
             for i in 1..<keys.count {
                 XCTAssertTrue(sort.precedes(keys[i - 1], keys[i]), "newestFirst \(newestFirst) at \(i)")
@@ -145,7 +145,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
 
     /// A few undated photos among many dated ones (a library after the backfill), and a few dated photos among many
     /// undated ones (during it): the small run is merged in by binary search, in both directions.
-    func testFetchMergesASmallRunIntoALargeOne() {
+    func testFetchMergesASmallRunIntoALargeOne() throws {
         for (label, datedCount) in [("few undated", 47), ("few dated", 3)] {
             for photo in (try? context.fetch(FetchDescriptor<PhotoAsset>())) ?? [] { context.delete(photo) }
             try? context.save()
@@ -158,7 +158,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
             }
             for newestFirst in [true, false] {
                 let sort = LibrarySort(newestFirst: newestFirst)
-                let fetched = sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)
+                let fetched = try sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)
                 var inserted: [PhotoAsset] = []
                 for photo in photos { inserted.insert(photo, at: sort.insertionIndex(for: photo, in: inserted)) }
                 XCTAssertEqual(names(fetched), names(inserted), "\(label), newestFirst \(newestFirst)")
@@ -186,7 +186,7 @@ final class CaptureDateOrderTests: LibraryTestCase {
             let sort = LibrarySort(newestFirst: newestFirst)
             let listed = photos + late
             let (ordered, orderedFacts) = sort.reorder(listed, listed.map { PhotoFacts($0) }, ranks: ranks)
-            XCTAssertEqual(names(ordered), names(sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)),
+            XCTAssertEqual(names(ordered), names(try sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context)),
                            "newestFirst \(newestFirst)")
             XCTAssertEqual(orderedFacts.map(\.id), ids(ordered))
             // A list holding only some of the ranked photos (the bin) keeps just those.

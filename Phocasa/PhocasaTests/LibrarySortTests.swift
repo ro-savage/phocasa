@@ -22,7 +22,7 @@ final class LibrarySortTests: LibraryTestCase {
     }
 
     private func fetchLibrary(_ sort: LibrarySort) -> [PhotoAsset] {
-        sort.fetch(where: #Predicate { !$0.isInBin }, in: context)
+        try! sort.fetch(where: #Predicate { !$0.isInBin }, in: context) // an in-memory store
     }
 
     func testMissingDateSortsAsOldest() {

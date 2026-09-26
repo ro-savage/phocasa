@@ -55,6 +55,14 @@ struct ContentView: View {
                 let count = viewModel.photosToDelete.count
                 Text("Permanently delete \(count) photo\(count == 1 ? "" : "s")? The file\(count == 1 ? "" : "s") will be moved to the system Trash.")
             }
+            .alert(viewModel.library.deleteProblem?.title ?? "", isPresented: Binding(
+                get: { viewModel.library.deleteProblem != nil },
+                set: { if !$0 { viewModel.library.deleteProblem = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.library.deleteProblem?.message ?? "")
+            }
             .fileImporter(
                 isPresented: $viewModel.showFolderPicker,
                 allowedContentTypes: [.folder],

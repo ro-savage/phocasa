@@ -123,6 +123,100 @@ final class FolderScannerTests: XCTestCase {
         XCTAssertEqual(results.first?.fileName, "visible")
     }
 
+    // MARK: - Folders the scan stays out of
+
+    /// Writes a tiny file at `relativePath` under `dir`, making its folders.
+    private func touch(_ relativePath: String, in dir: URL) throws {
+        let url = dir.appendingPathComponent(relativePath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: url)
+    }
+
+    /// The photo files of `found`, relative to `dir`.
+    private func relativePaths(_ found: [DiscoveredPhoto], in dir: URL) throws -> Set<String> {
+        let canonical = try XCTUnwrap(realpath(dir.path, nil))
+        defer { free(canonical) }
+        let prefix = String(cString: canonical) + "/"
+        return Set(found.flatMap { [$0.jpgPath, $0.rawPath].compactMap { $0 } }.map { path in
+            path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : path
+        })
+    }
+
+    /// Other apps' libraries hold that app's copies of photos (a rating would be written into Photos' originals, a
+    /// delete would trash them), packages aren't folders of photos, and NAS and Windows drives keep thumbnails, recycle
+    /// bins and snapshots (copies of every photo) in folders of their own. The scan finds none of their files.
+    func testScanStaysOutOfOtherAppsLibrariesPackagesAndSystemFolders() async throws {
+        let dir = try makeTempDir()
+        defer { cleanUp(dir) }
+        try touch("keep.jpg", in: dir)
+        try touch("2024/trip.jpg", in: dir)
+        try touch("2024/trip.arw", in: dir)
+        let skipped = [
+            "Photos Library.photoslibrary/originals/A/IMG_0001.jpeg",
+            "Photos Library.photoslibrary/resources/derivatives/A/IMG_0001_1_105_c.jpeg",
+            "iPhoto Library.photolibrary/Masters/2010/a.jpg",
+            "Aperture Library.aplibrary/Masters/2012/b.nef",
+            "Lightroom Catalog Smart Previews.lrdata/1/1A/abc.dng",
+            "Lightroom Catalog.lrcat-data/x/y.jpg",
+            "Lightroom Library.lrlibrary/abc/originals/c.jpg",
+            "Catalog.cocatalog/Originals/d.cr3",
+            "Photo Booth Library/Pictures/Photo on 1-1-24.jpg",
+            "Viewer.app/Contents/Resources/icon.png",
+            "@eaDir/keep.jpg/SYNOPHOTO_THUMB_XL.jpg",
+            "2024/@eaDir/trip.jpg/SYNOPHOTO_THUMB_M.jpg",
+            "#recycle/old.jpg",
+            "#snapshot/GMT+01_2024.01.01-00.00.00/keep.jpg",
+            "@Recycle/old2.jpg",
+            "@Recently-Snapshot/GMT+01_2024/keep.jpg",
+            "$RECYCLE.BIN/S-1-5-21/$R1ABC.jpg",
+            "System Volume Information/x.jpg",
+            "Backups.backupdb/Mac/2020-01-01-000000/Macintosh HD/Users/me/keep.jpg",
+        ]
+        for path in skipped { try touch(path, in: dir) }
+
+        let found = await FolderScanner().scan(folderURL: dir)
+
+        XCTAssertEqual(try relativePaths(found, in: dir), ["keep.jpg", "2024/trip.jpg", "2024/trip.arw"])
+        // By name, for the plan (an `.app` is a package on every Mac, so the walk alone skips it).
+        for path in skipped where !path.hasPrefix("Viewer.app") {
+            XCTAssertTrue(FolderScanner.isInsideSkippedFolder(dir.appendingPathComponent(path).path, below: dir.path),
+                          path)
+        }
+        XCTAssertFalse(FolderScanner.isInsideSkippedFolder(dir.appendingPathComponent("2024/trip.jpg").path,
+                                                           below: dir.path))
+    }
+
+    /// The folder the owner chose is scanned even when it's one the scan would stay out of below it: the folder picker
+    /// offers no packages, so this is a folder the owner picked on purpose. Folders to skip inside it are still skipped.
+    func testChosenFolderIsScannedEvenWhenItsNameIsOneTheScanSkips() async throws {
+        let parent = try makeTempDir()
+        defer { cleanUp(parent) }
+        let dir = parent.appendingPathComponent("Old Catalog Smart Previews.lrdata", isDirectory: true)
+        try touch("a.dng", in: dir)
+        try touch("sub/b.jpg", in: dir)
+        try touch("sub/@eaDir/b.jpg/SYNOPHOTO_THUMB_M.jpg", in: dir)
+
+        let found = await FolderScanner().scan(folderURL: dir)
+
+        XCTAssertEqual(try relativePaths(found, in: dir), ["a.dng", "sub/b.jpg"])
+        XCTAssertFalse(FolderScanner.isInsideSkippedFolder(dir.appendingPathComponent("sub/b.jpg").path,
+                                                           below: dir.path))
+    }
+
+    /// A package chosen as the folder (not possible from the folder picker, which shows packages as files): the
+    /// enumerator lists its contents, and skips the packages inside it.
+    func testChosenPackageIsScannedButNotThePackagesInsideIt() async throws {
+        let parent = try makeTempDir()
+        defer { cleanUp(parent) }
+        let dir = parent.appendingPathComponent("Picked.app", isDirectory: true)
+        try touch("a.jpg", in: dir)
+        try touch("Inner.app/b.jpg", in: dir)
+
+        let found = await FolderScanner().scan(folderURL: dir)
+
+        XCTAssertEqual(try relativePaths(found, in: dir), ["a.jpg"])
+    }
+
     func testScanSkipsNonPhotoFiles() async throws {
         let dir = try makeTempDir()
         defer { cleanUp(dir) }

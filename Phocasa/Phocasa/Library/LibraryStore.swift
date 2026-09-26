@@ -45,6 +45,21 @@ final class LibraryStore {
     /// Files being moved to the Trash by deletes still running, when there are more than
     /// `trashProgressMinimum` (the status bar shows it).
     var trashProgress: TrashProgress?
+    /// The last delete that left photos as they were because files couldn't be moved to the Trash, for the alert; nil
+    /// once dismissed.
+    var deleteProblem: DeleteProblem?
+    /// Why the last full load (`loadExistingData()` or the launch's background load) couldn't read the store; nil once
+    /// one has. The library shown is the one before it (empty at launch), and the grid says the library couldn't be
+    /// read rather than that there are no photos.
+    var libraryReadFailure: String?
+    /// Why the last scan stopped or didn't run (the store couldn't be read or saved, or the library's folder isn't
+    /// there); nil after a scan that went through.
+    var scanIssue: ScanIssue?
+
+    /// The problem the status bar shows once no scan is running, if any.
+    var statusMessage: String? {
+        libraryReadFailure ?? scanIssue?.statusText
+    }
 
     // Sidebar counts, for the active filters (published by `publishCounts()`).
     private(set) var ratingCounts: [Int: Int] = [:]
@@ -99,6 +114,8 @@ final class LibraryStore {
     @ObservationIgnored var scanWillSave: ((ModelContext) -> Void)?
     /// Where deletes move files to the Trash, off the main actor. Tests put in one that never touches the real Trash.
     @ObservationIgnored var fileTrasher = FileTrasher.shared
+    /// Tells a library folder on a drive that isn't connected from one that's gone. Tests pass a temp "Volumes" folder.
+    @ObservationIgnored var volumes = VolumeCheck()
     /// Every file of the deletes still running, and how many are in the Trash already.
     @ObservationIgnored var trashPending = TrashProgress(done: 0, total: 0)
     /// Photos with a delete still running. Another delete of them does nothing (it would delete them twice).

@@ -71,13 +71,15 @@ struct LibrarySort: Equatable, Sendable {
     /// That gives two runs, each in order: the photos with a capture date, and those without, which SQLite puts first
     /// ascending and last descending, sorted by creation date. `interleavingRuns(_:)` merges them in memory. When
     /// either run is empty (every photo has a capture date, or none has one yet) that costs about 14 model reads at 10k.
-    func fetch(where predicate: Predicate<PhotoAsset>, in context: ModelContext) -> [PhotoAsset] {
+    ///
+    /// Throws what the fetch throws: a store that can't be read isn't an empty library.
+    func fetch(where predicate: Predicate<PhotoAsset>, in context: ModelContext) throws -> [PhotoAsset] {
         let order: SortOrder = newestFirst ? .reverse : .forward
         let descriptor = FetchDescriptor<PhotoAsset>(
             predicate: predicate,
             sortBy: [SortDescriptor(\.captureDate, order: order), SortDescriptor(\.creationDate, order: order)]
         )
-        return interleavingRuns((try? context.fetch(descriptor)) ?? [])
+        return interleavingRuns(try context.fetch(descriptor))
     }
 
     /// Merges the store's two runs (see `fetch(where:in:)`) into one list in this order.
