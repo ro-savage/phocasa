@@ -294,6 +294,8 @@ struct HEIFModel {
         var trailingBox: (type: String, payload: [UInt8])? = nil
         /// An extra box at the end of meta.
         var extraMetaChild: [UInt8]? = nil
+        /// `iloc` right after `pitm`, before `iinf` (as libheif writes it), rather than last.
+        var ilocFirst = false
     }
 
     static func box(_ type: String, _ payload: [UInt8]) -> [UInt8] { be(payload.count + 8, 4) + Array(type.utf8) + payload }
@@ -377,12 +379,14 @@ struct HEIFModel {
                     iloc += Self.be(start + offset - base, layout.offsetSize) + Self.be(item.zeroLength ? 0 : length, layout.lengthSize)
                 }
             }
-            var children = hdlr + (dinf ?? []) + Self.box("pitm", pitm) + Self.box("iinf", iinf)
+            var children = hdlr + (dinf ?? []) + Self.box("pitm", pitm)
+            if layout.ilocFirst { children += Self.box("iloc", iloc) }
+            children += Self.box("iinf", iinf)
             if !references.isEmpty { children += Self.box("iref", iref) }
             children += (iprp ?? []) + (grpl ?? [])
             if !idat.isEmpty { children += Self.box("idat", idat) }
             if let free = layout.freeInMeta { children += Self.box("free", [UInt8](repeating: 0, count: free - 8)) }
-            children += Self.box("iloc", iloc)
+            if !layout.ilocFirst { children += Self.box("iloc", iloc) }
             children += layout.extraMetaChild ?? []
             return Self.box("meta", [0, 0, 0, 0] + children)
         }
@@ -706,9 +710,21 @@ enum HEIFProof {
                        "ipma associations", file: file, line: line)
         XCTAssertEqual(b.groups.map { "\($0.type) \($0.id) \($0.entities)" }, a.groups.map { "\($0.type) \($0.id) \($0.entities)" },
                        "entity groups", file: file, line: line)
-        let xmpInIdat = a.primaryXMP.first.flatMap { item in a.locations.first { $0.id == item.id } }?.method == 1
-        for type in ["hdlr", "dinf", "pitm", "iprp", "grpl"] + (xmpInIdat ? [] : ["idat"]) {
-            XCTAssertEqual(b.node(type).map(b.slice), a.node(type).map(a.slice), "meta's \(type), byte for byte", file: file, line: line)
+        // The old packet's bytes may change only where the new packet was written over them (in place, or at the
+        // tail): same construction method, same start.
+        let oldXMP = a.primaryXMP.first.flatMap { item in a.locations.first { $0.id == item.id } }
+        let newXMP = xmpID.flatMap { id in b.locations.first { $0.id == id } }
+        let overwritten = oldXMP != nil && oldXMP?.method == newXMP?.method
+            && a.ranges(of: oldXMP!.id)?.first?.lowerBound == b.ranges(of: newXMP!.id)?.first?.lowerBound
+        let overwrittenIn = { (method: Int) -> [Range<Int>] in
+            overwritten && oldXMP?.method == method ? (a.ranges(of: oldXMP!.id) ?? []) : []
+        }
+        for type in ["hdlr", "dinf", "pitm", "iprp", "grpl", "idat"] {
+            var x = a.node(type).map(a.slice), y = b.node(type).map(b.slice)
+            if type == "idat", let node = a.node(type) {
+                for r in overwrittenIn(1) { for k in r { x?[k - node.start] = 0; y?[k - node.start] = 0 } }
+            }
+            XCTAssertEqual(y, x, "meta's \(type), byte for byte", file: file, line: line)
         }
         XCTAssertEqual(b.meta.children.map(\.type).filter { $0 != "iref" }, a.meta.children.map(\.type).filter { $0 != "iref" },
                        "meta's children", file: file, line: line)
@@ -739,7 +755,7 @@ enum HEIFProof {
         let types = b.top.map(\.type)
         XCTAssertTrue(types == a.top.map(\.type) || types == a.top.map(\.type) + ["mdat"], "top-level boxes \(types)",
                       file: file, line: line)
-        let oldPacket = a.primaryXMP.first.flatMap { item in a.locations.first { $0.id == item.id }?.method == 0 ? a.ranges(of: item.id) : nil } ?? []
+        let oldPacket = overwrittenIn(0)
         for (i, x) in a.top.enumerated() where x.type != "meta" && i < b.top.count {
             let y = b.top[i]
             var xb = a.slice(x), yb = b.slice(y)

@@ -213,7 +213,7 @@ final class HEIFMetadataTests: XCTestCase {
             for (step, keywords) in lists.enumerated() {
                 let rating = step % 6
                 let written = try write(current, rating: rating, keywords: keywords).get()
-                HEIFProof.assertLossless(original: original, output: written.data, rating: rating, keywords: keywords)
+                HEIFProof.assertLossless(original: current, output: written.data, rating: rating, keywords: keywords)
                 // The packet moves to the end of the file at most once; then it's replaced there.
                 if [.appended, .newItem].contains(written.change) { growths += 1 }
                 XCTAssertLessThanOrEqual(growths, 1, "step \(step): \(written.change)")
@@ -258,6 +258,7 @@ final class HEIFMetadataTests: XCTestCase {
         add("iinf v1, iref v1") { $0.iinfVersion = 1; $0.irefVersion = 1 }
         add("mdat before meta") { $0.mdatBeforeMeta = true }
         add("free box after meta") { $0.freeAfterMeta = 64 }
+        add("iloc before iinf (libheif's order)") { $0.ilocFirst = true }
         add("free box in meta") { $0.freeInMeta = 32 }
         add("mdat to the end of the file") { $0.mdatToEnd = true }
         add("mdat with a 64-bit size") { $0.mdatLargeSize = true }
