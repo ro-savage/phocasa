@@ -354,12 +354,14 @@ The decisions as asked:
    - The migration and store-location tests pass, including a pre-task-31 store moved and then migrated.
    - Task 31's probe showed an older build still opens a migrated store. An older build now looks for `default.store`
      and finds none, so going back means moving the files back as well.
-3. **Task 35's saved-edit prefetch** (`3d8f270`) wasn't in the task file. It's what makes arrowing through edited RAWs
+3. **Answered: keep it** (it improves performance; nothing to do). **Task 35's saved-edit prefetch** (`3d8f270`)
+   wasn't in the task file. It's what makes arrowing through edited RAWs
    instant; keep it unless you'd rather not spend up to 26 MB on one render ahead.
 4. **Sharpening and clarity at fit** now apply at screen scale, so an edit at fit looks slightly different from the
    same edit zoomed in. The difference is about half of what the slider preview already shows. Alternative: scale the
    pixel-radius filters by the render's scale in `ImageEditingService` (a deliberate pixel change).
-5. **Launch main-actor total ≤ 150 ms** needs the grid to take photo identity from `library.shownIDs`, not the models
+5. **Answered: 300 ms is fine;** the ≤ 150 ms target and the grid-identity follow-up are dropped. **Launch main-actor
+   total ≤ 150 ms** needs the grid to take photo identity from `library.shownIDs`, not the models
    (a `PhotoGridView` change; task 32's follow-up). Today the launch no longer blocks, but it spends about 300 ms of
    main-actor time in ≤ 13 ms turns.
 6. **Metadata in exports and "Apply edits permanently"** (found in the real-app check; older than wave 3).
@@ -371,7 +373,7 @@ The decisions as asked:
 
 ## Follow-ups
 
-- **Launch:** the grid identity change above; `7u` would halve with a higher patch limit for inserts.
+- **Launch:** `7u` would halve with a higher patch limit for inserts.
   `loadExistingData()` is still one ~320 ms block when it runs: `refreshAvailability`, a load that overtook a scan.
 - **Capture dates:**
   - re-run the backfill after scans that change the missing set (an offline drive back);

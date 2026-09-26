@@ -357,21 +357,28 @@ private enum EditPipeline {
         applyRAWParameters(filter, parameters: parameters)
 
         guard var image = filter.outputImage else { return nil }
-        // scaleFactor lands within a pixel of the target; scale BEFORE post-filters only if it's still too big.
-        if let maxSize, image.extent.width > maxSize.width + 1 || image.extent.height > maxSize.height + 1 {
-            image = scaleToFit(image, maxSize: maxSize)
+        var scale: CGFloat = 1
+        if let maxSize {
+            // scaleFactor lands within a pixel of the target; scale BEFORE post-filters only if it's still too big.
+            if image.extent.width > maxSize.width + 1 || image.extent.height > maxSize.height + 1 {
+                image = scaleToFit(image, maxSize: maxSize)
+            }
+            let native = orientedNativeSize(of: filter)
+            if native.width > 0 { scale = min(1, image.extent.width / native.width) }
         }
-        image = applyPostRAWFilters(to: image, parameters: parameters)
+        image = applyPostRAWFilters(to: image, parameters: parameters, scale: scale)
         return applyTransform(to: image, parameters: parameters)
     }
 
     /// Standard: scale (previews; BEFORE filters, so the chain runs on fewer pixels), the chain, the transform.
     static func editedStandard(_ source: CIImage, parameters: EditParameters, maxSize: CGSize?) -> CIImage {
         var image = source
+        var scale: CGFloat = 1
         if let maxSize {
             image = scaleToFit(image, maxSize: maxSize)
+            scale = image.extent.width / source.extent.width
         }
-        image = applyStandardFilters(to: image, parameters: parameters)
+        image = applyStandardFilters(to: image, parameters: parameters, scale: scale)
         return applyTransform(to: image, parameters: parameters)
     }
 
@@ -414,8 +421,8 @@ private enum EditPipeline {
     // MARK: Chains
 
     /// Post-RAW (things CIRAWFilter can't do): negative brightness → vibrance → saturation → tone curve →
-    /// sharpness → clarity → vignette.
-    static func applyPostRAWFilters(to image: CIImage, parameters p: EditParameters) -> CIImage {
+    /// sharpness → clarity → vignette. `scale` is the render's size against native (see `sharpness`).
+    static func applyPostRAWFilters(to image: CIImage, parameters p: EditParameters, scale: CGFloat) -> CIImage {
         var result = image
         // Negative brightness — boostAmount can't go below 0
         if p.brightness < 0 {
@@ -426,14 +433,14 @@ private enum EditPipeline {
             result = colorControls(result, brightness: 0.0, contrast: 1.0, saturation: 1.0 + p.saturation / 100.0 * 0.5)
         }
         result = toneCurve(result, p)
-        result = sharpness(result, p)
-        result = clarity(result, p)
+        result = sharpness(result, p, scale: scale)
+        result = clarity(result, p, scale: scale)
         return vignette(result, p)
     }
 
     /// Standard (JPG/PNG): exposure → tone curve → colour controls → temperature/tint → vibrance → sharpness →
-    /// noise reduction → clarity → vignette.
-    static func applyStandardFilters(to image: CIImage, parameters p: EditParameters) -> CIImage {
+    /// noise reduction → clarity → vignette. `scale` is the render's size against native (see `sharpness`).
+    static func applyStandardFilters(to image: CIImage, parameters p: EditParameters, scale: CGFloat) -> CIImage {
         var result = image
         // Exposure — direct EV mapping
         if p.exposure != 0 {
@@ -457,7 +464,8 @@ private enum EditPipeline {
             result = filter.outputImage ?? result
         }
         result = vibrance(result, p)
-        result = sharpness(result, p)
+        result = sharpness(result, p, scale: scale)
+        // Noise reduction has no pixel radius, and scaling its level measured no clear gain at fit (task C).
         if p.noiseReduction > 0 {
             let filter = CIFilter.noiseReduction()
             filter.inputImage = result
@@ -465,7 +473,7 @@ private enum EditPipeline {
             filter.sharpness = 0.5
             result = filter.outputImage ?? result
         }
-        result = clarity(result, p)
+        result = clarity(result, p, scale: scale)
         return vignette(result, p)
     }
 
@@ -489,20 +497,25 @@ private enum EditPipeline {
     }
 
     /// Visible edge sharpening: a small-radius unsharp mask.
-    private static func sharpness(_ image: CIImage, _ p: EditParameters) -> CIImage {
+    ///
+    /// Its radius is in native pixels: a render at `scale` of native size (a fitted pass, a preview) uses
+    /// `radius × scale`, so it looks like the native render drawn at its size (task C measured the difference to
+    /// that halve or better). Native renders and exports have `scale` 1. The same goes for `clarity`.
+    private static func sharpness(_ image: CIImage, _ p: EditParameters, scale: CGFloat) -> CIImage {
         guard p.sharpness > 0 else { return image }
-        return unsharpMask(image, radius: 1.5, intensity: p.sharpness / 100.0 * 2.0)
+        return unsharpMask(image, radius: 1.5 * scale, intensity: p.sharpness / 100.0 * 2.0)
     }
 
-    /// Local contrast (a large-radius unsharp mask) or softening (a blur, cropped back to the input extent).
-    private static func clarity(_ image: CIImage, _ p: EditParameters) -> CIImage {
+    /// Local contrast (a large-radius unsharp mask) or softening (a blur, cropped back to the input extent). Radii
+    /// scale with the render, as `sharpness`'s do.
+    private static func clarity(_ image: CIImage, _ p: EditParameters, scale: CGFloat) -> CIImage {
         if p.clarity > 0 {
-            return unsharpMask(image, radius: 20.0, intensity: p.clarity / 100.0)
+            return unsharpMask(image, radius: 20.0 * scale, intensity: p.clarity / 100.0)
         }
         guard p.clarity < 0 else { return image }
         let filter = CIFilter.gaussianBlur()
         filter.inputImage = image
-        filter.radius = Float(-p.clarity / 100.0 * 5.0)
+        filter.radius = Float(-p.clarity / 100.0 * 5.0 * scale)
         return (filter.outputImage ?? image).cropped(to: image.extent)
     }
 
