@@ -169,6 +169,12 @@ Tools/
   rows and a walk started at launch. Smaller stores load synchronously; `loadExistingData()` stays synchronous; a full
   load since `open` drops the background load.
 - **Bin:** a scan never takes a photo out of the bin (user decision); it still updates a binned photo's paths and size.
+- **The detail view acts on the photo on screen**, never on the hidden grid's selection: ⌫ and the toolbar
+  (`deleteSelectionOrCurrent`, `restoreSelectionOrCurrent`), ratings, the tag popover (`tagEditorEditsSelection`); then
+  it moves to the next photo (`moveDetailOff`). ⌘A and Return do nothing there. A photo that left the grid (rated out
+  of the filter) keeps its place (`LibraryStore.gridPlace(of:)`), which ←/→ and the grid's arrows move on from.
+- **Deletes that trash files ask first:** with the RAW or JPG filter on, a delete takes that file off each pair
+  (`FileTypeDelete`, confirmed; a RAW's `.xmp` goes with it unless the JPG's values live there, `OverridesEmbedded`).
 - **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
   rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
   photos, so an unchanged rescan writes nothing and changes nothing in memory. One that adds k photos costs
@@ -342,8 +348,9 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   `~/Library/Caches/com.phocasa.app`. `StoreLocationTests` pass a temp folder in place of Application Support.
 - The test host stays in memory even with `PHOCASA_DEVELOPMENT_LIBRARY=1` (the scheme's Test action shares the Run
   action's environment). Development-library tests pass temp folders to `LibraryLocation.resolve`.
-- Tests use temp directories and in-memory or temp-file stores. Tests that delete files give `LibraryStore` a
-  `FileTrasher` that moves them into a temp folder, never the user's Trash.
+- Tests use temp directories and in-memory or temp-file stores. Tests that delete files, or export over one (a copy
+  of the original goes to the Trash), give `LibraryStore` a `FileTrasher` that moves them into a temp folder, never
+  the user's Trash. In the test host the default (`LibraryStore.defaultFileTrasher`) trashes nothing.
 - Gated benchmarks need `PHOCASA_BENCH=1` (see Build & Run); tests on a real camera RAW are skipped unless
   `PHOCASA_TEST_RAW` names a *copy* of one. Never search the disk for photos.
 - Hosted-window tests (grid clicks, the detail view, the grid under the detail view) flash a window; that's expected.
