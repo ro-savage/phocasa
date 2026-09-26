@@ -115,8 +115,8 @@ the edit stays a saved edit. For "Replace existing JPG" the alert suggests "Crea
 These describe the old pixels. They change to match the new ones, and are listed in CLAUDE.md:
 - **Orientation:** 1 (the pixels are upright).
 - **Pixel dimensions:** Exif `PixelXDimension`/`PixelYDimension`, IFD0 `ImageWidth`/`ImageLength`.
-- **Colour space:** `ColorSpace` and an Adobe RGB `InteropIndex`; the old ICC profile and Adobe APP14 segment are
-  replaced by the encoder's.
+- **Colour space and codec aids:** `ColorSpace` and an Adobe RGB `InteropIndex`. The old ICC profile, Adobe APP14
+  segment and Apple restart-offset table (APP10 `AROT`, since `8b30d03`) are replaced by the encoder's.
 - **The same properties in the XMP.** `photoshop:ICCProfile`, `xmp:Thumbnails`, and the Google `Container`, motion
   photo (`GCamera:MotionPhoto*`, `MicroVideo*`) and Ultra HDR (`hdrgm`) properties are removed.
 - **Previews of the old pixels:** the Exif IFD1 thumbnail (unlinked, its bytes zeroed), MPF preview images (the
