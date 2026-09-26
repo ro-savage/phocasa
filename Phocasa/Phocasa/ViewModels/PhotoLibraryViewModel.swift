@@ -35,9 +35,9 @@ final class PhotoLibraryViewModel {
     private(set) var editedFilesVersion = 0
     /// Why the last export didn't happen, for the alert; nil when there is nothing to report.
     var exportFailure: String?
-    /// Where the last new-file export went ("Saved IMG_1234-raw-edit.jpg"), for the alert; nil when there is nothing
-    /// to report.
-    var exportNotice: String?
+    /// Where the last new-file export went, for the status bar ("Saved IMG_1234-raw-edit.jpg", Show in Finder); nil
+    /// when there is nothing to report. An alert for every export got in the way of exporting several.
+    var exportNotice: ExportNotice?
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
 
@@ -398,6 +398,26 @@ final class PhotoLibraryViewModel {
             gridColumns += 1
         }
     }
+
+    // MARK: - Metadata Write Problems
+
+    /// The status bar's Retry: writes the problems' files again. Ratings and keywords go with the photo's current
+    /// values (a newer rating made since wins); a RAW edit with the edit that didn't reach the sidecar, unless a newer
+    /// one is waiting. A problem whose photo is no longer in the library or the bin has nothing to write: it's
+    /// dismissed. Writes kept in a sidecar aren't retried (they'd go there again). Returns the task that hands the
+    /// writer the edits and the dismissals, for tests.
+    @discardableResult
+    func retryWrites(_ problems: [MetadataWriteProblem], writer: MetadataWriter = .shared) -> Task<Void, Never> {
+        let retrying = problems.filter { $0.issue != .keptInSidecar }
+        let photos = library.photos(withFilesAt: Set(retrying.map(\.path)))
+        library.rewriteMetadata(of: retrying.filter { $0.kind == .ratingAndKeywords }.compactMap { photos[$0.path] })
+        let gone = retrying.filter { photos[$0.path] == nil }.map(\.key)
+        let edits = retrying.filter { $0.kind == .editParameters && photos[$0.path] != nil }
+        return Task {
+            await writer.dismissProblems(gone)
+            await writer.retry(editsOf: edits)
+        }
+    }
     // MARK: - Image Editing
 
     /// Saves the current session, if any, then starts editing `photo` in a new one.
@@ -474,7 +494,7 @@ final class PhotoLibraryViewModel {
                 return
             }
             library.addExportedPhoto(at: url, copying: source)
-            exportNotice = "Saved \(url.lastPathComponent)"
+            exportNotice = ExportNotice(url: url)
         }
     }
 
@@ -589,6 +609,16 @@ final class PhotoLibraryViewModel {
 
         try? library.modelContext?.save()
     }
+}
+
+/// A new-file export that went through, for the status bar: where it went.
+struct ExportNotice: Equatable, Identifiable {
+    let id = UUID()
+    let url: URL
+
+    var message: String { "Saved \(url.lastPathComponent)" }
+    /// How long the status bar shows it.
+    static let duration: Duration = .seconds(8)
 }
 
 /// A delete with the RAW or JPG sidebar filter on, as its confirmation shows it: each pair's file of that type (a RAW

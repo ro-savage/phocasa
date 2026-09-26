@@ -337,7 +337,7 @@ extension LibraryStore {
 
     /// The photo's rating and keywords, for its file. A JPG+RAW pair writes both: the JPG and the RAW's
     /// sidecar (user decision, task 23).
-    private func metadataWriteItem(for photo: PhotoAsset) -> MetadataWriteItem {
+    func metadataWriteItem(for photo: PhotoAsset) -> MetadataWriteItem {
         // Each path is read once (model property reads aren't free on the main thread); this is `displayPath`
         // and `hasRawPair` spelled out.
         let jpgPath = photo.jpgPath

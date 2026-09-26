@@ -90,7 +90,11 @@ struct ContentView: View {
                     viewModel.library.handleFolderSelected(url: url)
                 }
             }
-            .overlay(alignment: .bottom) { StatusBarView(library: viewModel.library, selection: viewModel.selection) }
+            // In the window's bottom safe area, not over the content: an overlay covered the grid's last row, the
+            // sidebar's end, the detail view's rating panel and the crop controls.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                StatusBarView(library: viewModel.library, selection: viewModel.selection, viewModel: viewModel)
+            }
             .focusedSceneValue(\.openFolderAction) { viewModel.openFolder() }
             .onAppear {
                 viewModel.setModelContext(modelContext)

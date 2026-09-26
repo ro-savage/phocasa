@@ -195,13 +195,15 @@ struct PhotoDetailView: View {
         } message: {
             Text(exportMessage(session))
         }
-        .alert(viewModel.exportFailure != nil ? "Export Failed" : (viewModel.exportNotice ?? ""), isPresented: Binding(
-            get: { viewModel.exportFailure != nil || viewModel.exportNotice != nil },
-            set: { if !$0 { viewModel.exportFailure = nil; viewModel.exportNotice = nil } }
+        // A failed export is an alert; one that went through is a notice in the status bar (`exportNotice`), which
+        // doesn't stop the next export.
+        .alert("Export Failed", isPresented: Binding(
+            get: { viewModel.exportFailure != nil },
+            set: { if !$0 { viewModel.exportFailure = nil } }
         )) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(viewModel.exportFailure ?? "It's in the library next to \(photo.fileName), in the same folder.")
+            Text(viewModel.exportFailure ?? "")
         }
         .onDisappear {
             if viewModel.isEditing {
