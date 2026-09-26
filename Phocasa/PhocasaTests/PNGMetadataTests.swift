@@ -157,6 +157,46 @@ struct TestPNG {
         }
     }
 
+    /// ImageMagick's keyword for its hex XMP profile.
+    static let rawXMPKeyword = "Raw profile type xmp"
+
+    /// Every chunk holding XMP: the `iTXt` XMP chunk, or ImageMagick's raw profile (`zTXt` or `tEXt`), with the bytes
+    /// kept before its text (keyword, separators, flags) and the packet it holds.
+    var xmpPackets: [(index: Int, type: String, header: Data, packet: Data)] {
+        chunks.enumerated().compactMap { index, chunk in
+            let d = [UInt8](chunk.data)
+            guard let k = d.firstIndex(of: 0) else { return nil }
+            switch (chunk.type, String(decoding: d[..<k], as: UTF8.self)) {
+            case ("iTXt", Self.xmpKeyword):
+                return Self.internationalText(chunk.data).map { (index, chunk.type, $0.header, $0.text) }
+            case ("zTXt", Self.rawXMPKeyword):
+                guard k + 2 <= d.count, let text = Self.zlibInflated(Data(d[(k + 2)...])),
+                      let packet = Self.rawProfilePacket(text) else { return nil }
+                return (index, chunk.type, Data(d[...(k + 1)]), packet)
+            case ("tEXt", Self.rawXMPKeyword):
+                return Self.rawProfilePacket(Data(d[(k + 1)...])).map { (index, chunk.type, Data(d[...k]), $0) }
+            default:
+                return nil
+            }
+        }
+    }
+
+    /// The bytes in ImageMagick raw-profile text, read leniently: an empty line, the name, the length, hex lines.
+    static func rawProfilePacket(_ text: Data) -> Data? {
+        let lines = String(decoding: text, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count >= 3, lines[0].isEmpty, let length = Int(lines[2].trimmingCharacters(in: .whitespaces)) else {
+            return nil
+        }
+        let hex = Array(lines.dropFirst(3).joined().utf8)
+        guard hex.count == length * 2 else { return nil }
+        var out = Data(capacity: length)
+        for i in stride(from: 0, to: hex.count, by: 2) {
+            guard let byte = UInt8(String(decoding: hex[i..<(i + 2)], as: UTF8.self), radix: 16) else { return nil }
+            out.append(byte)
+        }
+        return out
+    }
+
     /// ImageMagick's hex "raw profile" text.
     static func rawProfile(_ name: String, _ data: Data) -> Data {
         var s = "\n\(name)\n" + String(format: "%8d", data.count) + "\n"
@@ -184,6 +224,11 @@ struct RichPNG {
         case beforeImageData(compressed: Bool)
         /// Another app's packet in an iTXt after the image data, where exiftool before 11.63 put it.
         case afterImageData
+        /// Another app's packet as ImageMagick stores XMP: a hex raw profile in a `zTXt` (`tEXt` when not
+        /// `compressed`), before the image data.
+        case rawProfile(compressed: Bool)
+        /// The same in a `zTXt` after the image data.
+        case rawProfileAfterImageData
     }
 
     let data: Data
@@ -264,6 +309,11 @@ struct RichPNG {
         if case .beforeImageData(let compressed) = xmp {
             chunks.append(TestPNG.iTXt(TestPNG.xmpKeyword, packet, compressed: compressed))
         }
+        let profile = TestPNG.rawProfile("xmp", packet)
+        if case .rawProfile(let compressed) = xmp {
+            chunks.append(compressed ? TestPNG.zTXt(TestPNG.rawXMPKeyword, profile)
+                          : TestPNG.chunk("tEXt", Data(TestPNG.rawXMPKeyword.utf8) + Data([0]) + profile))
+        }
         chunks.append(TestPNG.tEXt("Title", "Harbour at dawn"))
         chunks.append(TestPNG.tEXt("Author", "Ann Example"))
         chunks.append(TestPNG.tEXt("Acme Key", "custom value, café"))
@@ -275,6 +325,9 @@ struct RichPNG {
         chunks += idats
         if case .afterImageData = xmp {
             chunks.append(TestPNG.iTXt(TestPNG.xmpKeyword, packet))
+        }
+        if case .rawProfileAfterImageData = xmp {
+            chunks.append(TestPNG.zTXt(TestPNG.rawXMPKeyword, profile))
         }
         chunks.append(TestPNG.chunk("tIME", Data([0x07, 0xE8, 5, 1, 10, 0, 0])))
         chunks.append(TestPNG.tEXt("Comment", "written after the image data"))
@@ -434,8 +487,8 @@ final class PNGMetadataTests: XCTestCase {
         let after = try XCTUnwrap(TestPNG(output), "the output is whole chunks up to IEND", file: file, line: line)
         XCTAssertTrue(after.chunks.allSatisfy(\.crcIsValid), "every CRC is valid: \(after.chunks.filter { !$0.crcIsValid })",
                       file: file, line: line)
-        XCTAssertEqual(after.xmpChunks.count, 1, "one XMP chunk", file: file, line: line)
-        let beforeXMP = Set(before.xmpChunks.map(\.index)), afterXMP = Set(after.xmpChunks.map(\.index))
+        XCTAssertEqual(after.xmpPackets.count, 1, "one XMP chunk", file: file, line: line)
+        let beforeXMP = Set(before.xmpPackets.map(\.index)), afterXMP = Set(after.xmpPackets.map(\.index))
         let keptBefore = before.chunks.enumerated().filter { !beforeXMP.contains($0.offset) }.map(\.element.bytes)
         let keptAfter = after.chunks.enumerated().filter { !afterXMP.contains($0.offset) }.map(\.element.bytes)
         XCTAssertEqual(keptAfter.count, keptBefore.count, "no chunk added or lost", file: file, line: line)
@@ -443,14 +496,14 @@ final class PNGMetadataTests: XCTestCase {
         XCTAssertEqual(after.trailing, before.trailing, "the bytes after IEND", file: file, line: line)
         XCTAssertEqual(Data(output.prefix(8)), TestPNG.signature, file: file, line: line)
         // The XMP chunk sits before the image data (ImageIO reads XMP only there), and before an APNG's first frame.
-        let xmpIndex = try XCTUnwrap(after.xmpChunks.first?.index, file: file, line: line)
+        let xmpIndex = try XCTUnwrap(after.xmpPackets.first?.index, file: file, line: line)
         let firstImage = try XCTUnwrap(after.types.firstIndex { $0 == "IDAT" || $0 == "fcTL" }, file: file, line: line)
         XCTAssertLessThan(xmpIndex, firstImage, "the XMP comes before the image data", file: file, line: line)
     }
 
     /// Every value of the XMP packet in `png`'s XMP chunk.
     private func packetValues(_ png: Data) throws -> [String: String] {
-        KeptMetadata.xmpValues(try XCTUnwrap(TestPNG(png)?.xmpChunks.first?.text.text))
+        KeptMetadata.xmpValues(try XCTUnwrap(TestPNG(png)?.xmpPackets.first?.packet))
     }
 
     // MARK: isPNG
@@ -545,7 +598,8 @@ final class PNGMetadataTests: XCTestCase {
     }
 
     func testRepeatedWritesAreStableAndDontGrowTheFile() throws {
-        for xmp in [RichPNG.XMP.none, .beforeImageData(compressed: false), .beforeImageData(compressed: true)] {
+        for xmp in [RichPNG.XMP.none, .beforeImageData(compressed: false), .beforeImageData(compressed: true),
+                    .rawProfile(compressed: true), .rawProfile(compressed: false)] {
             let rich = try RichPNG.make(xmp: xmp)
             let url = try file(rich.data, "repeat.png")
             let steps: [(Int, [String])] = [(1, ["a"]), (5, ["a", "b", "people:ann"]), (3, ["c"]), (0, ["c"]), (0, [])]
@@ -556,8 +610,8 @@ final class PNGMetadataTests: XCTestCase {
                 try assertOnlyXMPChanged(original: previous, output: output)
                 try assertFileReads(url, rating: rating, keywords: keywords)
                 assertKeepsEverything(original: rich.data, output: output)
-                let old = TestPNG(previous)!.xmpChunks.first.map { TestPNG(previous)!.chunks[$0.index].bytes.count } ?? 0
-                let new = TestPNG(output)!.chunks[TestPNG(output)!.xmpChunks[0].index].bytes.count
+                let old = TestPNG(previous)!.xmpPackets.first.map { TestPNG(previous)!.chunks[$0.index].bytes.count } ?? 0
+                let new = TestPNG(output)!.chunks[TestPNG(output)!.xmpPackets[0].index].bytes.count
                 XCTAssertEqual(output.count, previous.count - old + new, "\(xmp): only the XMP chunk changes size")
                 previous = output
             }
@@ -786,6 +840,14 @@ final class PNGMetadataTests: XCTestCase {
             two.insert(second, at: at)
             assertRefused(TestPNG.assemble(two), .severalXMPChunks, "a second one at \(at)")
         }
+        // ImageMagick's raw profile is XMP too: beside an iTXt one, or twice.
+        let raw = TestPNG.zTXt(TestPNG.rawXMPKeyword, TestPNG.rawProfile("xmp", Data(SidecarFixtures.lightroom.utf8)))
+        var mixed = chunks
+        mixed.insert(raw, at: 1)
+        assertRefused(TestPNG.assemble(mixed), .severalXMPChunks, "an iTXt and a raw profile")
+        var twoRaw = try richChunks(xmp: .rawProfile(compressed: false))
+        twoRaw.insert(raw, at: twoRaw.count - 1)
+        assertRefused(TestPNG.assemble(twoRaw), .severalXMPChunks, "two raw profiles")
     }
 
     func testAnXMPChunkThatCantBeReadIsRefused() throws {
@@ -812,6 +874,33 @@ final class PNGMetadataTests: XCTestCase {
                       "no language tag terminator")
         assertRefused(with(TestPNG.chunk("iTXt", keyword + Data([0, 0]))), .unreadableXMPChunk, "no compression method")
         assertRefused(with(TestPNG.chunk("iTXt", keyword)), .unreadableXMPChunk, "just the keyword")
+        // A raw profile not laid out exactly as ImageMagick writes it: its new text couldn't keep the form.
+        let profile = TestPNG.rawProfile("xmp", packet)
+        let raw = Data(TestPNG.rawXMPKeyword.utf8)
+        var sixtyFour = Data(("\nxmp\n" + String(format: "%8d", packet.count)).utf8)
+        for start in stride(from: 0, to: packet.count, by: 32) {
+            sixtyFour += Data("\n".utf8) + Data(packet[start..<min(start + 32, packet.count)].map { String(format: "%02x", $0) }.joined().utf8)
+        }
+        sixtyFour += Data("\n".utf8)
+        XCTAssertEqual(TestPNG.rawProfilePacket(sixtyFour), packet, "fixture: a readable profile, in another layout")
+        let layouts: [(String, Data)] = [
+            ("upper-case hex", Data(profile.map { (0x61...0x66).contains($0) ? $0 - 0x20 : $0 })),
+            ("32 bytes a line", sixtyFour),
+            ("no final newline", profile.dropLast()),
+            ("a wrong length", Data(("\nxmp\n" + String(format: "%8d", packet.count + 1)).utf8) + profile.dropFirst(13)),
+            ("another profile name", Data("\nXMP\n".utf8) + profile.dropFirst(5)),
+            ("a stray character", profile.prefix(40) + Data("g".utf8) + profile.dropFirst(41)),
+        ]
+        for (name, text) in layouts {
+            assertRefused(with(TestPNG.zTXt(TestPNG.rawXMPKeyword, text)), .unreadableXMPChunk, "raw profile: \(name)")
+        }
+        assertRefused(with(TestPNG.chunk("zTXt", raw + Data([0, 1]) + TestPNG.zlibCompressed(profile))), .unreadableXMPChunk,
+                      "raw profile: an unknown compression method")
+        assertRefused(with(TestPNG.chunk("zTXt", raw + Data([0, 0]) + Data("not zlib".utf8))), .unreadableXMPChunk,
+                      "raw profile: damaged compressed text")
+        assertRefused(with(TestPNG.chunk("zTXt", raw + Data([0]))), .unreadableXMPChunk, "raw profile: no compression method")
+        assertRefused(with(TestPNG.chunk("zTXt", raw)), .unreadableXMPChunk, "raw profile: a zTXt with just the keyword")
+        assertRefused(with(TestPNG.chunk("tEXt", raw)), .unreadableXMPChunk, "raw profile: a tEXt with just the keyword")
         // Inflating past the limit (a packet of 64 MiB and more) isn't attempted.
         let bomb = Data(repeating: 0x20, count: PNGMetadata.maxPacketSize + 1)
         assertRefused(with(TestPNG.iTXt(TestPNG.xmpKeyword, bomb, compressed: true)), .unreadableXMPChunk, "too large once inflated")
@@ -831,15 +920,16 @@ final class PNGMetadataTests: XCTestCase {
         }
     }
 
-    func testXMPInARawProfileIsRefused() throws {
-        // ImageMagick's hex profile, which ImageIO reads as XMP (the first XMP it finds wins).
+    func testARawXMPProfileImageMagickDoesntWriteIsRefused() throws {
+        // ImageIO reads these as XMP (it matches the keyword's start, and the first XMP it finds wins), or ImageMagick
+        // does (it ignores case). They aren't ImageMagick's own form, so they can't be updated in it, and a new iTXt
+        // beside one would make two packets that disagree.
         let chunks = try richChunks(xmp: .none)
         let profile = TestPNG.rawProfile("xmp", Data(RichPNG.otherAppXMP.utf8))
         let variants: [(String, Data)] = [
-            ("zTXt", TestPNG.zTXt("Raw profile type xmp", profile)),
-            ("tEXt", TestPNG.chunk("tEXt", Data("Raw profile type xmp".utf8) + Data([0]) + profile)),
-            ("iTXt", TestPNG.iTXt("Raw profile type xmp", profile)),
+            ("iTXt", TestPNG.iTXt(TestPNG.rawXMPKeyword, profile)),
             ("upper case", TestPNG.zTXt("Raw profile type XMP", profile)),
+            ("a longer keyword", TestPNG.zTXt("Raw profile type xmp ", profile)),
         ]
         for (name, chunk) in variants {
             for at in [1, chunks.count - 1] {
@@ -849,11 +939,108 @@ final class PNGMetadataTests: XCTestCase {
             }
         }
         // Other raw profiles (Exif, IPTC) aren't XMP: kept byte for byte like any chunk.
-        var exif = chunks
-        exif.insert(TestPNG.zTXt("Raw profile type iptc", TestPNG.rawProfile("iptc", Data([0x1C, 2, 25, 0, 1, 0x41]))), at: 1)
-        let original = TestPNG.assemble(exif)
+        var iptc = chunks
+        iptc.insert(TestPNG.zTXt("Raw profile type iptc", TestPNG.rawProfile("iptc", Data([0x1C, 2, 25, 0, 1, 0x41]))), at: 1)
+        let original = TestPNG.assemble(iptc)
         let output = try XCTUnwrap(PNGMetadata.replacingXMP(in: original) { MetadataService.xmpPacket(rating: 1, keywords: [], updating: $0) })
         try assertOnlyXMPChanged(original: original, output: output)
+    }
+
+    // MARK: ImageMagick's raw XMP profile
+
+    /// A PNG written by ImageMagick 7.1.2-17 (`magick -size 64x48 gradient:red-blue a.png`, then
+    /// `magick a.png -profile test.xmp b.png`): 16-bit RGB with cHRM, bKGD and tIME, its XMP (rated 2, CreatorTool
+    /// `IMtest`, subject `im`) in a zTXt `Raw profile type xmp`, and three date tEXt chunks.
+    private static let imageMagickPNG = Data(base64Encoded: """
+    iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwEAIAAAB+uTcLAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6
+    UTwAAAAGYktHRP///////wlY99wAAAAHdElNRQfqCRoBNTtbRwZrAAABg3pUWHRSYXcgcHJvZmlsZSB0eXBlIHhtcAAAKJFtU0ty
+    xSAM23OKHoFYxibHoQF2nemyx68cXvvyPmQmIdiWZMVJP1/f6SOWSk04ML16ts1gn1ZcJZtYMbfdBrrEytxr7IujaEfW7lnBrGq7
+    Vm8uyUqBNx1FjU9CASwSwcTA4RXNq7HMepDYJjne7bDhiFjAU4Qmm8GPtgL/6ZNQASSmZmhFVNWeQFYsgKprcvWMxsLp55LhzJJh
+    k4kuExv2uLjLEN6F975A+ITTgKBOXqUHQ8SvGiiAhrBdsd0zU3dqH9R0i7MdIRn1Lx/Tc8/hx5/cu9qTaoQXywruwV1nH9U2zzIT
+    NhnI4ckjJEvwCkhthZqOe+uRx3tJLCxhcXRK1nkCb3fggCj8LmdzwzzAIdeoRvsEihSilxA97YhE3Tknp0euy7lTX+N7YWONtIw8
+    OMo52shyOaLCHYPsHYfMx9Pricpf5WovveO5pL/9do85a8bS7fBlguP8zc9DL9fPwok7pz/9Ahka0G/uu4jFAAAAJXRFWHRkYXRl
+    OmNyZWF0ZQAyMDI2LTA5LTI2VDAxOjUzOjU5KzAwOjAwvQ3d/wAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyNi0wOS0yNlQwMTo1Mzo1
+    OSswMDowMMxQZUMAAAAodEVYdGRhdGU6dGltZXN0YW1wADIwMjYtMDktMjZUMDE6NTM6NTkrMDA6MDCbRUScAAABR0lEQVR42u3c
+    odYBURSG4XevNUegKFMoFJmikHVJdwn+6xh3oEu6TFHICoUyRaEcwX8ZX9j7uYJ3rVl79pkTxn4/glDxXUNaqTP8sk8Hmk91hl/2
+    2kJ7oc7wy+oxlCd1hl/2OEB3qs7wy+5z6O3UGX7Z9QaDvjrDrziGitk5wyipM/wqvhWkP3WGX3YsYVKrM/wq8hoasQNkbD+E2UWd
+    4VdMgFgcQ8WKXEEjTkEyMQFitnnDsqXO8CsmQCwegFgsYbGYALH4EBOL21CxmACx2AFicQoSiwkQs2ULNm91hl/xChKLV5BYTIBY
+    TICYzS6wH6oz/IqrCDGb1HAs1Rl+xQ4Qs1GCc1Zn+BW3oWI26MP1ps7wy3o7uM/VGX5ZdwqPgzrDLytPUI/VGX5ZewGvrTrDL2s+
+    4dNRZ/hlaQW5Umf4ZQDxyxqdf+ogYE5lC4arAAAAAElFTkSuQmCC
+    """, options: .ignoreUnknownCharacters)!
+
+    private func rawProfileText(_ png: Data, _ xmp: (index: Int, type: String, header: Data, packet: Data)) throws -> Data? {
+        let body = Data(try XCTUnwrap(TestPNG(png)).chunks[xmp.index].data.dropFirst(xmp.header.count))
+        return xmp.type == "zTXt" ? TestPNG.zlibInflated(body) : body
+    }
+
+    func testImageMagicksRawXMPProfileIsUpdatedInItsOwnForm() throws {
+        for xmp in [RichPNG.XMP.rawProfile(compressed: true), .rawProfile(compressed: false)] {
+            let rich = try RichPNG.make(xmp: xmp)
+            let url = try file(rich.data, "magick.png")
+            XCTAssertEqual(MetadataService.shared.readMetadata(from: url.path).rating, 2, "\(xmp): fixture: ImageIO reads it")
+            var handed: Data?
+            _ = PNGMetadata.replacingXMP(in: rich.data) { handed = $0; return $0 }
+            XCTAssertEqual(handed, Data(RichPNG.otherAppXMP.utf8), "\(xmp): update gets the decoded packet")
+
+            let output = try XCTUnwrap(try writeRating(4, ["magick", "people:zoë"], to: url), "\(xmp)")
+
+            try assertOnlyXMPChanged(original: rich.data, output: output)
+            let before = try XCTUnwrap(TestPNG(rich.data)?.xmpPackets.first)
+            let after = try XCTUnwrap(TestPNG(output)?.xmpPackets.first)
+            XCTAssertEqual(after.index, before.index, "\(xmp): in place")
+            XCTAssertEqual(after.type, before.type, "\(xmp): the same chunk type")
+            XCTAssertEqual(after.header, before.header, "\(xmp): keyword and compression method kept")
+            XCTAssertEqual(try rawProfileText(output, after), TestPNG.rawProfile("xmp", after.packet),
+                           "\(xmp): ImageMagick's hex layout")
+            let values = KeptMetadata.xmpValues(after.packet)
+            for (path, value) in KeptMetadata.xmpValues(Data(RichPNG.otherAppXMP.utf8)) where !Self.isPhocasas(path) {
+                XCTAssertEqual(values[path], value, "\(xmp): the other app's XMP \(path) is kept")
+            }
+            try assertFileReads(url, rating: 4, keywords: ["magick", "people:zoë"])
+            assertKeepsEverything(original: rich.data, output: output)
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func testARawXMPProfileAfterTheImageDataMovesBeforeIt() throws {
+        let rich = try RichPNG.make(xmp: .rawProfileAfterImageData)
+        let url = try file(rich.data)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: url.path).rating, 0,
+                       "fixture: ImageIO doesn't read a raw profile after the image data")
+
+        let output = try XCTUnwrap(try writeRating(3, ["moved"], to: url))
+
+        try assertOnlyXMPChanged(original: rich.data, output: output)
+        let before = try XCTUnwrap(TestPNG(rich.data)), after = try XCTUnwrap(TestPNG(output)?.xmpPackets.first)
+        XCTAssertEqual(after.index, before.types.firstIndex(of: "IDAT"), "right before the first IDAT")
+        XCTAssertEqual(after.type, "zTXt")
+        XCTAssertEqual(after.header, before.xmpPackets.first?.header)
+        XCTAssertEqual(try rawProfileText(output, after), TestPNG.rawProfile("xmp", after.packet))
+        try assertFileReads(url, rating: 3, keywords: ["moved"])
+    }
+
+    func testARealImageMagickPNGIsUpdatedInItsOwnForm() throws {
+        let original = Self.imageMagickPNG
+        let png = try XCTUnwrap(TestPNG(original))
+        XCTAssertTrue(png.chunks.allSatisfy(\.crcIsValid))
+        let raw = try XCTUnwrap(png.xmpPackets.first, "fixture: ImageMagick's raw profile")
+        XCTAssertEqual(raw.type, "zTXt")
+        // ImageMagick's own bytes: the layout this suite builds (and PNGMetadata writes) is ImageMagick's.
+        XCTAssertEqual(try rawProfileText(original, raw), TestPNG.rawProfile("xmp", raw.packet))
+        let url = try file(original, "imagemagick.png")
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: url.path).rating, 2, "fixture: rated 2 by ImageMagick's XMP")
+
+        let output = try XCTUnwrap(try writeRating(5, ["people:ann", "im"], to: url))
+
+        try assertOnlyXMPChanged(original: original, output: output)
+        let after = try XCTUnwrap(TestPNG(output)?.xmpPackets.first)
+        XCTAssertEqual(after.index, raw.index)
+        XCTAssertEqual(after.type, "zTXt")
+        XCTAssertEqual(after.header, raw.header)
+        XCTAssertEqual(try rawProfileText(output, after), TestPNG.rawProfile("xmp", after.packet))
+        XCTAssertEqual(KeptMetadata.xmpValues(after.packet)["xmp:CreatorTool"], "IMtest")
+        try assertFileReads(url, rating: 5, keywords: ["people:ann", "im"])
+        assertKeepsEverything(original: original, output: output)
     }
 
     func testARefusedUpdateIsRefused() throws {
@@ -874,6 +1061,74 @@ final class PNGMetadataTests: XCTestCase {
         let rich = try RichPNG.make().data
         XCTAssertEqual(PNGMetadata.rewritingXMP(in: rich) { _ in Data(repeating: 0x20, count: PNGMetadata.maxPacketSize + 1) },
                        .failure(.packetTooLarge))
+    }
+
+    // MARK: Damage never crashes
+
+    /// SplitMix64, so the damage is the same on every run.
+    private struct SeededGenerator: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    /// Every short prefix of each form of XMP chunk, and seeded random damage to it (with a valid CRC, so the parser
+    /// gets past the walk), is written or refused, never a crash; a write keeps every other chunk. Damage anywhere
+    /// else in the file is refused.
+    func testDamageIsRefusedOrWrittenNeverACrash() throws {
+        let packet = Data(RichPNG.otherAppXMP.utf8)
+        let xmp = Data(TestPNG.xmpKeyword.utf8), raw = Data(TestPNG.rawXMPKeyword.utf8)
+        let profile = TestPNG.rawProfile("xmp", packet)
+        let bodies: [(String, Data)] = [
+            ("iTXt", xmp + Data([0, 0, 0, 0, 0]) + packet),
+            ("iTXt", xmp + Data([0, 1, 0, 0, 0]) + TestPNG.zlibCompressed(packet)),
+            ("iTXt", xmp + Data([0, 0, 0]) + Data("en\u{0}Metadata\u{0}".utf8) + packet),
+            ("zTXt", raw + Data([0, 0]) + TestPNG.zlibCompressed(profile)),
+            ("tEXt", raw + Data([0]) + profile),
+        ]
+        let chunks = try richChunks()
+        let at = index(of: "IDAT", in: chunks)
+        var rng = SeededGenerator(state: 42)
+        var written = 0, refused = 0
+        for (type, body) in bodies {
+            var variants = (0...min(body.count, 64)).map { Data(body.prefix($0)) }
+            variants += stride(from: 64, to: body.count, by: 61).map { Data(body.prefix($0)) }
+            for _ in 0..<300 {
+                var damaged = body
+                for _ in 0..<Int.random(in: 1...4, using: &rng) {
+                    damaged[Int.random(in: 0..<damaged.count, using: &rng)] = UInt8.random(in: 0...255, using: &rng)
+                }
+                variants.append(damaged)
+            }
+            for data in variants {
+                var c = chunks
+                c.insert(TestPNG.chunk(type, data), at: at)
+                let png = TestPNG.assemble(c)
+                if let output = PNGMetadata.replacingXMP(in: png, update: {
+                    MetadataService.xmpPacket(rating: 1, keywords: ["f"], updating: $0)
+                }) {
+                    written += 1
+                    try assertOnlyXMPChanged(original: png, output: output)
+                } else {
+                    refused += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(written, 50, "some damage leaves an editable file")
+        XCTAssertGreaterThan(refused, 50, "most damage is refused")
+
+        let rich = try RichPNG.make(xmp: .beforeImageData(compressed: false)).data
+        for _ in 0..<500 {
+            var damaged = rich
+            damaged[Int.random(in: 0..<damaged.count, using: &rng)] ^= UInt8.random(in: 1...255, using: &rng)
+            XCTAssertNil(PNGMetadata.replacingXMP(in: damaged) { MetadataService.xmpPacket(rating: 1, keywords: [], updating: $0) },
+                         "a damaged byte outside a valid chunk is refused")
+        }
     }
 
     // MARK: A real camera photo

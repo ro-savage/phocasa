@@ -11,6 +11,8 @@ import zlib
 /// uncompressed, with an empty language tag and translated keyword, one per file (XMP specification part 3, §1.1.5).
 /// `iTXt` may go anywhere between `IHDR` and `IEND`, but ImageIO reads XMP (and `eXIf`) only before the first `IDAT`,
 /// and takes the first XMP it finds; exiftool 11.63 and later moves text chunks before `IDAT` for that reason.
+/// ImageMagick (7.1.2 still) writes a PNG's XMP in its own form instead, a hex dump in a `zTXt` (or `tEXt`) chunk
+/// with the keyword `Raw profile type xmp`, which ImageIO, ImageMagick and exiftool all read as the file's XMP.
 ///
 /// Pure and thread-safe. The caller (`MetadataService`) checks that the result reads back through ImageIO, and
 /// replaces the file through a temp file.
@@ -23,8 +25,13 @@ enum PNGMetadata {
     static let maxPacketSize = 64 << 20
 
     private static let xmpKeyword = Array("XML:com.adobe.xmp".utf8)
-    /// ImageMagick's hex-encoded XMP (`Raw profile type xmp`), compared in lower case.
-    private static let rawXMPProfileKeyword = Array("raw profile type xmp".utf8)
+    /// ImageMagick's hex-encoded XMP profile, as ImageMagick writes it.
+    private static let rawXMPProfileKeyword = Array("Raw profile type xmp".utf8)
+    /// The same, in lower case: any text chunk whose keyword starts so holds XMP for some reader (ImageIO matches the
+    /// prefix, ImageMagick ignores case).
+    private static let rawXMPProfilePrefix = Array("raw profile type xmp".utf8)
+    /// The longest raw profile text inflated: the hex of a `maxPacketSize` packet, its newlines and header.
+    private static let maxRawProfileText = 2 * maxPacketSize + maxPacketSize / 36 + 64
     private static let knownCriticalChunks: Set<String> = ["IHDR", "PLTE", "IDAT", "IEND"]
     private static let textChunks: Set<String> = ["tEXt", "zTXt", "iTXt"]
 
@@ -58,21 +65,23 @@ enum PNGMetadata {
         case appleCrushed
         /// A critical chunk the format doesn't define. The PNG specification tells editors to give up on those.
         case unknownCriticalChunk(String)
-        /// More than one XMP `iTXt` chunk. ImageIO merges them, the first one winning each property; updating one would
-        /// leave the others disagreeing with it.
+        /// More than one XMP chunk (`iTXt` or ImageMagick's raw profile). ImageIO merges them, the first one winning
+        /// each property, and ImageMagick prefers the raw profile: updating one would leave the others disagreeing.
         case severalXMPChunks
-        /// The XMP `iTXt` chunk can't be read: its header is cut short, its compression flag or method is unknown, or
-        /// its compressed text is damaged, has bytes after its end, or inflates to more than `maxPacketSize`.
+        /// The XMP chunk can't be read: its header is cut short, its compression flag or method is unknown, its
+        /// compressed text is damaged, has bytes after its end, or inflates to more than `maxPacketSize`; or a raw
+        /// profile isn't laid out exactly as ImageMagick writes it (its new text couldn't keep the same form).
         case unreadableXMPChunk
         /// XMP in a `tEXt` or `zTXt` chunk with the keyword `XML:com.adobe.xmp`. ImageIO ignores those, other readers
         /// (exiftool) don't: a new `iTXt` would make two packets that disagree.
         case xmpInTextChunk
-        /// XMP in ImageMagick's `Raw profile type xmp` text chunk, which ImageIO reads as XMP too (the first one
-        /// found wins): a new `iTXt` would make two packets that disagree.
+        /// A raw XMP profile in a form ImageMagick doesn't write: in an `iTXt`, or under a keyword that only starts
+        /// like `Raw profile type xmp` or differs in case. ImageIO or ImageMagick read those as XMP; a new `iTXt` would
+        /// make two packets that disagree.
         case xmpInRawProfile
         /// `update` returned nil (it can't update the packet without losing a value).
         case updateRefused
-        /// The new packet isn't UTF-8, which `iTXt` text must be.
+        /// The new packet isn't UTF-8, which XMP (and `iTXt` text) must be.
         case packetNotUTF8
         /// The new packet is over `maxPacketSize` (or, with a pathological chunk header, the chunk over 2³¹ − 1).
         case packetTooLarge
@@ -98,9 +107,9 @@ enum PNGMetadata {
     }
 
     /// `png` with its XMP packet replaced by `update(existing)`. `existing` is the packet in the file's `iTXt` chunk
-    /// with keyword `XML:com.adobe.xmp` (nil if it has none); `update` returns the new packet (nil to refuse). Nil
-    /// (the caller keeps the file and writes a sidecar) when that can't be done without losing or changing anything
-    /// else. Every other chunk stays byte for byte. See `rewritingXMP(in:update:)`.
+    /// with keyword `XML:com.adobe.xmp`, or in ImageMagick's raw XMP profile (nil if it has none); `update` returns
+    /// the new packet (nil to refuse). Nil (the caller keeps the file and writes a sidecar) when that can't be done
+    /// without losing or changing anything else. Every other chunk stays byte for byte. See `rewritingXMP(in:update:)`.
     static func replacingXMP(in png: Data, update: (Data?) -> Data?) -> Data? {
         try? rewritingXMP(in: png, update: update).get()
     }
@@ -117,6 +126,9 @@ enum PNGMetadata {
     ///   where ImageIO writes it. The file grows by the chunk; nothing else moves relative to anything else.
     /// - **An XMP `iTXt` after the image data**, which ImageIO doesn't read: it moves to that same place, header and
     ///   form kept, with the new packet. The chunks around it keep their bytes and order.
+    /// - **ImageMagick's raw XMP profile** (`zTXt` or `tEXt`, keyword `Raw profile type xmp`) is treated the same way
+    ///   (in place before the image data, moved from after it), in its own form: the same chunk type, keyword and
+    ///   compression method, the new packet in ImageMagick's exact hex layout.
     ///
     /// Every other chunk (`eXIf`, `iCCP`, text, private and unknown ancillary chunks, `IDAT`, animation chunks) and
     /// every byte after `IEND` stays as it is. Every chunk of the original must be whole with a valid CRC.
@@ -126,17 +138,16 @@ enum PNGMetadata {
         case .success(let walked): chunks = walked
         case .failure(let refusal): return .failure(refusal)
         }
-        if let refusal = layoutRefusal(chunks) { return .failure(refusal) }
-        // The layout check guarantees an IDAT.
-        guard let firstIDAT = chunks.firstIndex(where: { $0.type == "IDAT" }),
-              let insertion = chunks.firstIndex(where: { $0.type == "IDAT" || $0.type == "fcTL" }) else {
-            return .failure(.damaged(.noImageData))
+        let firstIDAT: Int, insertion: Int
+        switch layout(chunks) {
+        case .success(let layout): (firstIDAT, insertion) = (layout.firstImageData, layout.insertion)
+        case .failure(let refusal): return .failure(refusal)
         }
 
         var xmpIndex: Int?
         for (index, chunk) in chunks.enumerated() where textChunks.contains(chunk.type) {
             switch textKind(chunk, in: png) {
-            case .xmp:
+            case .xmp, .rawXMPProfile:
                 guard xmpIndex == nil else { return .failure(.severalXMPChunks) }
                 xmpIndex = index
             case .xmpInText: return .failure(.xmpInTextChunk)
@@ -149,13 +160,17 @@ enum PNGMetadata {
         var existing: Data?
         if let xmpIndex {
             guard let text = xmpText(chunks[xmpIndex], in: png) else { return .failure(.unreadableXMPChunk) }
-            let bytes = png[text.text]
+            var bytes = Data(png[text.text])
             if text.compressed {
-                guard let inflated = inflate(Data(bytes), limit: maxPacketSize) else { return .failure(.unreadableXMPChunk) }
-                existing = inflated
-            } else {
-                existing = Data(bytes)
+                let limit = text.form == .packet ? maxPacketSize : maxRawProfileText
+                guard let inflated = inflate(bytes, limit: limit) else { return .failure(.unreadableXMPChunk) }
+                bytes = inflated
             }
+            if text.form == .rawProfile {
+                guard let packet = rawProfilePacket(bytes) else { return .failure(.unreadableXMPChunk) }
+                bytes = packet
+            }
+            existing = bytes
             old = text
         }
 
@@ -164,16 +179,14 @@ enum PNGMetadata {
         guard String(data: packet, encoding: .utf8) != nil else { return .failure(.packetNotUTF8) }
 
         let header = old.map { Data(png[$0.header]) } ?? Data(xmpKeyword + [0, 0, 0, 0, 0])
-        let text: Data
+        var text = old?.form == .rawProfile ? rawProfileText(packet) : packet
         if old?.compressed == true {
-            guard let compressed = deflate(packet) else { return .failure(.compressionFailed) }
+            guard let compressed = deflate(text) else { return .failure(.compressionFailed) }
             text = compressed
-        } else {
-            text = packet
         }
         // Only a pathological header (a huge language tag) could take the chunk past the format's limit.
         guard header.count + text.count <= maxChunkLength else { return .failure(.packetTooLarge) }
-        let newChunk = chunk(type: "iTXt", data: header + text)
+        let newChunk = chunk(type: xmpIndex.map { chunks[$0].type } ?? "iTXt", data: header + text)
 
         // The ranges of the original to keep, around the new chunk.
         let start = png.startIndex, end = png.endIndex
@@ -225,20 +238,29 @@ enum PNGMetadata {
         }
     }
 
-    /// Why a sequence of whole chunks can't be edited, or nil: `IHDR` first and only there, no critical chunk the
+    /// Where the image data starts, and where a new XMP chunk goes.
+    private struct Layout {
+        /// The first `IDAT`: ImageIO reads XMP only before it.
+        let firstImageData: Int
+        /// The first `IDAT`, or an animated PNG's first `fcTL` if that comes first: where ImageIO writes XMP.
+        let insertion: Int
+    }
+
+    /// The layout of whole chunks, or why they can't be edited: `IHDR` first and only there, no critical chunk the
     /// format doesn't define, and at least one `IDAT`, all of them consecutive.
-    private static func layoutRefusal(_ chunks: [Chunk]) -> Refusal? {
-        if chunks.first?.type == "CgBI" { return .appleCrushed }
+    private static func layout(_ chunks: [Chunk]) -> Result<Layout, Refusal> {
+        if chunks.first?.type == "CgBI" { return .failure(.appleCrushed) }
         guard chunks.first?.type == "IHDR", !chunks.dropFirst().contains(where: { $0.type == "IHDR" }) else {
-            return .damaged(.misplacedHeader)
+            return .failure(.damaged(.misplacedHeader))
         }
         if let unknown = chunks.first(where: { $0.isCritical && !knownCriticalChunks.contains($0.type) }) {
-            return .unknownCriticalChunk(unknown.type)
+            return .failure(.unknownCriticalChunk(unknown.type))
         }
         let imageData = chunks.indices.filter { chunks[$0].type == "IDAT" }
-        guard let first = imageData.first, let last = imageData.last else { return .damaged(.noImageData) }
-        guard last - first + 1 == imageData.count else { return .damaged(.splitImageData) }
-        return nil
+        guard let first = imageData.first, let last = imageData.last else { return .failure(.damaged(.noImageData)) }
+        guard last - first + 1 == imageData.count else { return .failure(.damaged(.splitImageData)) }
+        let firstFrame = chunks.firstIndex { $0.type == "fcTL" } ?? first
+        return .success(Layout(firstImageData: first, insertion: min(first, firstFrame)))
     }
 
     /// A chunk with this type and data, its length and CRC computed. `data` must be at most `maxChunkLength` bytes.
@@ -268,7 +290,7 @@ enum PNGMetadata {
 
     // MARK: - Text chunks
 
-    private enum TextKind { case xmp, xmpInText, xmpInRawProfile, other }
+    private enum TextKind { case xmp, rawXMPProfile, xmpInText, xmpInRawProfile, other }
 
     /// What a `tEXt`, `zTXt` or `iTXt` chunk holds, as far as XMP goes.
     private static func textKind(_ chunk: Chunk, in png: Data) -> TextKind {
@@ -277,23 +299,42 @@ enum PNGMetadata {
         // different one); an XMP chunk with nothing after its keyword is then refused as unreadable.
         let keyword = data.prefix(80).prefix { $0 != 0 }
         if keyword.elementsEqual(xmpKeyword) { return chunk.type == "iTXt" ? .xmp : .xmpInText }
+        if keyword.elementsEqual(rawXMPProfileKeyword), chunk.type != "iTXt" { return .rawXMPProfile }
         let lowered = keyword.map { (0x41...0x5A).contains($0) ? $0 | 0x20 : $0 }
-        return lowered.starts(with: rawXMPProfileKeyword) ? .xmpInRawProfile : .other
+        return lowered.starts(with: rawXMPProfilePrefix) ? .xmpInRawProfile : .other
     }
 
-    /// Where an XMP `iTXt` chunk's parts are.
+    /// Where an XMP chunk's parts are.
     private struct XMPText {
-        /// Keyword, null, compression flag and method, language tag, null, translated keyword, null.
+        enum Form { case packet, rawProfile }
+        /// Kept byte for byte. An `iTXt`'s keyword, null, compression flag and method, language tag, null, translated
+        /// keyword, null; a `zTXt`'s keyword, null, compression method; a `tEXt`'s keyword and null.
         let header: Range<Int>
         let text: Range<Int>
         let compressed: Bool
+        /// The packet itself (`iTXt`), or ImageMagick's hex dump of it (`zTXt`, `tEXt`).
+        let form: Form
     }
 
-    /// The parts of an XMP `iTXt` chunk, or nil if its header is cut short or names a compression it can't be read
-    /// with (flag other than 0 or 1; method other than 0 for compressed text). For uncompressed text the method byte
-    /// is ignored, as the format says, and kept.
+    /// The parts of an XMP chunk: an `iTXt` with the XMP keyword, or a `zTXt` or `tEXt` with ImageMagick's. Nil if
+    /// its header is cut short or names a compression it can't be read with (an `iTXt` flag other than 0 or 1; a
+    /// method other than 0 for compressed text). For uncompressed `iTXt` text the method byte is ignored, as the
+    /// format says, and kept.
     private static func xmpText(_ chunk: Chunk, in png: Data) -> XMPText? {
         let data = chunk.data
+        switch chunk.type {
+        case "zTXt":
+            let method = data.lowerBound + rawXMPProfileKeyword.count + 1
+            guard method < data.upperBound, png[method] == 0 else { return nil }
+            return XMPText(header: data.lowerBound..<(method + 1), text: (method + 1)..<data.upperBound, compressed: true,
+                           form: .rawProfile)
+        case "tEXt":
+            let text = data.lowerBound + rawXMPProfileKeyword.count + 1
+            guard text <= data.upperBound else { return nil }
+            return XMPText(header: data.lowerBound..<text, text: text..<data.upperBound, compressed: false, form: .rawProfile)
+        default:
+            break
+        }
         let flags = data.lowerBound + xmpKeyword.count + 1
         guard flags + 2 <= data.upperBound else { return nil }
         let compressed: Bool
@@ -305,7 +346,55 @@ enum PNGMetadata {
         guard let languageEnd = png[(flags + 2)..<data.upperBound].firstIndex(of: 0),
               let translatedEnd = png[(languageEnd + 1)..<data.upperBound].firstIndex(of: 0) else { return nil }
         return XMPText(header: data.lowerBound..<(translatedEnd + 1), text: (translatedEnd + 1)..<data.upperBound,
-                       compressed: compressed)
+                       compressed: compressed, form: .packet)
+    }
+
+    // MARK: - ImageMagick's raw profile
+
+    private static let rawProfileHeader = Array("\nxmp\n".utf8)
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+
+    /// A packet as ImageMagick writes an XMP profile into PNG text (`Magick_png_write_raw_profile`): a newline, `xmp`,
+    /// a newline, the length right-aligned in 8 columns, then the bytes in lower-case hex, 36 bytes to a line, each
+    /// line after a newline, and a final newline.
+    static func rawProfileText(_ packet: Data) -> Data {
+        let digits = Array(String(packet.count).utf8)
+        var out = [UInt8]()
+        out.reserveCapacity(rawProfileHeader.count + 8 + packet.count * 2 + packet.count / 36 + 2)
+        out += rawProfileHeader
+        out += [UInt8](repeating: 0x20, count: max(0, 8 - digits.count)) + digits
+        for (i, byte) in packet.enumerated() {
+            if i % 36 == 0 { out.append(0x0A) }
+            out.append(hexDigits[Int(byte >> 4)])
+            out.append(hexDigits[Int(byte & 0x0F)])
+        }
+        out.append(0x0A)
+        return Data(out)
+    }
+
+    /// The packet in an ImageMagick raw XMP profile's text, or nil unless the text is exactly what `rawProfileText`
+    /// writes for it (so the new text keeps the form) and the packet is at most `maxPacketSize`.
+    static func rawProfilePacket(_ text: Data) -> Data? {
+        let bytes = [UInt8](text)
+        guard bytes.starts(with: rawProfileHeader),
+              let lengthEnd = bytes[rawProfileHeader.count...].firstIndex(of: 0x0A),
+              let length = Int(String(decoding: bytes[rawProfileHeader.count..<lengthEnd].drop { $0 == 0x20 }, as: UTF8.self)),
+              (0...maxPacketSize).contains(length) else { return nil }
+        var packet = [UInt8]()
+        packet.reserveCapacity(length)
+        var high: UInt8?
+        for byte in bytes[lengthEnd...] where byte != 0x0A {
+            guard let nibble = hexDigits.firstIndex(of: byte).map(UInt8.init), packet.count < length else { return nil }
+            if let h = high {
+                packet.append(h << 4 | nibble)
+                high = nil
+            } else {
+                high = nibble
+            }
+        }
+        let decoded = Data(packet)
+        guard high == nil, decoded.count == length, rawProfileText(decoded) == text else { return nil }
+        return decoded
     }
 
     // MARK: - zlib
