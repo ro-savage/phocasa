@@ -33,6 +33,8 @@ struct PhotoDetailView: View {
     /// The photo `loadImages` is loading or has loaded. While the next photo loads, the previous image is
     /// still on screen and must not start a full-resolution decode.
     @State private var requestedPath: String?
+    /// The path that couldn't be decoded: the view says so, rather than staying black (or on the previous photo).
+    @State private var unreadablePath: String?
     @State private var fullResolutionTask: Task<Void, Never>?
     @Environment(\.displayScale) private var displayScale
 
@@ -141,6 +143,8 @@ struct PhotoDetailView: View {
                     onNeedsMorePixels: { imageNeedsMorePixels() }
                 )
                 .equatable()
+            } else if photo.displayPath.isEmpty || unreadablePath == photo.displayPath {
+                UnreadableFileView(fileName: photo.fileName)
             }
 
             // Crop overlay
@@ -319,6 +323,16 @@ struct PhotoDetailView: View {
                 // The previous photo's saved-edit render must not stay on screen under this photo.
                 savedEdit.clear()
             }
+            unreadablePath = nil
+            loadedPath = path
+            loadedFilesVersion = filesVersion
+            zoomState.reset()
+        } else {
+            // The file can't be decoded: the previous photo mustn't stay on screen under this one's name.
+            displayedImage = nil
+            originalImage = nil
+            savedEdit.clear()
+            unreadablePath = path
             loadedPath = path
             loadedFilesVersion = filesVersion
             zoomState.reset()
