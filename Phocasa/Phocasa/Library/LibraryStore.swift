@@ -446,11 +446,14 @@ final class LibraryStore {
     }
 
     /// Puts new facts in place for photos already located (`positions(of:)`), keeping the counts current and patching
-    /// (or marking for re-filtering) the grid. Photos whose facts didn't change cost nothing.
-    func applyFacts(_ located: [(facts: PhotoFacts, position: ListPosition)]) {
+    /// (or marking for re-filtering) the grid. Photos whose facts didn't change cost nothing. `onlyRatings`: the new
+    /// facts differ from the old in their rating at most, so the unfiltered counts change in their ratings alone (a
+    /// rating of the whole library costs no recount).
+    func applyFacts(_ located: [(facts: PhotoFacts, position: ListPosition)], onlyRatings: Bool = false) {
         guard !located.isEmpty else { return }
         let patching = located.count <= Self.patchLimit
         let recount = located.count > 1_000 // cheaper than that many incremental updates
+        var ratingTally = recount && onlyRatings ? libraryCounts.ratings : nil
         var changed = false
         for (new, position) in located {
             let old: PhotoFacts
@@ -462,7 +465,12 @@ final class LibraryStore {
                 old = allFacts[position.index]
                 guard old != new else { continue }
                 allFacts[position.index] = new
-                if !recount { countLibraryChange(from: old, to: new) }
+                if ratingTally != nil {
+                    ratingTally?[old.rating, default: 0] -= 1
+                    ratingTally?[new.rating, default: 0] += 1
+                } else if !recount {
+                    countLibraryChange(from: old, to: new)
+                }
             }
             changed = true
             // Only a filtered grid can gain or lose photos when facts change.
@@ -474,7 +482,10 @@ final class LibraryStore {
         }
         guard changed else { return }
         factsVersion &+= 1
-        if recount {
+        if let ratingTally {
+            libraryCounts.ratings = ratingTally.filter { $0.value > 0 } // a full count has no zero entries
+            filteredCounts = nil
+        } else if recount {
             libraryCounts = PhotoQuery().facetCounts(over: allFacts)
             filteredCounts = nil
         }

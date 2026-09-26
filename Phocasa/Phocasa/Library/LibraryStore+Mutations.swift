@@ -51,7 +51,7 @@ extension LibraryStore {
             located.append((facts, position))
         }
         enqueueRowChanges(rows)
-        applyFacts(located)
+        applyFacts(located, onlyRatings: true)
         refreshVisiblePhotos()
         writeQueuedRows(changedNow: targets.photos)
         guard changes else { return } // nothing to undo

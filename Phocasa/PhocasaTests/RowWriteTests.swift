@@ -213,6 +213,31 @@ final class RowWriteTests: XCTestCase {
         XCTAssertEqual(try storedRatings(container)["p33"], 2)
     }
 
+    /// Rating more than a thousand photos adjusts the unfiltered counts' ratings instead of counting the library again;
+    /// every count, filtered ones included, is what a fresh load of the store counts.
+    func testABigRatingKeepsEveryCountAsAFreshLoadHasIt() async throws {
+        let (vm, container, _, photos) = try makeLibrary(count: 1_300, chunk: 400, immediate: 256)
+        vm.library.addTag(name: "half", category: "t", to: photos.enumerated().filter { $0.offset % 2 == 0 }.map(\.element))
+        await vm.library.waitForRowWrites()
+        vm.library.applyFilter(.rated(1))
+        vm.library.applyFilter(.all)
+        vm.selection.selectedPhotos = Set(photos.prefix(1_200).map(\.id))
+        vm.setRatingForSelection(4)
+        vm.library.applyFilter(.tagCategory("t"))
+        await vm.library.waitForRowWrites()
+
+        let fresh = LibraryStore()
+        fresh.modelContext = container.mainContext
+        fresh.activeFilters = vm.library.activeFilters
+        fresh.loadExistingData()
+        XCTAssertEqual(vm.library.libraryCounts, fresh.libraryCounts)
+        XCTAssertEqual(vm.library.ratingCounts, fresh.ratingCounts)
+        XCTAssertEqual(vm.library.tagCounts, fresh.tagCounts)
+        XCTAssertEqual(vm.library.photos.map(\.id), fresh.photos.map(\.id))
+        XCTAssertEqual(vm.library.libraryCounts.ratings[4], 1_200)
+        XCTAssertEqual(vm.library.libraryCounts.ratings.values.reduce(0, +), 1_300)
+    }
+
     // MARK: - Tag links on the tag's side
 
     /// Tagging and untagging many photos changes the tag's side once per chunk: the links the store holds after a
