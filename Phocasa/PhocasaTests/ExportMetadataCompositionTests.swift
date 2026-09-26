@@ -170,4 +170,21 @@ final class ExportMetadataCompositionTests: XCTestCase {
         XCTAssertEqual(values["GCamera:SpecialTypeID"], "keep-me")
         XCTAssertEqual(values["photoshop:City"], "Paris")
     }
+
+    /// Apple's restart-offset table (APP10 `AROT`, which ImageIO writes) indexes the old image data, so an export drops
+    /// the source's and keeps only the encoder's.
+    func testASourcesRestartOffsetTableIsDropped() throws {
+        let rich = try RichJPEG.make()
+        let (segments, sos) = T.header(rich.data)
+        let arot = T.segment(0xEA, Data("AROT".utf8) + Data([0, 0, 0, 0, 0, 3]) + Data((0..<24).map { UInt8($0 * 7 & 0xFF) }))
+        let withAROT = T.assemble(segments + [arot], tail: rich.data[sos...])
+        let new = try encoded()
+
+        let output = try XCTUnwrap(ExportMetadata.jpeg(encoded: new, metadataFrom: try write(withAROT, "arot.jpg")))
+
+        XCTAssertNil(output.range(of: arot.bytes), "the source's AROT describes its old image data")
+        let encoderAROT = JPEGTestSegments.segments(new).filter { $0.marker == 0xEA && $0.id.hasPrefix("AROT") }
+        let outputAROT = JPEGTestSegments.segments(output).filter { $0.marker == 0xEA && $0.id.hasPrefix("AROT") }
+        XCTAssertEqual(outputAROT, encoderAROT, "the encoder's own table, if it wrote one, is kept")
+    }
 }

@@ -289,7 +289,8 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   Adobe RGB `InteropIndex`, the same properties in the XMP (plus `photoshop:ICCProfile`, `xmp:Thumbnails` and the
   XMP describing data appended after the image, a motion photo's video or an Ultra HDR gain map, removed); the Exif
   IFD1 thumbnail (unlinked, its bytes zeroed unless they overlap the MakerNote), MPF preview images,
-  the ICC profile and Adobe APP14 segment (the encoder's describe the new pixels), JFIF and JFXX thumbnails and
+  the ICC profile, Adobe APP14 segment and Apple restart-offset table (APP10 `AROT`; the encoder's describe the new
+  pixels), JFIF and JFXX thumbnails and
   Photoshop thumbnail resources (0x0409, 0x040C). From a RAW, also the tags of its own pixel encoding
   (`Compression`, `CFAPattern`, …). The MakerNote is never changed. If the metadata can't be carried over whole,
   nothing is written (`ExportResult.metadataNotKept`, shown in an alert; a new `-raw-edit` file falls back to the

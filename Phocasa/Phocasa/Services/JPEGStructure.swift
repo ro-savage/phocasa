@@ -4,7 +4,7 @@ import Foundation
 /// (`MetadataService`'s rating splice, `ExportMetadata`'s transplant).
 enum JPEGStructure {
     struct Segment {
-        enum Kind { case xmp, extendedXMP, iptc, mpf, exif, icc, adobe, jfif, jfxx, other }
+        enum Kind { case xmp, extendedXMP, iptc, mpf, exif, icc, adobe, jfif, jfxx, arot, other }
         let marker: UInt8
         /// The whole segment: FF, marker, length, payload.
         let range: Range<Int>
@@ -30,6 +30,8 @@ enum JPEGStructure {
         (0xEE, Data("Adobe".utf8), .adobe),
         (0xE0, Data("JFIF\u{0}".utf8), .jfif),
         (0xE0, Data("JFXX\u{0}".utf8), .jfxx),
+        // Apple's restart-offset table, which ImageIO writes: an index into the image data.
+        (0xEA, Data("AROT\u{0}\u{0}".utf8), .arot),
     ]
 
     /// The segments between SOI and SOS, and where SOS starts. Nil for anything unusual (no SOI, fill bytes,

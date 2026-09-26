@@ -9,8 +9,9 @@ import UniformTypeIdentifiers
 ///   and COM segments are carried over byte for byte, in order, around the new image data. Only what describes the
 ///   old pixels changes: in the Exif, orientation 1, the new size, the colour space, and the IFD1 thumbnail unlinked
 ///   and zeroed (`ExifPatch`; the MakerNote is never touched); the same properties in the XMP; the old ICC profile,
-///   MPF preview images, Adobe APP14 segment, JFIF thumbnail, JFXX thumbnails and Photoshop thumbnail resources go.
-///   The encoder's own colour profile and codec segments describe the new pixels.
+///   MPF preview images, Adobe APP14 segment, Apple restart-offset table (APP10 `AROT`), JFIF thumbnail, JFXX
+///   thumbnails and Photoshop thumbnail resources go. The encoder's own colour profile, APP14/AROT and codec segments
+///   describe the new pixels.
 /// - **From anything else** (a RAW): ImageIO's metadata tree of the source, with orientation 1, the new size and the
 ///   colour space, and without the tags that describe the source's own pixel encoding, is merged onto the new JPEG
 ///   without re-encoding it. ImageIO has no MakerNote to write, so that stays in the RAW.
@@ -55,7 +56,8 @@ enum ExportMetadata {
               let (encodedSegments, encodedSOS) = JPEGStructure.header(encoded) else { return nil }
         // What describes the new pixels comes from the encoder.
         let encodedICC = encodedSegments.filter { $0.kind == .icc }.map { encoded[$0.range] }
-        let encodedAdobe = encodedSegments.filter { $0.kind == .adobe }.map { encoded[$0.range] }
+        // Its APP14 (colour transform) and AROT (restart offsets) describe its image data.
+        let encodedCodecAPPn = encodedSegments.filter { $0.kind == .adobe || $0.kind == .arot }.map { encoded[$0.range] }
         let codec = encodedSegments.filter { !$0.isAPPn && !$0.isComment }.map { encoded[$0.range] }
 
         var out = Data([0xFF, 0xD8])
@@ -100,14 +102,14 @@ enum ExportMetadata {
                 out += jfifWithoutThumbnail(original[segment.range])
             case .icc:
                 placeICC()
-            case .mpf, .adobe, .jfxx:
+            case .mpf, .adobe, .jfxx, .arot:
                 break
             case .extendedXMP, .other:
                 out += original[segment.range]
             }
         }
         placeICC()
-        encodedAdobe.forEach { out += $0 }
+        encodedCodecAPPn.forEach { out += $0 }
         codec.forEach { out += $0 }
         out += encoded[encodedSOS...]
         return out
