@@ -88,11 +88,9 @@ extension LibraryStore {
         /// Photos with changes not written yet.
         var count: Int { pending.count }
 
-        /// An action on at most this many photos writes them in the turn it's made: at least `immediateMinimum`, or
-        /// what one chunk of the write task would take.
-        var immediateLimit: Int { max(immediateMinimum, sizer.steadyRows(fallback: immediateMinimum)) }
+        /// An action on at most this many photos writes them in the turn it's made (~170 ms with 150,000 loaded).
         /// Tests make it small, with `sizer.maximumRows`, to have small libraries written in chunks.
-        var immediateMinimum = 256
+        var immediateLimit = 256
     }
 
     // MARK: - Queueing
@@ -101,6 +99,8 @@ extension LibraryStore {
     /// anything. The caller patches the in-memory library, then calls `writeQueuedRows(changedNow:)`.
     func enqueueRowChanges(_ changes: [(photo: PhotoAsset, change: RowChange)]) {
         guard !changes.isEmpty else { return }
+        rowWrites.pending.reserveCapacity(rowWrites.pending.count + changes.count)
+        rowWrites.order.reserveCapacity(rowWrites.order.count + changes.count)
         for (photo, change) in changes {
             let key = ObjectIdentifier(photo)
             if var entry = rowWrites.pending[key] {
@@ -175,6 +175,7 @@ extension LibraryStore {
     /// alive, and a store that outlived its container writes nothing more.
     private func startRowWriteTask() {
         guard rowWrites.task == nil, !rowWrites.pending.isEmpty, let context = modelContext else { return }
+        rowWrites.sizer.startBatch()
         let container = context.container
         rowWrites.task = Task { [weak self, weak container] in
             var pause = self?.writeRowChunk(containerIsAlive: container != nil)

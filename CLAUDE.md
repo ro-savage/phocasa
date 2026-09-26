@@ -88,7 +88,7 @@ Phocasa/
 │   │   │                             time (then to the files); `rating(of:)`, `tags(of:)`, `hasAnyEdits(of:)`
 │   │   │   +ListEditing              in-memory list edits: bin moves, scan inserts/removals, deletes
 │   │   │   +Filtering                filters, search, sort toggle, tag lists
-│   │   ├── WriteChunkSizer         — how many rows a main-context write chunk takes (probe, estimate, target)
+│   │   ├── WriteChunkSizer         — how many rows a main-context write chunk takes (fixed part measured each chunk)
 │   │   ├── LibrarySort             — THE definition of photo order: capture date, then creation date (fetch,
 │   │   │                             key, insertion index, merge, toggle, re-order)
 │   │   ├── LibrarySnapshot         — the library as plain values, read in background contexts (launch of a big
@@ -187,7 +187,7 @@ Tools/
   `LibraryStore` calls `photosDidChange(_:)`.
 - **The write queue** (`LibraryStore+RowWrites`): a rating, tag, bin, saved-edit change or permanent delete patches
   memory at once (the facts change in place, no model reads) and queues the rows' new values. An action on at most
-  `rowWrites.immediateLimit` photos (≥ 256) is written in its own turn, in one save; a bigger one by `rowWrites.task`,
+  `rowWrites.immediateLimit` (256) photos is written in its own turn, in one save; a bigger one by `rowWrites.task`,
   in chunks sized by time (`WriteChunkSizer`) with a pause for the run loop between them. A photo's changes merge
   (latest value per field wins); its rating and keywords go to its files (`MetadataWriter`) when its row is written,
   read from the row. Until then the models hold the old values: views read `rating(of:)`, `tags(of:)`,
@@ -456,7 +456,7 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   `captureDates.didApplyChunk`, `rowWrites.didWriteRows`) capture their view model or library `[unowned]`/`[weak]`: a
   strong capture is a retain cycle that keeps the library alive after the test, and its after-launch work then runs
   against a released container.
-- A test that changes more than 256 photos at once, or sets `rowWrites.immediateMinimum` / `rowWrites.sizer.maximumRows`
+- A test that changes more than 256 photos at once, or sets `rowWrites.immediateLimit` / `rowWrites.sizer.maximumRows`
   small to have a small library written in chunks, awaits `library.waitForRowWrites()` before it reads the store (or
   compares with a fresh load of the same context). `UndoTests` use an `UndoManager` with `groupsByEvent = false`.
 - Hosted-window tests (`GridKeepAliveTests`) need the display awake: run `xcodebuild test` under `caffeinate -d -u`.

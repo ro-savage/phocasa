@@ -95,7 +95,7 @@ final class UndoTests: XCTestCase {
         let photos = insertPhotos(80)
         let before = try storedRatings()
         viewModel.library.rowWrites.sizer.maximumRows = 6
-        viewModel.library.rowWrites.immediateMinimum = 4
+        viewModel.library.rowWrites.immediateLimit = 4
         viewModel.selection.selectAll()
         viewModel.setRatingForSelectionOrCurrent(0)
         XCTAssertTrue(viewModel.library.hasPendingRowWrites, "precondition: still being written")

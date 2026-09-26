@@ -859,7 +859,7 @@ final class ViewModelTests: XCTestCase {
     /// third waits for the queue, then checks that the store holds what memory shows.
     func testRandomisedInteractionsWithRowsWrittenInChunksMatchFreshLoad() async {
         viewModel.library.rowWrites.sizer.maximumRows = 2
-        viewModel.library.rowWrites.immediateMinimum = 2
+        viewModel.library.rowWrites.immediateLimit = 2
         viewModel.library.rowWrites.pausesBetweenChunks = false
         await randomisedInteractions(seed: 0x5EED_0011, chunked: true)
     }

@@ -991,7 +991,7 @@ final class ScanTests: XCTestCase {
         // Small chunks with their pauses: the write takes long enough that a scan that didn't wait would read the store
         // half-written.
         vm.library.rowWrites.sizer.maximumRows = 4
-        vm.library.rowWrites.immediateMinimum = 2
+        vm.library.rowWrites.immediateLimit = 2
         vm.selection.selectAll()
         vm.deleteSelected()
         XCTAssertEqual(vm.library.binCount, 30)
@@ -1011,7 +1011,7 @@ final class ScanTests: XCTestCase {
         for i in 0..<24 { try makeJPEG("s\(i).jpg", in: photos) }
         let (vm, context, container) = try await openLibrary(at: photos)
         vm.library.rowWrites.sizer.maximumRows = 5
-        vm.library.rowWrites.immediateMinimum = 5
+        vm.library.rowWrites.immediateLimit = 5
         for i in 0..<24 {
             try Data(repeating: UInt8(i), count: 50 + i).write(to: photos.appendingPathComponent("s\(i).jpg"))
         }
@@ -1038,7 +1038,7 @@ final class ScanTests: XCTestCase {
         let photos = try makeTempDir("photos")
         let (vm, _, container) = try await openLibrary(at: photos)
         vm.library.rowWrites.sizer.maximumRows = 3
-        vm.library.rowWrites.immediateMinimum = 3
+        vm.library.rowWrites.immediateLimit = 3
         for i in 0..<20 {
             try makeJPEG("k\(i).jpg", in: photos, rating: i % 5,
                          keywords: ["people:p\(i % 3)", "all", "own \(i)"])

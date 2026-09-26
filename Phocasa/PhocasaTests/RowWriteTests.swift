@@ -57,7 +57,7 @@ final class RowWriteTests: XCTestCase {
         try context.save()
         let vm = PhotoLibraryViewModel()
         vm.library.rowWrites.sizer.maximumRows = chunk
-        vm.library.rowWrites.immediateMinimum = immediate
+        vm.library.rowWrites.immediateLimit = immediate
         vm.library.rowWrites.pausesBetweenChunks = false
         vm.setModelContext(context)
         vm.loadExistingData()
@@ -288,37 +288,72 @@ final class RowWriteTests: XCTestCase {
 
     // MARK: - The chunk sizer
 
-    /// The sizer's chunks: a probe measures the fixed part, the next chunk the per-row part, then chunks aim at their
-    /// target; a fixed part that grows (a tag that grows as it's written) is measured again.
-    func testTheSizerAimsAtItsTargetAndFollowsAGrowingFixedCost() {
+    /// The sizer against the costs measured at scale (`ScaleChecks.testTagCostAtLibraryScale`): a chunk takes
+    /// `fixed + perRow × rows`. Its chunks settle near their target whatever the true per-row cost, follow a fixed part
+    /// that grows as the chunks go (a tag that grows as it's written), and a chunk slowed by something else (a WAL
+    /// checkpoint) doesn't shrink the ones after it to nothing (the first version's estimate made 3,755 chunks of a
+    /// 150,000-photo tag, 52 minutes).
+    func testTheSizerSettlesNearItsTargetAndShrugsOffASlowChunk() {
         func ms(_ duration: Duration) -> Double {
             Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
         }
-        // 150,000 photos loaded: 140 ms fixed, 0.1 ms a row.
-        func cost(_ rows: Int, fixed: Double = 140) -> Duration { .microseconds(Int((fixed + 0.1 * Double(rows)) * 1000)) }
-        var sizer = WriteChunkSizer()
-        XCTAssertEqual(sizer.rows, WriteChunkSizer.probeRows)
-        sizer.record(rows: sizer.rows, took: cost(sizer.rows))
-        sizer.record(rows: sizer.rows, took: cost(sizer.rows))
-        XCTAssertEqual(ms(sizer.target), 210, accuracy: 1, "a third of the chunk for rows")
-        XCTAssertEqual(Double(sizer.rows), 700, accuracy: 20, "(210 - 140) / 0.1")
-        for _ in 0..<5 { sizer.record(rows: sizer.rows, took: cost(sizer.rows)) }
-        XCTAssertEqual(Double(sizer.rows), 700, accuracy: 20, "steady")
-        // 50,000 loaded: 40 ms of rows on top of the fixed part.
-        var mid = WriteChunkSizer()
-        mid.record(rows: mid.rows, took: cost(mid.rows, fixed: 50))
-        mid.record(rows: mid.rows, took: cost(mid.rows, fixed: 50))
-        XCTAssertEqual(ms(mid.target), 90, accuracy: 1)
-        XCTAssertEqual(Double(mid.rows), 400, accuracy: 20)
-        // The fixed part grows fivefold: the next chunk is a probe, and chunks then grow to keep it at most two thirds.
-        sizer.record(rows: sizer.rows, took: cost(sizer.rows, fixed: 700))
-        XCTAssertEqual(sizer.rows, WriteChunkSizer.probeRows)
-        sizer.record(rows: sizer.rows, took: cost(sizer.rows, fixed: 700))
-        XCTAssertGreaterThan(sizer.rows, 2_000, "a third of a 1 s chunk for rows")
-        // A small library: 5 ms fixed.
+        func cost(_ rows: Int, fixed: Double, perRow: Double) -> Duration {
+            .microseconds(Int((fixed + perRow * Double(rows)) * 1000))
+        }
+        /// The sizer's chunk times over `chunks` chunks, with the fixed part growing by `growth` ms a row written.
+        func run(_ sizer: inout WriteChunkSizer, chunks: Int, fixed: Double, perRow: Double,
+                 growth: Double = 0) -> [Double] {
+            var fixed = fixed
+            var times: [Double] = []
+            for _ in 0..<chunks {
+                let rows = sizer.rows
+                let took = cost(rows, fixed: fixed, perRow: perRow)
+                sizer.record(rows: rows, took: took)
+                times.append(ms(took))
+                fixed += growth * Double(rows)
+            }
+            return times
+        }
+        // 150,000 photos loaded, ratings: 140 ms fixed, 0.1–0.25 ms a row.
+        for perRow in [0.1, 0.25] {
+            var sizer = WriteChunkSizer()
+            XCTAssertEqual(sizer.rows, WriteChunkSizer.firstRows)
+            let times = run(&sizer, chunks: 30, fixed: 140, perRow: perRow)
+            XCTAssertTrue(times.allSatisfy { $0 < 260 }, "\(perRow) ms a row: no chunk runs long: \(times)")
+            XCTAssertGreaterThan(times.last ?? 0, 160, "chunks of several hundred rows, not a few")
+            XCTAssertGreaterThan(sizer.rows, 250)
+        }
+        // 10,000 loaded: 10 ms fixed, 0.15 ms a row: ~50 ms chunks.
         var small = WriteChunkSizer()
-        small.record(rows: small.rows, took: cost(small.rows, fixed: 5))
-        small.record(rows: small.rows, took: cost(small.rows, fixed: 5))
-        XCTAssertEqual(Double(small.rows), 400, accuracy: 30, "40 ms of rows")
+        let smallTimes = run(&small, chunks: 30, fixed: 10, perRow: 0.15)
+        XCTAssertEqual(smallTimes.last ?? 0, 50, accuracy: 10)
+        // A tag growing to 150,000 photos as it's written: 4 µs of fixed cost for each photo linked. Chunks follow the
+        // growing fixed part, with a third of each for rows, so the whole tag takes tens of chunks, not thousands.
+        var tag = WriteChunkSizer()
+        var fixed = 140.0
+        var written = 0
+        var chunks = 0
+        while written < 150_000 {
+            let rows = min(tag.rows, 150_000 - written)
+            tag.record(rows: rows, took: cost(rows, fixed: fixed, perRow: 0.17))
+            written += rows
+            fixed += 0.004 * Double(rows)
+            chunks += 1
+        }
+        XCTAssertLessThan(chunks, 200, "\(chunks) chunks")
+        XCTAssertLessThan(ms(tag.target), 1_200, "at most half as long again as the fixed part (740 ms at the end)")
+        // One chunk slowed by 300 ms: the next ones keep their size (within a factor of two).
+        var noisy = WriteChunkSizer()
+        _ = run(&noisy, chunks: 20, fixed: 140, perRow: 0.1)
+        let steady = noisy.rows
+        noisy.record(rows: steady, took: cost(steady, fixed: 440, perRow: 0.1))
+        _ = run(&noisy, chunks: 1, fixed: 140, perRow: 0.1)
+        XCTAssertGreaterThan(noisy.rows, steady / 2)
+        XCTAssertGreaterThanOrEqual(ms(noisy.perRow), 0.1, "rows never look cheaper than 0.1 ms")
+        // A new batch starts small again, and chunks at most double.
+        noisy.startBatch()
+        XCTAssertEqual(noisy.rows, WriteChunkSizer.firstRows)
+        noisy.record(rows: noisy.rows, took: cost(noisy.rows, fixed: 140, perRow: 0.1))
+        XCTAssertEqual(noisy.rows, 2 * WriteChunkSizer.firstRows)
     }
 }

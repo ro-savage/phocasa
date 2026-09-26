@@ -271,7 +271,7 @@ extension LibraryStore {
         var createdTags = false
         if !withKeywords.isEmpty {
             scanProgress = "Adding \(plan.newPhotos.count) new photos..."
-            var sizer = rowWrites.sizer
+            var sizer = WriteChunkSizer(maximumRows: rowWrites.sizer.maximumRows) // starts small
             var start = 0
             while start < withKeywords.count {
                 let end = min(start + sizer.rows, withKeywords.count)

@@ -8,12 +8,14 @@ import Foundation
 ///   is read and diffed: ~0.7 s for a tag on 150,000 photos);
 /// - each row or link written costs 0.1–0.3 ms more.
 ///
-/// The sizer measures the fixed part with a small probe chunk (at first, and again whenever a chunk's time strays from
-/// what it predicted: a tag that grows as it is written), the per-row part from the chunk after a probe, and picks the
-/// rows for a chunk of `target`: at least `shortestChunk`, with at least `rowTime` (and a third of the chunk) for rows
-/// on top of the fixed part, and at most 200 ms unless the fixed part alone makes that too short to get anywhere. A
-/// library of 150,000 photos gets rating chunks of about 210 ms of several hundred rows each; a small library gets
-/// short ones. (A chunk sized to a frame, whatever the fixed part, shrinks to a row a save in a big library.)
+/// The per-row part varies little, so it starts at 0.2 ms and is only corrected, slowly and within 0.1–0.5 ms, by
+/// chunks whose rows made up half their time or more (a slow save or a WAL checkpoint in a chunk made mostly of fixed
+/// cost can't make rows look expensive and shrink the chunks to nothing). The fixed part varies a hundredfold, so
+/// each chunk measures it again (its time less its rows'). The next chunk aims at `target`: at least `shortestChunk`,
+/// with at least `rowTime` (and a third of the chunk) for rows on top of the fixed part, and at most 200 ms unless the
+/// fixed part alone makes that too short to get anywhere. Chunks at most double from one to the next. A library of
+/// 150,000 photos gets rating chunks of about 210 ms of several hundred rows each; a small library gets short ones. (A
+/// chunk sized to a frame, whatever the fixed part, shrinks to a row a save in a big library.)
 struct WriteChunkSizer {
     /// Rows the next chunk takes.
     private(set) var rows: Int
@@ -21,18 +23,15 @@ struct WriteChunkSizer {
     var maximumRows: Int {
         didSet { rows = min(rows, maximumRows) }
     }
-    /// The part of a chunk's time that doesn't depend on its rows, once a chunk has been timed.
+    /// The part of a chunk's time that doesn't depend on its rows, as the last chunk measured it.
     private(set) var fixedCost: Duration?
-    /// Time per row: a guess until a chunk after a probe has been timed.
-    private(set) var perRow: Duration = .microseconds(150)
-    /// Whether the next chunk is a probe (`probeRows` rows, to measure the fixed part).
-    private var nextIsProbe = true
-    private var lastProbe: (rows: Int, took: Duration)?
+    /// Time per row.
+    private(set) var perRow: Duration = .microseconds(200)
 
-    static let probeRows = 8
-    /// The fewest rows a chunk other than a probe takes, whatever the estimates say.
-    static let minimumRows = 32
+    /// The first chunk of a batch, which measures the fixed part.
+    static let firstRows = 32
     static let longestChunk: Duration = .milliseconds(200)
+    static let perRowRange: ClosedRange<Duration> = .microseconds(100) ... .microseconds(500)
     /// The shortest chunk worth making, and the time for rows in every chunk on top of the fixed part. 40 ms each for
     /// what the user just did; background work (`CaptureDateBackfill`) asks for less, so a small library's chunks stay
     /// within a frame.
@@ -43,7 +42,7 @@ struct WriteChunkSizer {
         self.maximumRows = maximumRows
         self.shortestChunk = shortestChunk
         self.rowTime = rowTime
-        rows = max(1, min(Self.probeRows, maximumRows))
+        rows = max(1, min(Self.firstRows, maximumRows))
     }
 
     /// What a chunk aims to take, for the fixed part measured.
@@ -57,28 +56,24 @@ struct WriteChunkSizer {
     func steadyRows(fallback: Int) -> Int {
         guard let fixed = fixedCost else { return min(fallback, maximumRows) }
         let wanted = Int(((target - fixed) / perRow).rounded(.down))
-        return max(1, min(max(wanted, Self.minimumRows), maximumRows))
+        return max(1, min(wanted, maximumRows))
+    }
+
+    /// The next chunk starts small again: a new batch of work, whose fixed part the last one's says little about (a
+    /// tag change's is many times a rating's).
+    mutating func startBatch() {
+        rows = max(1, min(Self.firstRows, maximumRows))
     }
 
     /// Takes in how long a chunk of `done` rows took, and sizes the next one.
     mutating func record(rows done: Int, took elapsed: Duration) {
         guard done > 0 else { return }
-        if nextIsProbe {
-            nextIsProbe = false
-            lastProbe = (done, elapsed)
-            fixedCost = max(elapsed - perRow * done, .zero)
-        } else if let probe = lastProbe {
-            lastProbe = nil
-            if done > probe.rows * 2 {
-                let observed = max(elapsed - probe.took, .zero) / (done - probe.rows)
-                perRow = min(max(observed, .microseconds(5)), .milliseconds(20))
-                fixedCost = max(probe.took - perRow * probe.rows, .zero)
-            }
-        } else if let fixed = fixedCost {
-            let predicted = fixed + perRow * done
-            if elapsed > predicted * 1.3 || elapsed * 1.3 < predicted { nextIsProbe = true }
+        if let fixed = fixedCost, perRow * done >= elapsed / 2 {
+            let observed = max(elapsed - fixed, .zero) / done
+            perRow = (perRow * 3 + min(max(observed, Self.perRowRange.lowerBound), Self.perRowRange.upperBound)) / 4
         }
-        rows = nextIsProbe ? max(1, min(Self.probeRows, maximumRows)) : steadyRows(fallback: Self.minimumRows)
+        fixedCost = max(elapsed - perRow * done, .zero)
+        rows = max(1, min(steadyRows(fallback: Self.firstRows), 2 * done))
     }
 
     /// How long the run loop gets between two chunks: half the chunk's time, so events and drawing get at least a
