@@ -117,7 +117,7 @@ final class PhotoLibraryViewModel {
     // MARK: - Rating and Tagging the Selection
 
     func setRatingForSelection(_ rating: Int) {
-        library.setRating(rating, for: selection.selectedPhotosList)
+        library.setRating(rating, for: selection.selectedTargets)
     }
 
     /// Keyboard rating: the photo in the detail view, or else the selection.
@@ -130,16 +130,15 @@ final class PhotoLibraryViewModel {
     }
 
     func addTagToSelection(name: String, category: String) {
-        library.addTag(name: name, category: category, to: selection.selectedPhotosList)
+        library.addTag(name: name, category: category, to: selection.selectedTargets)
     }
 
     /// The context menu's tag toggle: on the whole selection when `photo` is part of a multi-selection (removes the
     /// tag if every selected photo has it, else adds it), otherwise on `photo`.
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
         if selection.isPartOfMultiSelection(photo) {
-            let selected = selection.selectedPhotosList
             if selectionTagIDs().contains(tag.id) {
-                library.removeTag(tag, from: selected)
+                library.removeTag(tag, from: selection.selectedTargets)
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
             }
@@ -175,15 +174,7 @@ final class PhotoLibraryViewModel {
         let key = SelectionTagsKey(selection: selection.version, facts: library.factsVersion, grid: library.gridVersion)
         if let cached = selectionTags, cached.key == key { return cached.ids }
         Self.selectionTagComputations += 1
-        let shown = selection.selectedPhotos.filter { library.index(of: $0) != nil }
-        var common: Set<UUID>?
-        for position in library.positions(of: Array(shown)) {
-            guard let position else { continue }
-            let tags = library.facts(at: position).tagIDs
-            common = common?.intersection(tags) ?? tags
-            if common?.isEmpty == true { break }
-        }
-        let ids = common ?? Set(library.allTags.map(\.id))
+        let ids = library.commonTagIDs(ofShown: selection.selectedPhotos) ?? Set(library.allTags.map(\.id))
         selectionTags = (key, ids)
         return ids
     }
@@ -250,14 +241,14 @@ final class PhotoLibraryViewModel {
 
     @discardableResult
     func deleteSelected() -> Task<Void, Never>? {
-        let toDelete = selection.selectedPhotosList
-        guard !toDelete.isEmpty else { return nil }
+        let toDelete = selection.selectedTargets
+        guard !toDelete.photos.isEmpty else { return nil }
 
         if library.viewingBin {
-            photosToDelete = toDelete
+            photosToDelete = toDelete.photos
             showPermanentDeleteConfirmation = true
         } else if let fileType = fileTypeToDelete {
-            pendingFileTypeDelete = FileTypeDelete(toDelete, fileType: fileType)
+            pendingFileTypeDelete = FileTypeDelete(toDelete.photos, fileType: fileType)
         } else {
             moveToBin(toDelete)
         }
@@ -279,7 +270,7 @@ final class PhotoLibraryViewModel {
         } else if let fileType = fileTypeToDelete {
             pendingFileTypeDelete = FileTypeDelete(photos, fileType: fileType)
         } else {
-            moveToBin(photos)
+            moveToBin(library.targets(of: photos))
         }
         return nil
     }
@@ -321,24 +312,28 @@ final class PhotoLibraryViewModel {
     }
 
     /// Undo restores the photos (those still in the bin).
-    private func moveToBin(_ photosToMove: [PhotoAsset]) {
-        guard !photosToMove.isEmpty else { return }
-        moveDetailOff(Set(photosToMove.map(\.id)), saveEdit: true)
-        let ids = library.moveToBin(photosToMove)
+    private func moveToBin(_ targets: LibraryStore.Targets) {
+        guard !targets.photos.isEmpty else { return }
+        moveDetailOff(Set(targets.ids), saveEdit: true)
+        let ids = library.moveToBin(targets)
         selection.deselect(ids)
         registerUndo("Move to Bin") { viewModel in
-            viewModel.restoreFromBin(viewModel.library.loadedPhotos(withIDs: ids, inBin: true))
+            viewModel.restoreFromBin(viewModel.library.loadedTargets(withIDs: ids, inBin: true).targets)
         }
     }
 
-    /// Undo moves the photos back to the bin (those still in the library).
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) {
-        guard !photosToRestore.isEmpty else { return }
-        moveDetailOff(Set(photosToRestore.map(\.id)), saveEdit: true)
-        let ids = library.restoreFromBin(photosToRestore)
+        restoreFromBin(library.targets(of: photosToRestore))
+    }
+
+    /// Undo moves the photos back to the bin (those still in the library).
+    private func restoreFromBin(_ targets: LibraryStore.Targets) {
+        guard !targets.photos.isEmpty else { return }
+        moveDetailOff(Set(targets.ids), saveEdit: true)
+        let ids = library.restoreFromBin(targets)
         selection.deselect(ids)
         registerUndo("Restore from Bin") { viewModel in
-            viewModel.moveToBin(viewModel.library.loadedPhotos(withIDs: ids, inBin: false))
+            viewModel.moveToBin(viewModel.library.loadedTargets(withIDs: ids, inBin: false).targets)
         }
     }
 
@@ -355,7 +350,7 @@ final class PhotoLibraryViewModel {
     }
 
     func restoreSelected() {
-        restoreFromBin(selection.selectedPhotosList)
+        restoreFromBin(selection.selectedTargets)
     }
 
     @discardableResult

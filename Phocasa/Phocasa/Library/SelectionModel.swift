@@ -21,8 +21,13 @@ final class SelectionModel {
 
     /// The selected photos that the grid shows, in grid order. O(k log k) for k selected photos.
     var selectedPhotosList: [PhotoAsset] {
-        let photos = library.photos
-        return selectedPhotos.compactMap { library.index(of: $0) }.sorted().map { photos[$0] }
+        selectedTargets.photos
+    }
+
+    /// `selectedPhotosList` with the photos' ids and places, read from the grid (no model reads): what the view model
+    /// hands the library's changes to the selection.
+    var selectedTargets: LibraryStore.Targets {
+        library.shownTargets(withIDs: selectedPhotos)
     }
 
     func isPartOfMultiSelection(_ photo: PhotoAsset) -> Bool {

@@ -318,6 +318,68 @@ final class LibraryStore {
         position.inBin ? binPhotos[position.index] : allPhotos[position.index]
     }
 
+    /// Photos a change acts on, with their ids and places in the lists (`positions[i]` nil: not loaded).
+    struct Targets {
+        var photos: [PhotoAsset] = []
+        var ids: [UUID] = []
+        var positions: [ListPosition?] = []
+    }
+
+    /// `photos` as targets: their ids are read from the models (about 1 µs each).
+    func targets(of photos: [PhotoAsset]) -> Targets {
+        let ids = photos.map(\.id)
+        return Targets(photos: photos, ids: ids, positions: positions(of: ids))
+    }
+
+    /// The photos the grid shows with `ids`, in grid order, from the grid's own lists: no model reads, one lookup each.
+    /// (The selection's photos, `SelectionModel.selectedTargets`: 150,000 of them in about 30 ms.)
+    func shownTargets(withIDs ids: Set<UUID>) -> Targets {
+        let photos = self.photos // once: each read of an observed property goes through the observation registrar
+        let index = photoIndex()
+        var shown: [Int] = []
+        shown.reserveCapacity(min(ids.count, grid.ids.count))
+        for id in ids {
+            if let i = index[id] { shown.append(i) }
+        }
+        shown.sort()
+        var targets = Targets()
+        targets.photos.reserveCapacity(shown.count)
+        targets.ids.reserveCapacity(shown.count)
+        for i in shown {
+            targets.photos.append(photos[i])
+            targets.ids.append(grid.ids[i])
+        }
+        if gridShowsCurrent(inBin: grid.showsBin) {
+            targets.positions = shown.map { ListPosition(inBin: grid.showsBin, index: grid.sourceIndices?[$0] ?? $0) }
+        } else {
+            targets.positions = positions(of: targets.ids)
+        }
+        return targets
+    }
+
+    /// The tags every photo the grid shows with `ids` has, from the facts (one lookup each, stopping once none is left);
+    /// nil when the grid shows none of them.
+    func commonTagIDs(ofShown ids: Set<UUID>) -> Set<UUID>? {
+        access(keyPath: \.photos)
+        guard gridShowsCurrent(inBin: grid.showsBin) else {
+            let index = photoIndex()
+            return positions(of: Array(ids.filter { index[$0] != nil })).reduce(nil) { common, position in
+                guard let position else { return common }
+                return common?.intersection(facts(at: position).tagIDs) ?? facts(at: position).tagIDs
+            }
+        }
+        let index = photoIndex()
+        var common: Set<UUID>?
+        for id in ids {
+            guard let shownAt = index[id] else { continue }
+            let source = grid.sourceIndices?[shownAt] ?? shownAt
+            let tags = facts(at: ListPosition(inBin: grid.showsBin, index: source)).tagIDs
+            common = common?.intersection(tags) ?? tags
+            if common?.isEmpty == true { break }
+        }
+        return common
+    }
+
     /// Where each of `ids` is in the library or the bin (nil: not loaded). O(1) each for photos the grid shows, and one
     /// pass over both lists for the others, however many there are.
     func positions(of ids: [UUID]) -> [ListPosition?] {
@@ -377,22 +439,24 @@ final class LibraryStore {
 
     /// Puts new facts in place for photos already located (`positions(of:)`), keeping the counts current and patching
     /// (or marking for re-filtering) the grid. Photos whose facts didn't change cost nothing.
-    func applyFacts(_ changes: [(facts: PhotoFacts, position: ListPosition)]) {
-        let located = changes.filter { $0.facts != facts(at: $0.position) }
+    func applyFacts(_ located: [(facts: PhotoFacts, position: ListPosition)]) {
         guard !located.isEmpty else { return }
-        factsVersion &+= 1
         let patching = located.count <= Self.patchLimit
         let recount = located.count > 1_000 // cheaper than that many incremental updates
+        var changed = false
         for (new, position) in located {
             let old: PhotoFacts
             if position.inBin {
                 old = binFacts[position.index]
+                guard old != new else { continue }
                 binFacts[position.index] = new
             } else {
                 old = allFacts[position.index]
+                guard old != new else { continue }
                 allFacts[position.index] = new
                 if !recount { countLibraryChange(from: old, to: new) }
             }
+            changed = true
             // Only a filtered grid can gain or lose photos when facts change.
             guard patching, gridShowsCurrent(inBin: position.inBin), grid.sourceIndices != nil else { continue }
             let matches = grid.query.matches(new)
@@ -400,6 +464,8 @@ final class LibraryStore {
                 gridDidChangeMembership(atSource: position.index, now: matches)
             }
         }
+        guard changed else { return }
+        factsVersion &+= 1
         if recount {
             libraryCounts = PhotoQuery().facetCounts(over: allFacts)
             filteredCounts = nil

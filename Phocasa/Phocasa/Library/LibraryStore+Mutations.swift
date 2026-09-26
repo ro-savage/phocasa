@@ -16,47 +16,50 @@ extension LibraryStore {
     /// Rates `photos` (in grid order, as `SelectionModel.selectedPhotosList` gives them). Every photo's files get the
     /// rating, even those that had it already. Undo gives each photo the rating it had.
     func setRating(_ rating: Int, for photos: [PhotoAsset]) {
-        setRatings(photos.map { ($0, rating) })
+        setRating(rating, for: targets(of: photos))
     }
 
-    /// Gives each photo its rating (an undo gives each photo its own), and registers the undo, which gives back the
-    /// ratings the photos had. The facts change in memory without reading the models.
-    func setRatings(_ ratings: [(photo: PhotoAsset, rating: Int)], actionName: String = "Rating") {
-        guard modelContext != nil, !ratings.isEmpty else { return }
-        let ids = ratings.map(\.photo.id)
-        let positions = positions(of: ids)
-        var before: [(id: UUID, rating: Int)] = []
+    /// `setRating(_:for:)` for photos read from the grid (`SelectionModel.selectedTargets`): no model reads, so all
+    /// 150,000 photos of a library are rated in memory in a fraction of a second.
+    func setRating(_ rating: Int, for targets: Targets) {
+        setRatings(targets, Array(repeating: rating, count: targets.photos.count), actionName: "Rating")
+    }
+
+    /// Gives each target the rating at its index (an undo gives each photo its own), and registers the undo, which
+    /// gives back the ratings the photos had. The facts change in memory without reading the models.
+    private func setRatings(_ targets: Targets, _ ratings: [Int], actionName: String) {
+        guard modelContext != nil, !targets.photos.isEmpty else { return }
+        var before: [Int] = []
         var located: [(facts: PhotoFacts, position: ListPosition)] = []
+        var rows: [(photo: PhotoAsset, change: RowChange)] = []
         var changes = false
         before.reserveCapacity(ratings.count)
         located.reserveCapacity(ratings.count)
-        for i in ratings.indices {
-            guard let position = positions[i] else {
-                let rating = rating(of: ratings[i].photo)
-                before.append((ids[i], rating))
-                changes = changes || rating != ratings[i].rating
+        rows.reserveCapacity(ratings.count)
+        for i in targets.photos.indices {
+            rows.append((targets.photos[i], RowChange(rating: ratings[i], writesMetadata: true)))
+            guard let position = targets.positions[i] else {
+                let rating = rating(of: targets.photos[i])
+                before.append(rating)
+                changes = changes || rating != ratings[i]
                 continue
             }
             var facts = facts(at: position)
-            before.append((ids[i], facts.rating))
-            changes = changes || facts.rating != ratings[i].rating
-            facts.rating = ratings[i].rating
+            before.append(facts.rating)
+            changes = changes || facts.rating != ratings[i]
+            facts.rating = ratings[i]
             located.append((facts, position))
         }
-        enqueueRowChanges(ratings.map { ($0.photo, RowChange(rating: $0.rating, writesMetadata: true)) })
+        enqueueRowChanges(rows)
         applyFacts(located)
         refreshVisiblePhotos()
-        writeQueuedRows(changedNow: ratings.map(\.photo))
+        writeQueuedRows(changedNow: targets.photos)
         guard changes else { return } // nothing to undo
-        registerUndo(actionName) { library in library.setRatings(ofPhotosWith: before, actionName: actionName) }
-    }
-
-    /// `setRatings` for loaded photos by id (undo and redo). Photos no longer loaded (deleted, missing) are skipped.
-    private func setRatings(ofPhotosWith ratings: [(id: UUID, rating: Int)], actionName: String) {
-        let positions = positions(of: ratings.map(\.id))
-        setRatings(zip(positions, ratings).compactMap { position, value in
-            position.map { (photo(at: $0), value.rating) }
-        }, actionName: actionName)
+        let ids = targets.ids
+        registerUndo(actionName) { library in
+            let (targets, kept) = library.loadedTargets(withIDs: ids)
+            library.setRatings(targets, kept.map { before[$0] }, actionName: actionName)
+        }
     }
 
     // MARK: - Tags
@@ -81,11 +84,16 @@ extension LibraryStore {
 
     /// Adds the tag to each of `photos` that doesn't have it yet. Undo takes it off those photos again.
     func addTag(name: String, category: String, to photos: [PhotoAsset]) {
+        addTag(name: name, category: category, to: targets(of: photos))
+    }
+
+    /// `addTag(name:category:to:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    func addTag(name: String, category: String, to targets: Targets) {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
         refreshTagLists(newTag: tag)
         // A new tag that no photo got (they all had it) isn't left unsaved; otherwise its photos' save writes it.
-        if setTag(tag, on: photos, to: true) == 0 && context.hasChanges { try? context.save() }
+        if setTag(tag, on: targets, to: true) == 0 && context.hasChanges { try? context.save() }
     }
 
     func removeTag(_ tag: Tag, from photo: PhotoAsset) {
@@ -94,33 +102,39 @@ extension LibraryStore {
 
     /// Removes the tag from every one of `photos` that has it. Undo gives it back to those photos.
     func removeTag(_ tag: Tag, from photos: [PhotoAsset]) {
-        guard modelContext != nil else { return }
-        setTag(tag, on: photos, to: false)
+        removeTag(tag, from: targets(of: photos))
     }
 
-    /// Gives `tag` to (`has`), or takes it from, each of `photos` that has it the other way. The facts change in memory
+    /// `removeTag(_:from:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    func removeTag(_ tag: Tag, from targets: Targets) {
+        guard modelContext != nil else { return }
+        setTag(tag, on: targets, to: false)
+    }
+
+    /// Gives `tag` to (`has`), or takes it from, each target that has it the other way. The facts change in memory
     /// without reading the models (the counts, the grid and the search keys with them), and each changed photo's row
     /// gains or loses the link. Only the photos that changed have their files written, and the undo acts on them.
     /// Returns how many changed.
     @discardableResult
-    private func setTag(_ tag: Tag, on photos: [PhotoAsset], to has: Bool) -> Int {
+    private func setTag(_ tag: Tag, on targets: Targets, to has: Bool) -> Int {
+        let photos = targets.photos
         guard !photos.isEmpty else { return 0 }
         let tagFact = tagFacts.facts(for: tag)
-        let ids = photos.map(\.id)
-        let positions = positions(of: ids)
         var tagsByID: [UUID: TagFacts]?
         var changed: [(photo: PhotoAsset, id: UUID)] = []
         var located: [(facts: PhotoFacts, position: ListPosition)] = []
         var rebuild: [PhotoAsset] = []
         for i in photos.indices {
-            guard let position = positions[i] else {
+            guard let position = targets.positions[i] else {
                 // Not loaded (not a photo on screen): its model and queued changes say whether it has the tag.
-                if tags(of: photos[i]).contains(where: { $0 === tag }) != has { changed.append((photos[i], ids[i])) }
+                if tags(of: photos[i]).contains(where: { $0 === tag }) != has {
+                    changed.append((photos[i], targets.ids[i]))
+                }
                 continue
             }
             var facts = facts(at: position)
             guard facts.tagIDs.contains(tagFact.id) != has else { continue }
-            changed.append((photos[i], ids[i]))
+            changed.append((photos[i], targets.ids[i]))
             if has {
                 facts.add(tagFact)
             } else {
@@ -152,7 +166,7 @@ extension LibraryStore {
     /// `setTag` by the tag's id and the loaded photos' ids (undo and redo). Photos no longer loaded are skipped.
     private func setTag(withID tagID: UUID, onPhotosWith ids: [UUID], to has: Bool) {
         guard let tag = allTags.first(where: { tagFacts.facts(for: $0).id == tagID }) else { return }
-        setTag(tag, on: positions(of: ids).compactMap { $0.map(photo(at:)) }, to: has)
+        setTag(tag, on: loadedTargets(withIDs: ids).targets, to: has)
     }
 
     /// Every tag's facts by id (and `tag`'s, if the lists don't have it yet), for taking a tag out of photos' facts.
@@ -171,30 +185,49 @@ extension LibraryStore {
     /// off the photos.)
     @discardableResult
     func moveToBin(_ photosToMove: [PhotoAsset]) -> [UUID] {
-        setInBin(photosToMove, true)
+        setInBin(targets(of: photosToMove), true)
+    }
+
+    /// `moveToBin(_:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    @discardableResult
+    func moveToBin(_ targets: Targets) -> [UUID] {
+        setInBin(targets, true)
     }
 
     /// Takes photos out of the bin. Returns their ids.
     @discardableResult
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) -> [UUID] {
-        setInBin(photosToRestore, false)
+        setInBin(targets(of: photosToRestore), false)
     }
 
-    private func setInBin(_ photos: [PhotoAsset], _ inBin: Bool) -> [UUID] {
-        let ids = photos.map(\.id)
-        enqueueRowChanges(photos.map { ($0, RowChange(isInBin: inBin)) })
-        relocate(photos, ids: ids, toBin: inBin)
-        writeQueuedRows(changedNow: photos)
-        return ids
+    /// `restoreFromBin(_:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    @discardableResult
+    func restoreFromBin(_ targets: Targets) -> [UUID] {
+        setInBin(targets, false)
     }
 
-    /// The loaded photos with `ids` in the bin (`inBin`) or the library, in `ids` order. Photos elsewhere or gone are
-    /// skipped.
-    func loadedPhotos(withIDs ids: [UUID], inBin: Bool) -> [PhotoAsset] {
-        positions(of: ids).compactMap { position in
-            guard let position, position.inBin == inBin else { return nil }
-            return photo(at: position)
+    private func setInBin(_ targets: Targets, _ inBin: Bool) -> [UUID] {
+        enqueueRowChanges(targets.photos.map { ($0, RowChange(isInBin: inBin)) })
+        relocate(targets.photos, ids: targets.ids, toBin: inBin)
+        writeQueuedRows(changedNow: targets.photos)
+        return targets.ids
+    }
+
+    /// The loaded photos with `ids` (only those in the bin when `inBin`, in the library when it's false) as targets, in
+    /// `ids` order, with the index in `ids` of each (`kept`). Photos elsewhere or gone are skipped: undo and redo.
+    func loadedTargets(withIDs ids: [UUID], inBin: Bool? = nil) -> (targets: Targets, kept: [Int]) {
+        var targets = Targets()
+        var kept: [Int] = []
+        let library = allPhotos // once each: reads of observed properties go through the observation registrar
+        let bin = binPhotos
+        for (i, position) in positions(of: ids).enumerated() {
+            guard let position, inBin == nil || position.inBin == inBin else { continue }
+            targets.photos.append(position.inBin ? bin[position.index] : library[position.index])
+            targets.ids.append(ids[i])
+            targets.positions.append(position)
+            kept.append(i)
         }
+        return (targets, kept)
     }
 
     // MARK: - Saved Edits
@@ -457,11 +490,12 @@ extension LibraryStore {
     @discardableResult
     func writeInChunks<Item>(_ items: [Item], in context: ModelContext, savingLast: Bool = true,
                              _ write: (ArraySlice<Item>) -> Void) async -> Duration {
-        var sizer = rowWrites.sizer
+        // The first chunk (all of a small write) is the sizer's probe.
+        var sizer = WriteChunkSizer(maximumRows: rowWrites.sizer.maximumRows)
         let clock = ContinuousClock()
         var spent: Duration = .zero
         var start = items.startIndex
-        var rows = rowWrites.immediateLimit
+        var rows = min(rowWrites.immediateLimit, rowWrites.sizer.maximumRows)
         while start < items.endIndex {
             let chunkStart = clock.now
             let end = min(start + rows, items.endIndex)
