@@ -133,9 +133,14 @@ final class MetadataKeepOriginalTests: XCTestCase {
     // MARK: - Files that can't be written without losing something get a sidecar
 
     func testAJPEGTheSpliceRefusesKeepsItsBytesAndGetsASidecar() throws {
-        let extended = T.segment(0xE1, Data("http://ns.adobe.com/xmp/extension/".utf8) + Data([0]) + Data(repeating: 0x41, count: 80))
-        let original = jpegWithOtherAppXMP(extraSegments: [extended])
-        let jpg = try write(original, "extended.jpg")
+        // XMP that isn't well-formed XML (a mistyped end tag after the rating): ImageIO reads it leniently, but a
+        // rewrite could lose what it skips, so it is still refused. (Before task D: extended XMP, now written in-file.)
+        let base = T.cameraStyleJPEG()
+        let (segments, sos) = T.header(base)
+        let packet = RichJPEG.xmp.replacingOccurrences(of: "</dc:subject>", with: "</dc:subjct>")
+        let xmp = T.segment(0xE1, Data(JPEGTestSegments.xmpID.utf8) + Data([0]) + Data(packet.utf8))
+        let original = T.assemble(segments.flatMap { $0.id == "Exif" ? [$0, xmp] : [$0] }, tail: base[sos...])
+        let jpg = try write(original, "malformed-xmp.jpg")
         XCTAssertEqual(service.readMetadata(from: jpg.path).rating, 2, "fixture: rated 2 inside the file")
 
         service.writeMetadata(rating: 4, keywords: ["a", "b"], toImageAt: jpg.path)

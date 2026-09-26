@@ -66,20 +66,45 @@ enum PhotoshopIRB {
         resources.reduce(into: header) { $0 += $1.block } + padding
     }
 
+    /// What a keyword write can do to an APP13 payload.
+    enum KeywordPatch: Equatable {
+        /// The payload with its IPTC keywords replaced (every other resource and dataset byte for byte, the digest
+        /// updated).
+        case patched(Data)
+        /// No IPTC resource: the keywords live in XMP only.
+        case noIPTC
+        /// The IPTC data is well-formed but can't hold these keywords: non-ASCII keywords over IPTC text of unknown
+        /// encoding (no 1:90 UTF-8 declaration, other text non-ASCII), or a keyword too long for a dataset. The APP13
+        /// is then left as it is, and the keywords go to the XMP only.
+        case cantHold
+        /// The resources or the IPTC datasets can't be parsed.
+        case malformed
+    }
+
+    /// `payload` with its IPTC keywords replaced by `keywords`; see `KeywordPatch`.
+    static func keywordPatch(in payload: Data, with keywords: [String]) -> KeywordPatch {
+        guard let parsed = resources(in: payload) else { return .malformed }
+        var resources = parsed.resources
+        guard let index = resources.firstIndex(where: { $0.id == iptcResource }) else { return .noIPTC }
+        guard IPTCIIM.dataSets(in: resources[index].dataBytes) != nil else { return .malformed }
+        guard let iim = IPTCIIM.replacingKeywords(in: resources[index].dataBytes, with: keywords) else { return .cantHold }
+        resources[index] = resources[index].replacingData(iim)
+        for (i, resource) in resources.enumerated() where resource.id == digestResource {
+            resources[i] = resource.replacingData(Data(Insecure.MD5.hash(data: iim)))
+        }
+        return .patched(self.payload(resources, padding: parsed.padding))
+    }
+
     /// `payload` with its IPTC keywords replaced by `keywords` (every other resource and dataset kept byte for byte,
     /// the digest updated). The payload itself when it has no IPTC resource: then the keywords live in XMP only. Nil
     /// when it can't be done safely: malformed resources or datasets, or non-ASCII keywords in IPTC text of unknown
     /// encoding.
     static func replacingKeywords(in payload: Data, with keywords: [String]) -> Data? {
-        guard let parsed = resources(in: payload) else { return nil }
-        var resources = parsed.resources
-        guard let index = resources.firstIndex(where: { $0.id == iptcResource }) else { return payload }
-        guard let iim = IPTCIIM.replacingKeywords(in: resources[index].dataBytes, with: keywords) else { return nil }
-        resources[index] = resources[index].replacingData(iim)
-        for (i, resource) in resources.enumerated() where resource.id == digestResource {
-            resources[i] = resource.replacingData(Data(Insecure.MD5.hash(data: iim)))
+        switch keywordPatch(in: payload, with: keywords) {
+        case .patched(let data): return data
+        case .noIPTC: return payload
+        case .cantHold, .malformed: return nil
         }
-        return self.payload(resources, padding: parsed.padding)
     }
 
     /// `payload` without thumbnail resources, or nil if its resources are malformed.
