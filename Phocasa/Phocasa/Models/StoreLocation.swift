@@ -55,22 +55,21 @@ enum StoreLocation {
         return entities["PhotoAsset"] != nil
     }
 
+    /// The files of the store at `url`, whether or not they exist: its `-wal` and `-shm` files and its external-data
+    /// folder (`.<name>_SUPPORT`), then the store file itself, last. The legacy move and `StoreBackup` both use it.
+    static func files(of url: URL) -> [URL] {
+        func sibling(_ suffix: String) -> URL {
+            url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + suffix)
+        }
+        let supportFolder = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.deletingPathExtension().lastPathComponent)_SUPPORT", isDirectory: true)
+        return [sibling("-wal"), sibling("-shm"), supportFolder, url]
+    }
+
     /// The store's files at `url`, paired with their names for a store at `destination`: the companions first, the
     /// store file itself last.
     private static func files(of url: URL, at destination: URL) -> [(from: URL, to: URL)] {
-        func supportFolder(of store: URL) -> URL {
-            store.deletingLastPathComponent()
-                .appendingPathComponent(".\(store.deletingPathExtension().lastPathComponent)_SUPPORT", isDirectory: true)
-        }
-        func sibling(_ store: URL, _ suffix: String) -> URL {
-            store.deletingLastPathComponent().appendingPathComponent(store.lastPathComponent + suffix)
-        }
-        return [
-            (sibling(url, "-wal"), sibling(destination, "-wal")),
-            (sibling(url, "-shm"), sibling(destination, "-shm")),
-            (supportFolder(of: url), supportFolder(of: destination)),
-            (url, destination),
-        ]
+        zip(files(of: url), files(of: destination)).map { (from: $0, to: $1) }
     }
 
     /// Moves the store at `url` to `destination`. A companion already at the destination without its source there
