@@ -80,7 +80,9 @@ Phocasa/
 │   │   │                             lists, the grid (`photos`, `index(of:)`), photosDidChange. Extension files:
 │   │   │   +Loading                  launch (`open`, a big library loads in the background), loadExistingData,
 │   │   │                             file availability
-│   │   │   +Scan                     folder opening, serialised scans, waitForScans
+│   │   │   +Scan                     folder opening, the scan queue (every library folder), waitForScans
+│   │   │   +Folders                  the library folders: the list, where each is now (bookmark, renamed volume),
+│   │   │                             removing one
 │   │   │   +Mutations                rating, tags, bin, deletes (files trashed via FileTrasher), metadata write-back
 │   │   │   +ListEditing              in-memory list edits: bin moves, scan inserts/removals, deletes
 │   │   │   +Filtering                filters, search, sort toggle, tag lists
@@ -91,7 +93,8 @@ Phocasa/
 │   │   ├── CaptureDateBackfill     — after launch, fills in missing capture dates and re-orders once
 │   │   ├── SelectionModel          — selection, range/select-all, primary photo, grid keyboard navigation
 │   │   ├── PhotoQuery              — SidebarFilter, PhotoFacts, pure filtering/search/facet counts
-│   │   ├── ScanPlan                — StoredPhoto snapshot (background read) and the pure scan diff
+│   │   ├── ScanPlan                — StoredPhoto snapshot (background read) and the pure scan diff: updates, relinks
+│   │   │                             of moved photos, new photos, the missing set of the folder's rows
 │   │   └── TagParsing              — `Tag.parse(keyword:)`, the inverse of `Tag.fullName`
 │   ├── Editing/
 │   │   ├── EditSession             — one photo's edit: parameters, renders, comparison, crop, export, save/revert
@@ -103,7 +106,8 @@ Phocasa/
 │   ├── Views/                      — ContentView (keys, search, alerts), MainContentView (grid kept alive under
 │   │   │                             the detail view), LibraryToolbar, StatusBarView, SidebarView, PhotoGridView,
 │   │   │                             PhotoGridItemView, RatingView, TagEditorView, EditSidebarView, CropOverlayView,
-│   │   │                             PhotoDetailView (container), LibraryUnavailableView (library locked or unopenable)
+│   │   │                             PhotoDetailView (container), LibraryUnavailableView (library locked or unopenable),
+│   │   │                             LibraryFoldersSection (the sidebar's library folders)
 │   │   └── Detail/                 — DisplayImage (CGImage + orientation), ZoomableImageView (+ZoomPanState),
 │   │                                 MinimapView, DetailOverlayControls, ComparisonView
 │   └── Services/
@@ -164,7 +168,9 @@ Tools/
   (`PHOCASA_THUMBNAIL_CACHE_DIR` overrides the cache), for real-app checks that relaunch. It never reads, moves or
   opens `Application Support/Phocasa/` or a `default.store` (no legacy move), nor `Caches/com.phocasa.app`.
   `LibraryLocation.resolve` decides the store and the cache for `PhocasaApp` and `ImageLoader.shared` together.
-- **JPG+RAW pairing:** Files with the same stem name are combined into one PhotoAsset entry
+- **JPG+RAW pairing:** Files with the same stem name are combined into one PhotoAsset entry. A photo's identity is its
+  path (`folderPath/stem`, `DiscoveredPhoto.key`); a scan that finds a stored photo's files elsewhere relinks the row
+  (see "Moved photos") rather than adding the photo again.
 - **Dual metadata:** the SwiftData DB is the primary store. Ratings and tags are also written back to the files:
   inside every non-RAW file (JPEG, PNG, TIFF, HEIC/HEIF: XMP `xmp:Rating`, `dc:subject`, and IPTC keywords where the
   file has IPTC), the `.xmp` sidecar for RAW files (and, as the last resort, for a file that can't take them without
@@ -172,6 +178,7 @@ Tools/
 - **Tags stored as `category:name`** in keywords to preserve hierarchy in flat keyword lists (`Tag.fullName` /
   `Tag.parse(keyword:)`)
 - **Folder access:** Uses SwiftUI `.fileImporter` for folder selection, security-scoped bookmarks for persistent access
+  (and to find a library folder that moved; resolved `.withoutUI, .withoutMounting`)
 - **Menu commands:** Uses SwiftUI `FocusedValues` to communicate between App-level commands and views
 - **Data flow:** the library is fetched from the store only by `LibraryStore.loadExistingData()`, the launch's
   background load and scans. UI interactions (filters, search, sort, rating, tags, bin) work on the in-memory library
@@ -185,7 +192,8 @@ Tools/
   date (`LibrarySort.Key`). The store sorts by `(captureDate, creationDate)` and `fetch(where:in:)` merges the dated and
   undated runs in memory. Fetches, insertion, merges, the toggle and the backfill's re-order all go through it; don't
   sort photos anywhere else, and don't compare `key(of:)` dates yourself (use `sortKey(of:)`/`precedes`).
-- **Capture dates:** scans store `found.metadata?.captureDate` at both insert sites. After launch (2 s after the launch
+- **Capture dates:** scans store `found.metadata?.captureDate` at both insert sites (`ScanPlan.newRow(for:)`, which
+  also sets `hasRawEdits` for a RAW whose sidecar holds a saved edit). After launch (2 s after the launch
   scans) `CaptureDateBackfill` reads the dates of rows that have none, off the main actor, writes them on the main
   context in chunks of about 12 ms, and re-orders the in-memory library once (no reload). Rows without a date are
   re-read on each launch, in the background; empty files (`fileSize == 0`) are skipped.
@@ -205,10 +213,32 @@ Tools/
   of the filter) keeps its place (`LibraryStore.gridPlace(of:)`), which ←/→ and the grid's arrows move on from.
 - **Deletes that trash files ask first:** with the RAW or JPG filter on, a delete takes that file off each pair
   (`FileTypeDelete`, confirmed; a RAW's `.xmp` goes with it unless the JPG's values live there, `OverridesEmbedded`).
-- **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
-  rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
-  photos, so an unchanged rescan writes nothing and changes nothing in memory. One that adds k photos costs
-  O(k log n) on the main actor, or one merge for many.
+- **Scans:** run one at a time, one library folder each (`queueScan(of:)`: every folder asked for is scanned in turn; a
+  request for a folder already waiting joins it). The walk, the read of the stored rows, the diff, the match of moved
+  photos and the metadata reads run off the main actor; the main actor only writes changed fields, relinks and
+  inserts photos (a chunk a turn), so an unchanged rescan writes nothing and changes nothing in memory. One that adds
+  k photos costs O(k log n) on the main actor, or one merge for many. A scan checks (stats) only its own folder's rows
+  and rows under no library folder; the other folders' rows keep their missing state (`ScanPlan.missingSet(after:)`).
+- **Library folders:** every folder the owner opens is a library folder (a `PhotoLibrary` row each, no schema change;
+  `LibraryStore.libraryFolders`, sorted by path; `currentLibrary` is the first). Rescan and launch scan each
+  (`rescanCurrentLibrary()`). Opening a folder that is, or is inside, a library folder scans that one; opening one
+  above library folders replaces them (their photos' paths are inside it). The sidebar lists them
+  (`LibraryFoldersSection`: a mark for one that isn't there, `folderIssues`; Rescan, Show in Finder, "Remove from
+  Library…"). Removing one (confirmed, never while a scan or a delete runs, on the scan queue) deletes its photos' rows
+  (library, bin and missing ones, not another library folder's) from the store and memory, a chunk a turn, then the
+  folder row; files are never touched. Stores from before this kept one folder: photos of folders opened earlier
+  are under no library folder until that folder is opened again (their rows are matched by path, no duplicates).
+- **Moved photos** (`ScanPlan.relinks`, REL-5): before inserting a "new" photo, a scan looks for a stored row that is
+  the same photo whose files are gone (in the library, the bin, hidden, under any folder), and points it at the files
+  found (paths, folder, name, size), keeping its rating, tags, edits, bin state and dates. Strongest first: (a) the
+  library folder moved (`LibraryStore.location(of:)`: its recorded path is gone and its bookmark finds it elsewhere,
+  not in a Trash; or Open Folder chose it there, found by its bookmark or as the same path on its drive mounted as
+  "Name 1", `VolumeCheck.isSameFolderOnRenamedVolume`): the same path inside it; then the folder is recorded there.
+  (b) After the metadata read: the same file names (JPG and RAW) and capture date; a row stored without a capture date
+  needs the same size and creation date instead (size isn't asked otherwise: an in-file rating write changes it, and
+  the row keeps the old size until a rescan). Only one-to-one matches relink: ambiguous ones insert as before. Renamed
+  files aren't matched. A recorded path that exists wins over the bookmark (a same-named backup drive there). A
+  metadata write waiting in the journal for a photo's old path isn't moved to the new one.
 - **What a scan walks:** not hidden files, not package insides (`.skipsPackageDescendants`), not other apps'
   libraries by extension (`.photoslibrary`, `.lrdata`, …) nor NAS/Windows thumbnail, recycle and snapshot folders by
   name (`FolderScanner.skippedFolderExtensions` / `skippedFolderNames`, each with its reason). The chosen folder itself
@@ -218,8 +248,10 @@ Tools/
   rows stops before inserting (`scanIssue`, in the status bar); a load that fails keeps what's shown and sets
   `libraryReadFailure` (the grid says so). Don't reintroduce `(try? fetch) ?? []` on a path that feeds a diff or a load.
 - **A library folder that isn't there** (drive unplugged, folder moved) isn't walked or diffed: nothing is added,
-  changed or found missing. Its photos are hidden (by stored path, no stat) until a Rescan finds it, and the grid says
-  "“Photos” isn't connected" or "can't be found" with the path. There's no volume-mount watcher: Rescan brings it back.
+  changed or found missing, and the other folders still scan. Its photos are hidden (by stored path, no stat) until a
+  Rescan finds it; the sidebar marks it (`folderIssues`), the status bar says so (`scanIssue`, the first such folder
+  after a scan that went through), and an empty grid says "“Photos” isn't connected" or "can't be found" with the
+  path. There's no volume-mount watcher: Rescan brings it back.
 - **Thumbnail disk cache** (`Services/ThumbnailDiskCache.swift`): one JPEG per photo and size bucket under
   `Caches/<bundle id>/Thumbnails/v1/<h0h1>/<sha256(path)>/<bucket>-<size>-<mtime>.jpg`, LRU by mtime, 1 GB. The test
   host has none unless `PHOCASA_THUMBNAIL_CACHE_DIR` is set.
@@ -439,6 +471,9 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - Gated benchmarks need `PHOCASA_BENCH=1` (see Build & Run); tests on a real camera RAW are skipped unless
   `PHOCASA_TEST_RAW` names a *copy* of one. Never search the disk for photos.
 - Hosted-window tests (grid clicks, the detail view, the grid under the detail view) flash a window; that's expected.
+- Moved photos and library folders (`ScanRelinkTests`, `LibraryFolderTests`) share `LibraryScanTestCase`: temp folders,
+  temp stores, JPEGs with capture dates. A renamed library folder or a remounted drive is a temp folder renamed (the
+  bookmark follows it); "Photo Drive 1" is a folder in a temp `VolumeCheck(volumesDirectory:)`.
 
 ### Build Settings
 
