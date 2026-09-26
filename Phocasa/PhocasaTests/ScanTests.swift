@@ -1099,6 +1099,21 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(plan.foundAgainIDs, [found.id, fileBack.id])
     }
 
+    /// Photos that earlier versions imported from inside another app's library (or a NAS's thumbnail folder) under the
+    /// root: the scan no longer finds them, and though their files are still there, the library stops showing them, so
+    /// nothing can rate them (writing into that app's files) or delete them (trashing its originals). Their rows stay.
+    func testPlanHidesPhotosImportedFromFoldersTheScanNowSkips() {
+        let photos = stored("IMG_0001", folder: "/r/Photos Library.photoslibrary/originals/A")
+        let thumbnail = stored("SYNOPHOTO_THUMB_XL", folder: "/r/2024/@eaDir/trip.jpg")
+        let binned = stored("old", folder: "/r/#recycle", inBin: true)
+        let elsewhere = stored("outside", folder: "/old/@eaDir")
+        let normal = stored("trip", folder: "/r/2024")
+        let plan = ScanPlan(stored: [photos, thumbnail, binned, elsewhere, normal], discovered: [], root: "/r",
+                            fileExists: { _ in true })
+        XCTAssertEqual(plan.missingIDs, [photos.id, thumbnail.id],
+                       "rows under the root inside skipped folders; not binned rows, nor rows under another root")
+    }
+
     func testPlanNewPhotosAreTheUnknownKeysInDiscoveryOrder() {
         let plan = ScanPlan(stored: [stored("b")], discovered: [found("c"), found("b"), found("a")])
         XCTAssertEqual(plan.newPhotos.map(\.fileName), ["c", "a"])

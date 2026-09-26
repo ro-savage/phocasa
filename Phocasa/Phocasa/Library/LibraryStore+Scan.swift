@@ -171,7 +171,8 @@ extension LibraryStore {
         async let foundPhotos = Self.walk(url, readAhead: readAhead?.walk, with: scanner)
         let stored = await storedRows
         let discovered = await foundPhotos
-        var plan = await ScanPlan.make(stored: stored, discovered: discovered, previouslyMissing: previouslyMissing)
+        var plan = await ScanPlan.make(stored: stored, discovered: discovered, previouslyMissing: previouslyMissing,
+                                       root: url.path)
         report.discovered = plan.discoveredCount
 
         if !plan.newPhotos.isEmpty {

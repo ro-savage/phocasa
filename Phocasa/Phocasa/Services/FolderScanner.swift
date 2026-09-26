@@ -45,11 +45,59 @@ final class FolderScanner: Sendable {
 
     static let allExtensions: Set<String> = standardExtensions.union(rawExtensions)
 
+    /// Folders, by extension, that are another app's library. Their photos are that app's copies: a rating would be
+    /// written into them and a delete would trash them out of the library. Each is a package (skipped by
+    /// `.skipsPackageDescendants`) only on a Mac with that app installed, so they're also skipped by name here.
+    static let skippedFolderExtensions: Set<String> = [
+        "photoslibrary", // Apple Photos: originals/ and resources/derivatives/ (JPEG renders of every photo)
+        "photolibrary",  // iPhoto: Masters/, Previews/, Thumbnails/
+        "aplibrary",     // Aperture: Masters/, Previews/, Thumbnails/
+        "lrdata",        // Lightroom Classic "… Previews.lrdata" and "… Smart Previews.lrdata" (DNGs, read as RAWs)
+        "lrcat-data",    // Lightroom Classic's catalog data folder
+        "lrlibrary",     // Lightroom's (cloud) desktop library, which keeps the originals it syncs
+        "cocatalog",     // Capture One catalog: managed originals, previews and thumbnails
+    ]
+
+    /// Folders, by lowercased name, that aren't the owner's photos: thumbnail caches, recycle bins, snapshots and
+    /// backups (copies of every photo, which would all be imported a second time).
+    static let skippedFolderNames: Set<String> = [
+        "photo booth library",        // Photo Booth's library (a package without an extension)
+        "@eadir",                     // Synology: a thumbnail folder per photo, in every folder
+        "#recycle",                   // Synology recycle bin
+        "#snapshot",                  // Synology snapshots of the share
+        "@recycle",                   // QNAP recycle bin
+        "@recently-snapshot",         // QNAP snapshots of the share
+        "$recycle.bin",               // Windows recycle bin, on drives used with a PC
+        "system volume information",  // Windows system folder
+        "backups.backupdb",           // Time Machine backups on an HFS+ drive: copies of whole disks
+    ]
+    // Dot folders (`.Trashes`, `.Trash`, `.Spotlight-V100`, a QNAP `.@__thumb`, Android's `.thumbnails`) are hidden, so
+    // `.skipsHiddenFiles` skips them already.
+
+    /// Whether the scan skips a folder with this name (see `skippedFolderExtensions`, `skippedFolderNames`).
+    static func skipsFolder(named name: String) -> Bool {
+        let lowercased = name.lowercased()
+        return skippedFolderNames.contains(lowercased)
+            || skippedFolderExtensions.contains((lowercased as NSString).pathExtension)
+    }
+
+    /// Whether `path` is inside a folder the scan skips, below `root` (the folder the owner chose, which is scanned
+    /// whatever its name). Only the names are looked at, not the disk.
+    static func isInsideSkippedFolder(_ path: String, below root: String) -> Bool {
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        guard path.hasPrefix(prefix) else { return false }
+        let folders = path.dropFirst(prefix.count).split(separator: "/").dropLast()
+        return folders.contains { skipsFolder(named: String($0)) }
+    }
+
     /// Files per unit of work when reading metadata concurrently.
     private static let metadataChunkSize = 64
 
     /// Finds the photos under `folderURL` (JPG+RAW with the same stem are one photo), off the main thread.
     /// Reads no metadata. The order is unspecified: the view model sorts on fetch.
+    ///
+    /// Hidden files and folders, the insides of packages, and the folders `skipsFolder(named:)` names are skipped;
+    /// `folderURL` itself is scanned whatever it is.
     func scan(folderURL: URL) async -> [DiscoveredPhoto] {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -124,12 +172,16 @@ final class FolderScanner: Sendable {
         guard let enumerator = fileManager.enumerator(
             at: folderURL,
             includingPropertiesForKeys: [.fileSizeKey, .creationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return [] }
 
         while let fileURL = enumerator.nextObject() as? URL {
             let ext = fileURL.pathExtension.lowercased()
-            guard Self.allExtensions.contains(ext) else { continue }
+            guard Self.allExtensions.contains(ext) else {
+                // Only a name test: `skipDescendants()` on a file does nothing.
+                if Self.skipsFolder(named: fileURL.lastPathComponent) { enumerator.skipDescendants() }
+                continue
+            }
 
             guard let resourceValues = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .creationDateKey]),
                   resourceValues.isRegularFile == true else { continue }

@@ -66,16 +66,18 @@ struct ScanPlan: Sendable {
     var newPhotos: [DiscoveredPhoto] = []
     /// Library photos (not in the bin) that the scan didn't find and none of whose files exist. What the scan
     /// found is available. A photo it didn't find whose file still exists (for example under an earlier library
-    /// root) stays visible, as with a full availability check.
+    /// root) stays visible, as with a full availability check, unless it's inside a folder below the root that the
+    /// scan skips (`FolderScanner.isInsideSkippedFolder`): earlier versions imported photos from inside other apps'
+    /// libraries, and the library stops showing those.
     var missingIDs: Set<UUID> = []
     /// Library photos in `previouslyMissing` that aren't missing any more: the library shows them again.
     var foundAgainIDs: Set<UUID> = []
     /// How many photos the scan found.
     var discoveredCount = 0
 
-    /// `previouslyMissing` is the missing set the library shows now (`LibraryStore.missingPhotoIDs`). `fileExists` is
-    /// called only for rows the scan didn't find; after an unchanged rescan, never.
-    init(stored: [StoredPhoto], discovered: [DiscoveredPhoto], previouslyMissing: Set<UUID> = [],
+    /// `previouslyMissing` is the missing set the library shows now (`LibraryStore.missingPhotoIDs`); `root` is the
+    /// folder scanned. `fileExists` is called only for rows the scan didn't find; after an unchanged rescan, never.
+    init(stored: [StoredPhoto], discovered: [DiscoveredPhoto], previouslyMissing: Set<UUID> = [], root: String? = nil,
          fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
         discoveredCount = discovered.count
         let foundByKey = Dictionary(discovered.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
@@ -88,9 +90,14 @@ struct ScanPlan: Sendable {
                                           fileSize: found.fileSize))
                 }
             } else if !row.isInBin {
-                let jpgExists = row.jpgPath.map(fileExists) ?? false
-                let rawExists = row.rawPath.map(fileExists) ?? false
-                if !jpgExists && !rawExists { missingIDs.insert(row.id) }
+                if let root, let path = row.jpgPath ?? row.rawPath,
+                   FolderScanner.isInsideSkippedFolder(path, below: root) {
+                    missingIDs.insert(row.id)
+                } else {
+                    let jpgExists = row.jpgPath.map(fileExists) ?? false
+                    let rawExists = row.rawPath.map(fileExists) ?? false
+                    if !jpgExists && !rawExists { missingIDs.insert(row.id) }
+                }
             }
             if !row.isInBin && previouslyMissing.contains(row.id) && !missingIDs.contains(row.id) {
                 foundAgainIDs.insert(row.id)
@@ -101,11 +108,11 @@ struct ScanPlan: Sendable {
 
     /// Computes the plan off the main thread.
     static func make(stored: [StoredPhoto], discovered: [DiscoveredPhoto],
-                     previouslyMissing: Set<UUID> = []) async -> ScanPlan {
+                     previouslyMissing: Set<UUID> = [], root: String? = nil) async -> ScanPlan {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(returning: ScanPlan(stored: stored, discovered: discovered,
-                                                        previouslyMissing: previouslyMissing))
+                                                        previouslyMissing: previouslyMissing, root: root))
             }
         }
     }
