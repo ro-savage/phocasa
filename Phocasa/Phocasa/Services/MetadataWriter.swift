@@ -20,11 +20,12 @@ struct MetadataWriteItem: Sendable, Equatable {
 
 }
 
-/// The file operations `MetadataWriter` performs. `MetadataService` is the real one; tests inject a fake.
+/// The file operations `MetadataWriter` performs, each saying what it did. `MetadataService` is the real one; tests
+/// inject a fake.
 protocol MetadataWriting: Sendable {
-    func writeMetadata(rating: Int, keywords: [String], toImageAt path: String)
-    func writeEditParameters(_ params: EditParameters, forRAWAt path: String)
-    func clearEditParameters(forRAWAt path: String)
+    func writeMetadata(rating: Int, keywords: [String], toImageAt path: String) -> MetadataWriteOutcome
+    func writeEditParameters(_ params: EditParameters, forRAWAt path: String) -> MetadataWriteOutcome
+    func clearEditParameters(forRAWAt path: String) -> MetadataWriteOutcome
 }
 
 extension MetadataService: MetadataWriting {}
@@ -70,11 +71,16 @@ enum MetadataWriteOperation: Codable, Equatable, Sendable {
 /// - A write for a file on a volume that isn't mounted (`VolumeCheck`) isn't made and isn't dropped: it waits, in the
 ///   journal, until `retryWaitingWrites()` or the next launch, unless a newer write for that file replaces it.
 /// - `progress` hears how many writes are left, a few times a second at most and at 0.
+/// - Each write says what it did (`MetadataWriteOutcome`). The ones that didn't reach their file (read-only, a sidecar
+///   that can't be parsed, a full disk…) and the ones kept in a sidecar as the last resort are kept in `report`, the
+///   latest per file and kind, bounded (`MetadataWriteProblemList`); a later write that goes where it belongs clears
+///   its file's. `problems` hears the report when it changes, a few times a second at most and when the queue is done.
+///   Nothing is retried on its own: `retry(editsOf:)` (and a new enqueue, for ratings and keywords) does it.
 actor MetadataWriter {
     static let shared = MetadataWriter(
         service: .shared, rewriteObserver: ImageLoader.shared,
         journal: LibraryLocation.current.metadataWriteJournalURL.map { MetadataWriteJournal(url: $0) },
-        progress: MetadataWriteProgress.post)
+        progress: MetadataWriteProgress.post, problems: MetadataWriteProblems.post)
 
     private let queue = DispatchSerialQueue(label: "com.phocasa.metadata-writer", qos: .utility)
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -138,6 +144,7 @@ actor MetadataWriter {
     private nonisolated let journal: MetadataWriteJournal?
     private let volumes: VolumeCheck
     private let progress: (@Sendable (Int) -> Void)?
+    private let problems: (@Sendable (MetadataWriteReport) -> Void)?
 
     private let clock = ContinuousClock()
     /// When the journal was last saved, and whether the file holds anything.
@@ -145,28 +152,34 @@ actor MetadataWriter {
     private var journalIsEmpty = true
     private var progressReportedAt: ContinuousClock.Instant?
     private var reportedCount = 0
+    /// The writes that didn't reach their files, and those kept in a sidecar.
+    private(set) var report = MetadataWriteReport()
+    /// Whether `problems` hasn't heard the latest `report`, and when it last heard it.
+    private var reportIsNew = false
+    private var reportPostedAt: ContinuousClock.Instant?
 
     /// How often the journal is saved while writes are made, so a crash replays little that was written already.
     static let journalInterval: Duration = .seconds(1)
-    /// How often `progress` hears the count at most.
+    /// How often `progress` hears the count, and `problems` the report, at most.
     static let progressInterval: Duration = .milliseconds(250)
 
     init(service: MetadataService = .shared, rewriteObserver: (any MetadataRewriteObserver)? = nil,
          journal: MetadataWriteJournal? = nil, volumes: VolumeCheck = VolumeCheck(),
-         progress: (@Sendable (Int) -> Void)? = nil) {
+         progress: (@Sendable (Int) -> Void)? = nil, problems: (@Sendable (MetadataWriteReport) -> Void)? = nil) {
         self.init(writer: service, rewriteObserver: rewriteObserver, journal: journal, volumes: volumes,
-                  progress: progress)
+                  progress: progress, problems: problems)
     }
 
     /// For tests: writes through any `MetadataWriting`. The journal's entries are the first writes to make.
     init(writer: any MetadataWriting, rewriteObserver: (any MetadataRewriteObserver)? = nil,
          journal: MetadataWriteJournal? = nil, volumes: VolumeCheck = VolumeCheck(),
-         progress: (@Sendable (Int) -> Void)? = nil) {
+         progress: (@Sendable (Int) -> Void)? = nil, problems: (@Sendable (MetadataWriteReport) -> Void)? = nil) {
         self.service = writer
         self.rewriteObserver = rewriteObserver
         self.journal = journal
         self.volumes = volumes
         self.progress = progress
+        self.problems = problems
         let replayed = journal?.load().map { Submission(path: $0.path, operation: $0.operation) } ?? []
         inbox = OSAllocatedUnfairLock(initialState: Inbox(submissions: replayed))
         journalIsEmpty = journal == nil // a file there may hold lines it couldn't read: the first save replaces it
@@ -239,6 +252,61 @@ actor MetadataWriter {
         guard let journal else { return }
         let submissions = inbox.withLock { $0.submissions }
         journal.saveAdding(submissions.map(\.entry))
+    }
+
+    // MARK: - Problems
+
+    /// Writes again the RAW edits these problems hold (the status bar's Retry), unless a newer edit for that RAW came
+    /// since, which wins: one written since (the problem isn't the RAW's latest any more) or one waiting to be written.
+    /// Rating and keyword problems are retried with the photo's current values instead, through `enqueue`
+    /// (`LibraryStore.rewriteMetadata(of:)`); they're ignored here.
+    func retry(editsOf problems: [MetadataWriteProblem]) {
+        takeInInbox() // every edit enqueued before this call is pending (or written) now
+        var retried = false
+        for problem in problems where problem.kind == .editParameters {
+            guard report.failures.problem(for: problem.key) == problem else { continue }
+            let newer = (pending[problem.path]?.operations ?? []) + (waiting[problem.path]?.operations ?? [])
+            guard !newer.contains(where: \.touchesEditParameters) else { continue }
+            put(problem.operation, for: problem.path)
+            retried = true
+        }
+        guard retried else { return }
+        saveJournal()
+        reportProgress(now: true)
+        startDrainingIfNeeded()
+    }
+
+    /// Forgets these problems (the photo they were for is gone, or the owner dismissed them).
+    func dismissProblems(_ keys: [MetadataWriteProblem.Key]) {
+        for key in keys where report.record(nil, for: key) { reportIsNew = true }
+        postReport(now: true)
+    }
+
+    /// Forgets every problem and every write kept in a sidecar (the status bar's Clear).
+    func clearProblems() {
+        guard report != MetadataWriteReport() else { return }
+        report = MetadataWriteReport()
+        reportIsNew = true
+        postReport(now: true)
+    }
+
+    /// Records what the write of `operation` to `path` did.
+    private func record(_ outcome: MetadataWriteOutcome, of operation: Operation, at path: String) {
+        let key = MetadataWriteProblem.Key(path: path, kind: operation.kind)
+        let problem = MetadataWriteProblem.Issue(outcome, writing: key.kind, at: path).map {
+            MetadataWriteProblem(path: path, operation: operation, issue: $0, date: Date())
+        }
+        if report.record(problem, for: key) { reportIsNew = true }
+    }
+
+    /// Tells `problems` about a changed report: at most every `progressInterval`, unless `now`.
+    private func postReport(now: Bool = false) {
+        guard let problems, reportIsNew else { return }
+        let time = clock.now
+        if !now, let postedAt = reportPostedAt, time - postedAt < Self.progressInterval { return }
+        reportPostedAt = time
+        reportIsNew = false
+        problems(report)
     }
 
     // MARK: - Inbox
@@ -334,14 +402,16 @@ actor MetadataWriter {
             if !volumes.isVolumeAvailable(for: next.path) {
                 setAside(next)
             } else {
-                perform(next.operation, at: next.path)
+                record(perform(next.operation, at: next.path), of: next.operation, at: next.path)
             }
             if let savedAt = journalSavedAt, clock.now - savedAt >= Self.journalInterval { saveJournal() }
             reportProgress()
+            postReport()
         }
         isDraining = false
         saveJournal() // nothing left, or only writes waiting for their volume
         reportProgress(now: true)
+        postReport(now: true)
         let waiters = idleWaiters
         idleWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
@@ -378,23 +448,25 @@ actor MetadataWriter {
         progress(pendingCount)
     }
 
-    /// Synchronous file I/O, on this actor's serial queue.
-    private func perform(_ operation: Operation, at path: String) {
+    /// Synchronous file I/O, on this actor's serial queue. Returns what the write did.
+    private func perform(_ operation: Operation, at path: String) -> MetadataWriteOutcome {
         switch operation {
         case .metadata(let rating, let keywords):
             let service = self.service
-            let write = { service.writeMetadata(rating: rating, keywords: keywords, toImageAt: path) }
             // A RAW's rating goes to its .xmp sidecar (see MetadataService.writeMetadata): the RAW itself is untouched.
             if let rewriteObserver,
                !FolderScanner.rawExtensions.contains((path as NSString).pathExtension.lowercased()) {
-                rewriteObserver.rewritingMetadata(ofImageAt: path, write)
-            } else {
-                write()
+                var outcome = MetadataWriteOutcome.skippedUnreadable
+                rewriteObserver.rewritingMetadata(ofImageAt: path) {
+                    outcome = service.writeMetadata(rating: rating, keywords: keywords, toImageAt: path)
+                }
+                return outcome
             }
+            return service.writeMetadata(rating: rating, keywords: keywords, toImageAt: path)
         case .setEditParameters(let params):
-            service.writeEditParameters(params, forRAWAt: path)
+            return service.writeEditParameters(params, forRAWAt: path)
         case .clearEditParameters:
-            service.clearEditParameters(forRAWAt: path)
+            return service.clearEditParameters(forRAWAt: path)
         }
     }
 }
