@@ -25,11 +25,14 @@ final class MetadataRealFileTests: XCTestCase {
         dir = base.resolvingSymlinksInPath()
         raw = dir.appendingPathComponent(sourceURL.lastPathComponent)
         try FileManager.default.copyItem(at: sourceURL, to: raw)
+        // The copies are the test's to write, whatever the source's permissions (a read-only file is left alone).
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: raw.path)
         for ext in ["JPG", "jpg", "jpeg", "JPEG"] {
             let candidate = sourceURL.deletingPathExtension().appendingPathExtension(ext)
             if FileManager.default.fileExists(atPath: candidate.path) {
                 let copy = dir.appendingPathComponent(candidate.lastPathComponent)
                 try FileManager.default.copyItem(at: candidate, to: copy)
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copy.path)
                 jpg = copy
                 break
             }

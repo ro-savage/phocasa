@@ -37,6 +37,8 @@ final class MetadataWriteBenchmarks: XCTestCase {
         let jpg = dir.appendingPathComponent(sourceJPG.lastPathComponent)
         try FileManager.default.copyItem(at: source, to: raw)
         try FileManager.default.copyItem(at: sourceJPG, to: jpg)
+        // Writable copies, whatever the source's permissions (a read-only file is left alone, so nothing would be timed).
+        for copy in [raw, jpg] { try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copy.path) }
         let service = MetadataService.shared
 
         // Rating and keyword writes, as MetadataWriter runs them (synchronously, one at a time).
@@ -79,6 +81,7 @@ final class MetadataWriteBenchmarks: XCTestCase {
 
             let bake = dir.appendingPathComponent("bake-\(i).jpg")
             try FileManager.default.copyItem(at: sourceJPG, to: bake)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: bake.path)
             start = ContinuousClock.now
             let bakeOK = await editing.exportStandardToJPEG(sourceURL: bake, parameters: params, outputURL: bake) == .written // NEW-API
             // BASE-API let bakeOK = await editing.exportStandardToJPEG(sourceURL: bake, parameters: params, outputURL: bake)

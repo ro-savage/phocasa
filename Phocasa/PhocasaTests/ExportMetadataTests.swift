@@ -325,6 +325,10 @@ final class ExportMetadataTests: XCTestCase {
             let jpg = dir.appendingPathComponent(sourceJPG.lastPathComponent)
             try FileManager.default.copyItem(at: source, to: raw)
             try FileManager.default.copyItem(at: sourceJPG, to: jpg)
+            // The copies are the test's to write, whatever the source's permissions (a read-only file is left alone).
+            for copy in [raw, jpg] {
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copy.path)
+            }
             return (raw, jpg)
         }
     }
