@@ -63,7 +63,8 @@ Phocasa/
 ├── Phocasa.xcodeproj/              — objectVersion 77, synchronized folders (see Build Settings)
 ├── Phocasa/
 │   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host), menu commands
-│   ├── AppDelegate.swift           — quit waits for pending metadata writes (at most 5 s)
+│   ├── AppDelegate.swift           — quit saves open edit sessions (`PhotoLibraryViewModel.saveEditsBeforeQuit`),
+│   │                                 then waits for pending metadata writes (at most 5 s)
 │   ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary, EditPreset)
 │   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
 │   │                                 store lives, and the one-time move of a legacy `default.store`);

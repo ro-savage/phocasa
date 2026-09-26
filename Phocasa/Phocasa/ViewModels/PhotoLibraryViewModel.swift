@@ -53,6 +53,23 @@ final class PhotoLibraryViewModel {
         library.open(context)
         library.backfillCaptureDatesAfterScans()
         loadPresets()
+        Self.openViewModels.removeAll { $0.viewModel == nil }
+        Self.openViewModels.append(WeakViewModel(viewModel: self))
+    }
+
+    // MARK: - Quitting
+
+    private struct WeakViewModel { weak var viewModel: PhotoLibraryViewModel? }
+    /// Every view model that opened a library (one per window), weakly, for `saveEditsBeforeQuit()`.
+    private static var openViewModels: [WeakViewModel] = []
+
+    /// Quitting (`AppDelegate.applicationShouldTerminate`), before it waits for the metadata writes: every open edit
+    /// session is ended with a save, as closing the detail view would, so its writes (a RAW edit's sidecar) are among
+    /// those quit waits for. A session otherwise saves only when it ends, which a quit never did.
+    static func saveEditsBeforeQuit() {
+        for entry in openViewModels {
+            entry.viewModel?.stopEditing(save: true)
+        }
     }
 
     /// Reloads the library from the store (see `LibraryStore.loadExistingData()`).

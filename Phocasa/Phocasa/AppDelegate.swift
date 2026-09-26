@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static let quitFlushTimeout: Duration = .seconds(5)
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // An edit session still open is saved first, so its writes are among those the flush waits for.
+        PhotoLibraryViewModel.saveEditsBeforeQuit()
         Self.replyAfterFlushing(timeout: Self.quitFlushTimeout) {
             sender.reply(toApplicationShouldTerminate: true)
         }
