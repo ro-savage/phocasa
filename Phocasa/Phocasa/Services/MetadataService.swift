@@ -242,9 +242,10 @@ final class MetadataService: Sendable {
 
     struct UpdatedXMPPacket {
         let packet: Data
-        /// Whether ImageIO parsed the new packet on its own and read the new values and every other value from it.
-        /// When false (ImageIO's XMP parser rejects the packet's wrapper, `x:xapmeta` or a bare `rdf:RDF`, which its
-        /// file readers accept) the caller must read the written file back.
+        /// Whether the new packet is shown to keep every value without reading the written file back: ImageIO parsed
+        /// it and read the new values and every other value from it, or the text edit only changed the two values in
+        /// place. False when a description was added to a packet ImageIO's XMP parser rejects on its own (an
+        /// `x:xapmeta` wrapper, a bare `rdf:RDF`, which its file readers accept): the caller must read the file back.
         let checkedByImageIO: Bool
     }
 
@@ -271,11 +272,17 @@ final class MetadataService: Sendable {
                   let packet = CGImageMetadataCreateXMPData(meta, nil) as Data? else { return nil }
             return UpdatedXMPPacket(packet: packet, checkedByImageIO: true)
         }
-        let original = CGImageMetadataCreateFromXMPData(existing as CFData)
         // Some writers (ImageIO's JPEG writer among them) end the packet with NUL bytes; they're kept as they are.
         let body = existing.prefix(existing.count - existing.reversed().prefix { $0 == 0 }.count)
-        if let edited = XMPTextEdit.setting(rating: rating, keywords: keywords, emptyKeywords: emptyKeywords, in: Data(body))
-            .map({ $0 + existing[body.endIndex...] }) {
+        let edit = XMPTextEdit.setting(rating: rating, keywords: keywords, emptyKeywords: emptyKeywords, in: Data(body))
+        // Values changed in place leave the XML's structure as it was, so ImageIO reads every other value as before
+        // (and the caller's read-back checks the new ones): no need to parse the packet with ImageIO here.
+        if let edit, !edit.addedDescription {
+            return UpdatedXMPPacket(packet: edit.packet + existing[body.endIndex...], checkedByImageIO: true)
+        }
+        let original = CGImageMetadataCreateFromXMPData(existing as CFData)
+        if let edit {
+            let edited = edit.packet + existing[body.endIndex...]
             guard let original else { return UpdatedXMPPacket(packet: edited, checkedByImageIO: false) }
             if let reparsed = CGImageMetadataCreateFromXMPData(edited as CFData),
                xmpRating(in: reparsed) == rating, xmpSubject(in: reparsed) == keywords,

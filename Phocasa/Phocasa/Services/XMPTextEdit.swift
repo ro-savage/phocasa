@@ -193,11 +193,18 @@ enum XMPTextEdit {
     /// ImageIO). An existing `dc:subject` is emptied either way. (ImageIO's rewrite, `leaveOut`, removes it.)
     enum EmptyKeywords { case leaveOut, emptyBag }
 
-    static func setting(rating: Int, keywords: [String], emptyKeywords: EmptyKeywords = .leaveOut, in packet: Data) -> Data? {
+    struct Result {
+        let packet: Data
+        /// Whether a new `rdf:Description` (with its own namespace declarations) was added; otherwise only the two
+        /// properties' values changed, in place, and nothing else in the XML's structure.
+        let addedDescription: Bool
+    }
+
+    static func setting(rating: Int, keywords: [String], emptyKeywords: EmptyKeywords = .leaveOut, in packet: Data) -> Result? {
         let bytes = [UInt8](packet)
         guard !bytes.contains(0), String(bytes: bytes, encoding: .utf8) != nil,
               keywords.allSatisfy(isXMLText), let before = XMPPacketScan(packet),
-              let tree = XMLTree(bytes), let edits = plan(tree, rating: rating, keywords: keywords, emptyKeywords: emptyKeywords),
+              let tree = XMLTree(bytes), let (edits, added) = plan(tree, rating: rating, keywords: keywords, emptyKeywords: emptyKeywords),
               tree.ratings.count == before.ratings.count, tree.subjects.count == before.subjects.count else { return nil }
         guard let result = apply(edits + padding(tree, for: edits), to: bytes) else { return nil }
 
@@ -205,7 +212,7 @@ enum XMPTextEdit {
         let subjects = keywords.isEmpty && emptyKeywords == .leaveOut && tree.subjects.isEmpty ? [] : [keywords]
         guard let after = XMPPacketScan(data), after.ratings == ["\(rating)"], after.subjects == subjects,
               before.isKept(in: after) else { return nil }
-        return data
+        return Result(packet: data, addedDescription: added)
     }
 
     // MARK: Planning
@@ -215,7 +222,8 @@ enum XMPTextEdit {
         let bytes: [UInt8]
     }
 
-    private static func plan(_ tree: XMLTree, rating: Int, keywords: [String], emptyKeywords: EmptyKeywords) -> [Edit]? {
+    private static func plan(_ tree: XMLTree, rating: Int, keywords: [String],
+                             emptyKeywords: EmptyKeywords) -> (edits: [Edit], added: Bool)? {
         guard let last = tree.descriptions.last else { return nil }
         let afterLast = tree.elements[last].end?.upperBound ?? tree.elements[last].start.upperBound
         // Every description must be about the same resource (XMP Part 1 §7.4), and the new one too.
@@ -256,7 +264,7 @@ enum XMPTextEdit {
             }
             edits.append(Edit(range: afterLast..<afterLast, bytes: Array(block.utf8)))
         }
-        return edits
+        return (edits, addRating || addSubject)
     }
 
     /// `<rdf:Bag>` with one `<rdf:li>` per keyword, with the given prefix for the RDF namespace.
@@ -367,6 +375,14 @@ private struct XMLTree {
     /// Several `rdf:RDF` elements, or a child of it that isn't an `rdf:Description` (a typed node).
     private var unexpectedRDF = false
 
+    /// The byte strings the tokenizer looks for.
+    private enum T {
+        static let pi = Array("<?".utf8), piEnd = Array("?>".utf8), xmlDecl = Array("<?xml ".utf8)
+        static let xmlDeclTab = Array("<?xml\t".utf8), trailer = Array("<?xpacket end".utf8)
+        static let comment = Array("<!--".utf8), commentEnd = Array("-->".utf8), cdata = Array("<![CDATA[".utf8)
+        static let cdataEnd = Array("]]>".utf8), declaration = Array("<!".utf8)
+    }
+
     init?(_ bytes: [UInt8]) {
         self.bytes = bytes
         var open: [Int] = []
@@ -374,45 +390,45 @@ private struct XMLTree {
         var trailer: Range<Int>?
         var i = 0
         let n = bytes.count
-        func starts(_ s: String, at k: Int) -> Bool {
-            let u = Array(s.utf8)
-            return k + u.count <= n && bytes[k..<(k + u.count)].elementsEqual(u)
+        func starts(_ u: [UInt8], at k: Int) -> Bool {
+            guard k + u.count <= n else { return false }
+            for m in 0..<u.count where bytes[k + m] != u[m] { return false }
+            return true
         }
-        func find(_ s: String, from k: Int) -> Int? {
-            let u = Array(s.utf8)
+        func find(_ u: [UInt8], from k: Int) -> Int? {
             var j = k
             while j + u.count <= n {
-                if bytes[j] == u[0] && bytes[j..<(j + u.count)].elementsEqual(u) { return j }
+                if bytes[j] == u[0] && starts(u, at: j) { return j }
                 j += 1
             }
             return nil
         }
         while i < n {
             guard bytes[i] == UInt8(ascii: "<") else { i += 1; continue }
-            if starts("<?", at: i) {
-                guard let end = find("?>", from: i + 2) else { return nil }
-                if starts("<?xml ", at: i) || starts("<?xml\t", at: i) {
+            if starts(T.pi, at: i) {
+                guard let end = find(T.piEnd, from: i + 2) else { return nil }
+                if starts(T.xmlDecl, at: i) || starts(T.xmlDeclTab, at: i) {
                     let declaration = String(decoding: bytes[i..<end], as: UTF8.self).lowercased()
                     if let range = declaration.range(of: "encoding") {
                         let rest = declaration[range.upperBound...].drop { $0 == " " || $0 == "=" || $0 == "\"" || $0 == "'" }
                         guard rest.hasPrefix("utf-8") else { return nil }
                     }
                 }
-                if starts("<?xpacket end", at: i) { trailer = i..<(end + 2) }
+                if starts(T.trailer, at: i) { trailer = i..<(end + 2) }
                 i = end + 2
                 continue
             }
-            if starts("<!--", at: i) {
-                guard let end = find("-->", from: i + 4) else { return nil }
+            if starts(T.comment, at: i) {
+                guard let end = find(T.commentEnd, from: i + 4) else { return nil }
                 i = end + 3
                 continue
             }
-            if starts("<![CDATA[", at: i) {
-                guard let end = find("]]>", from: i + 9) else { return nil }
+            if starts(T.cdata, at: i) {
+                guard let end = find(T.cdataEnd, from: i + 9) else { return nil }
                 i = end + 3
                 continue
             }
-            guard !starts("<!", at: i) else { return nil }
+            guard !starts(T.declaration, at: i) else { return nil }
             guard let tag = Self.tag(bytes, at: i) else { return nil }
             if tag.isEnd {
                 guard let top = open.popLast(), elements[top].qualifiedName.elementsEqual(tag.name) else { return nil }
