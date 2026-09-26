@@ -151,7 +151,7 @@ extension LibraryStore {
         enum Change { case toBin, dropRAW, dropJPG }
         var changes: [(photo: PhotoAsset, change: Change)] = []
         var files: [URL] = []
-        var sidecars: [(sidecar: URL, jpg: URL)] = []
+        var sidecars: [(sidecar: URL, jpg: URL, raw: URL)] = []
         for photo in photosToRemove where photosBeingDeleted.insert(photo.id).inserted {
             if deleteRAW && deleteJPG {
                 // Both file type filters active — normal soft delete
@@ -159,7 +159,7 @@ extension LibraryStore {
             } else if deleteRAW && photo.hasRawPair, let rawPath = photo.rawPath, let jpgPath = photo.jpgPath {
                 let raw = URL(fileURLWithPath: rawPath)
                 files.append(raw)
-                sidecars.append((raw.xmpSidecarURL, URL(fileURLWithPath: jpgPath)))
+                sidecars.append((raw.xmpSidecarURL, URL(fileURLWithPath: jpgPath), raw))
                 changes.append((photo, .dropRAW))
             } else if deleteJPG && photo.hasRawPair {
                 files += Self.files(of: photo, jpg: true, raw: false)
@@ -171,13 +171,16 @@ extension LibraryStore {
         }
         guard !changes.isEmpty else { return }
 
-        if !sidecars.isEmpty {
-            // Off the main actor: it reads each sidecar there is.
-            files += await Task.detached(priority: .userInitiated) {
-                sidecars.filter { !MetadataService.shared.sidecarOverridesEmbedded($0.jpg) }.map(\.sidecar)
-            }.value
-        }
         let outcomes = Self.outcomesByPath(files, await moveToTrash(files))
+        // A RAW's sidecar (its rating, keywords and edits) goes only once the RAW has, and not while the JPG's own
+        // values live in it. Off the main actor: it reads each sidecar there is.
+        let goneRAWs = sidecars.filter { outcomes[$0.raw.path]?.fileIsGone == true }
+        if !goneRAWs.isEmpty {
+            let sidecarFiles = await Task.detached(priority: .userInitiated) {
+                goneRAWs.filter { !MetadataService.shared.sidecarOverridesEmbedded($0.jpg) }.map(\.sidecar)
+            }.value
+            _ = await moveToTrash(sidecarFiles)
+        }
 
         var applied: [(photo: PhotoAsset, change: Change)] = []
         var problems: [(path: String, outcome: TrashOutcome)] = []
@@ -219,6 +222,10 @@ extension LibraryStore {
 
         let files = photos.flatMap { Self.files(of: $0, jpg: true, raw: true) }
         let outcomes = Self.outcomesByPath(files, await moveToTrash(files))
+        // A RAW's sidecar (its rating, keywords and edits) goes only once the RAW has: a RAW that couldn't be moved
+        // keeps it.
+        _ = await moveToTrash(photos.compactMap(\.rawPath).filter { outcomes[$0]?.fileIsGone == true }
+            .map { URL(fileURLWithPath: $0).xmpSidecarURL })
 
         var deleted: [PhotoAsset] = []
         var kept: [PhotoAsset] = []
@@ -256,8 +263,8 @@ extension LibraryStore {
         Dictionary(zip(files.map(\.path), outcomes), uniquingKeysWith: { first, _ in first })
     }
 
-    /// The files a delete moves to the Trash: the photo's JPG (`jpg`) and/or its RAW (`raw`) together with the RAW's
-    /// XMP sidecar. Every delete uses this one list.
+    /// The files a delete moves to the Trash: the photo's JPG (`jpg`) and/or its RAW (`raw`). Every delete uses this
+    /// one list; the RAW's `.xmp` sidecar follows only once the RAW has gone (its rating and edits live there).
     static func files(of photo: PhotoAsset, jpg: Bool, raw: Bool) -> [URL] {
         var urls: [URL] = []
         if jpg, let jpgPath = photo.jpgPath {
@@ -266,7 +273,6 @@ extension LibraryStore {
         if raw, let rawPath = photo.rawPath {
             let rawURL = URL(fileURLWithPath: rawPath)
             urls.append(rawURL)
-            urls.append(rawURL.xmpSidecarURL)
         }
         return urls
     }

@@ -413,8 +413,9 @@ final class LibraryStoreTests: LibraryTestCase {
         let jpgOnly = PhotoAsset(fileName: "j", jpgPath: "/f/j.jpg", folderPath: "/f")
         let paths = { (urls: [URL]) in urls.map(\.path) }
 
-        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: true, raw: true)), ["/f/p.jpg", "/f/p.arw", "/f/p.xmp"])
-        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: false, raw: true)), ["/f/p.arw", "/f/p.xmp"])
+        // The RAW's sidecar isn't in the list: it follows once the RAW has gone (FileTrasherTests).
+        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: true, raw: true)), ["/f/p.jpg", "/f/p.arw"])
+        XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: false, raw: true)), ["/f/p.arw"])
         XCTAssertEqual(paths(LibraryStore.files(of: pair, jpg: true, raw: false)), ["/f/p.jpg"])
         XCTAssertEqual(paths(LibraryStore.files(of: jpgOnly, jpg: true, raw: true)), ["/f/j.jpg"])
     }

@@ -131,6 +131,37 @@ final class FileTrasherTests: LibraryTestCase {
         addTeardownBlock { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: path) }
     }
 
+    /// A RAW that can't be moved keeps its sidecar: the `.xmp` holds its rating, keywords and edits, so it goes to the
+    /// Trash only once the RAW has (it used to be trashed in the same batch, and left behind a RAW with nothing).
+    func testAPermanentDeleteKeepsTheSidecarOfARAWThatCouldNotBeMoved() async throws {
+        let stuck = try insertPhoto("stuck", raw: true, sidecar: true, inBin: true)
+        let free = try insertPhoto("free", raw: true, sidecar: true, inBin: true)
+        try lock(try XCTUnwrap(stuck.rawPath))
+        library.loadExistingData()
+        useTestTrash()
+
+        await library.deletePermanently([stuck, free])
+
+        XCTAssertEqual(Set(log.names), ["stuck.jpg", "free.jpg", "free.arw", "free.xmp"])
+        XCTAssertEqual(try filesLeft(), ["stuck.arw", "stuck.xmp"], "the RAW that stayed keeps its sidecar")
+        XCTAssertEqual(library.binPhotos.map(\.id), [stuck.id])
+    }
+
+    func testDeletingTheRAWsKeepsTheSidecarOfARAWThatCouldNotBeMoved() async throws {
+        let stuck = try insertPhoto("stuck", raw: true, sidecar: true)
+        let free = try insertPhoto("free", raw: true, sidecar: true)
+        try lock(try XCTUnwrap(stuck.rawPath))
+        library.loadExistingData()
+        useTestTrash()
+
+        await library.deleteFileType(of: [stuck, free], raw: true, jpg: false)
+
+        XCTAssertEqual(Set(log.names), ["free.arw", "free.xmp"])
+        XCTAssertEqual(try filesLeft(), ["stuck.jpg", "stuck.arw", "stuck.xmp", "free.jpg"])
+        XCTAssertNotNil(stuck.rawPath, "the pair keeps the RAW it couldn't move")
+        XCTAssertNil(free.rawPath)
+    }
+
     /// Each file gets its own outcome: moved, already gone (its volume is there), on a volume that isn't mounted (it may
     /// well still be there), or there but not movable (locked, in a read-only folder), with the reason.
     func testTrasherReportsWhatHappenedToEachFile() async throws {

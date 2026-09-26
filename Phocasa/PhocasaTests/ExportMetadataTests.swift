@@ -291,7 +291,7 @@ final class ExportMetadataTests: XCTestCase {
         XCTAssertEqual(viewModel.library.tagCounts.values.sorted(), [3, 3], "the counts include the new photos")
         // A rescan finds them known: nothing new, no duplicate.
         let discovered = await FolderScanner().scan(folderURL: dir)
-        let plan = ScanPlan(stored: StoredPhoto.fetchAllNow(in: container), discovered: discovered)
+        let plan = ScanPlan(stored: try StoredPhoto.fetchAllNow(in: container), discovered: discovered)
         XCTAssertEqual(plan.newPhotos.map(\.fileName).filter { $0.contains("raw-edit") }, [], "a rescan adds no export")
     }
 
