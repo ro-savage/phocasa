@@ -42,7 +42,11 @@ final class PhotoLibraryViewModel {
 
     /// Launch. `library.open` shows the stored library and starts the launch rescan; work that should start after
     /// launch goes after it here (`await library.waitForScans()` waits for that rescan).
+    ///
+    /// A no-op for the context the library already has: the app owns this view model, so a window that closes and
+    /// opens again appears with it, and must not load and rescan the library a second time.
     func setModelContext(_ context: ModelContext) {
+        guard library.modelContext !== context else { return }
         library.open(context)
         library.backfillCaptureDatesAfterScans()
         loadPresets()
