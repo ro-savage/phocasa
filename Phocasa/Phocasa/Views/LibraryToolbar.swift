@@ -41,14 +41,17 @@ struct LibraryToolbar: ToolbarContent {
         }
 
         ToolbarItemGroup(placement: .automatic) {
-            if viewModel.library.viewingBin && !viewModel.selection.selectedPhotos.isEmpty {
-                Button(action: { viewModel.restoreSelected() }) {
+            // In the detail view these act on the photo on screen, not the grid's (hidden) selection.
+            let hasTarget = viewModel.showingDetail ? viewModel.selectedDetailPhoto != nil
+                                                    : !viewModel.selection.selectedPhotos.isEmpty
+            if viewModel.library.viewingBin && hasTarget {
+                Button(action: { viewModel.restoreSelectionOrCurrent() }) {
                     Label("Restore", systemImage: "arrow.uturn.backward")
                 }
             }
 
-            if !viewModel.selection.selectedPhotos.isEmpty {
-                Button(role: .destructive, action: { viewModel.deleteSelected() }) {
+            if hasTarget {
+                Button(role: .destructive, action: { viewModel.deleteSelectionOrCurrent() }) {
                     Label(viewModel.library.viewingBin ? "Delete Forever" : "Delete", systemImage: "trash")
                 }
             }

@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// Adds and removes tags. From the grid's context menu it edits the photo clicked, or the whole selection when that
+/// photo is part of a multi-selection; in the detail view, only the photo on screen
+/// (`PhotoLibraryViewModel.tagEditorEditsSelection`).
 struct TagEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var viewModel: PhotoLibraryViewModel
@@ -10,7 +13,7 @@ struct TagEditorView: View {
     @State private var searchText = ""
 
     private var isMultiSelection: Bool {
-        viewModel.selection.selectedPhotos.count > 1
+        viewModel.tagEditorEditsSelection
     }
 
     private var filteredExistingTags: [Tag] {
@@ -134,15 +137,7 @@ struct TagEditorView: View {
     }
 
     private func applyTag(_ tag: Tag) {
-        if isMultiSelection {
-            viewModel.addTagToSelection(name: tag.name, category: tag.category)
-        } else if let photo {
-            if photo.tags.contains(where: { $0.id == tag.id }) {
-                viewModel.library.removeTag(tag, from: photo)
-            } else {
-                viewModel.library.addTag(name: tag.name, category: tag.category, to: photo)
-            }
-        }
+        viewModel.toggleTagFromEditor(tag, photo: photo)
     }
 
     private func addNewTag() {
@@ -150,12 +145,7 @@ struct TagEditorView: View {
         let category = newTagCategory.trimmingCharacters(in: .whitespaces).lowercased()
         guard !name.isEmpty else { return }
 
-        if isMultiSelection {
-            viewModel.addTagToSelection(name: name, category: category)
-        } else if let photo {
-            viewModel.library.addTag(name: name, category: category, to: photo)
-        }
-
+        viewModel.addTagFromEditor(name: name, category: category, photo: photo)
         newTagName = ""
     }
 }

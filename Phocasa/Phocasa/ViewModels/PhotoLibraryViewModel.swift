@@ -128,9 +128,57 @@ final class PhotoLibraryViewModel {
         showGridTagEditor = true
     }
 
+    // MARK: - The Tag Editor
+
+    /// Whether the tag editor changes the whole selection: opened from the grid on a multi-selection. The detail view's
+    /// editor changes only the photo on screen, whatever the (hidden) grid has selected.
+    var tagEditorEditsSelection: Bool {
+        !showingDetail && selection.selectedPhotos.count > 1
+    }
+
+    /// The tag editor's tap on an existing tag: adds it to the selection (see `tagEditorEditsSelection`), or toggles
+    /// it on `photo`.
+    func toggleTagFromEditor(_ tag: Tag, photo: PhotoAsset?) {
+        if tagEditorEditsSelection {
+            addTagToSelection(name: tag.name, category: tag.category)
+        } else if let photo {
+            if photo.tags.contains(where: { $0.id == tag.id }) {
+                library.removeTag(tag, from: photo)
+            } else {
+                library.addTag(name: tag.name, category: tag.category, to: photo)
+            }
+        }
+    }
+
+    /// The tag editor's new tag: on the selection (see `tagEditorEditsSelection`), or on `photo`.
+    func addTagFromEditor(name: String, category: String, photo: PhotoAsset?) {
+        if tagEditorEditsSelection {
+            addTagToSelection(name: name, category: category)
+        } else if let photo {
+            library.addTag(name: name, category: category, to: photo)
+        }
+    }
+
     // MARK: - Deletion / Bin
     // Moving to the bin is immediate. Deletes that trash files return their task: the files go to the Trash off the
-    // main actor, then the store changes (spec §G5).
+    // main actor, then the store changes (spec §G5). In the detail view they act on the photo on screen, never on the
+    // grid's (hidden) selection, and the detail view then moves on (`moveDetailOff(_:saveEdit:)`).
+
+    /// ⌫ and the toolbar's delete button: the photo in the detail view, or else the grid's selection.
+    @discardableResult
+    func deleteSelectionOrCurrent() -> Task<Void, Never>? {
+        guard showingDetail, let photo = selectedDetailPhoto else { return deleteSelected() }
+        return deletePhoto(photo)
+    }
+
+    /// The toolbar's Restore: the photo in the detail view, or else the grid's selection.
+    func restoreSelectionOrCurrent() {
+        if showingDetail, let photo = selectedDetailPhoto {
+            restoreFromBin([photo])
+        } else {
+            restoreSelected()
+        }
+    }
 
     @discardableResult
     func deleteSelected() -> Task<Void, Never>? {
@@ -165,14 +213,20 @@ final class PhotoLibraryViewModel {
         selection.deselect(photosToRemove.map(\.id))
         let raw = library.activeFilters.contains(.rawOnly)
         let jpg = library.activeFilters.contains(.jpgOnly)
+        // Each photo leaves the filtered grid: a pair loses the filtered file, a photo with only one goes to the bin.
+        // The session isn't saved when the file it edits is going to the Trash (its sidecar with it).
+        let trashesEditedFile = raw != jpg && editSession.map { $0.photo.hasRawPair && $0.isRAW == raw } == true
+        moveDetailOff(Set(photosToRemove.map(\.id)), saveEdit: !trashesEditedFile)
         return Task { await library.deleteFileType(of: photosToRemove, raw: raw, jpg: jpg) }
     }
 
     private func moveToBin(_ photosToMove: [PhotoAsset]) {
+        moveDetailOff(Set(photosToMove.map(\.id)), saveEdit: true)
         selection.deselect(library.moveToBin(photosToMove))
     }
 
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) {
+        moveDetailOff(Set(photosToRestore.map(\.id)), saveEdit: true)
         selection.deselect(library.restoreFromBin(photosToRestore))
     }
 
@@ -186,7 +240,39 @@ final class PhotoLibraryViewModel {
         let photos = photosToDelete
         photosToDelete = []
         selection.deselect(photos.map(\.id))
+        // Before the models go: the detail view must not go on showing (or saving an edit of) a deleted photo.
+        moveDetailOff(Set(photos.map(\.id)), saveEdit: false)
         return Task { await library.deletePermanently(photos) }
+    }
+
+    /// `leaving` photos are about to leave the grid. When the detail view shows one of them, it moves to the next
+    /// photo that stays (the previous one at the end), or closes when none is left. The edit session is ended first,
+    /// saved when `saveEdit`, and editing carries on on the next photo, as when navigating.
+    private func moveDetailOff(_ leaving: Set<UUID>, saveEdit: Bool) {
+        guard showingDetail, let current = selectedDetailPhoto, leaving.contains(current.id) else { return }
+        if let next = photoStaying(besides: current, leaving: leaving) {
+            showInDetail(next, saveEdit: saveEdit)
+        } else {
+            stopEditing(save: saveEdit)
+            savedEditHandoff = nil
+            showingDetail = false
+            selectedDetailPhoto = nil
+        }
+    }
+
+    /// The first photo after `photo` in the grid that isn't `leaving`, else the last one before it.
+    private func photoStaying(besides photo: PhotoAsset, leaving: Set<UUID>) -> PhotoAsset? {
+        let ids = library.shownIDs
+        let place = library.gridPlace(of: photo)
+        let after = place.isShown ? place.index + 1 : place.index
+        if after < ids.count, let index = ids[after...].firstIndex(where: { !leaving.contains($0) }) {
+            return library.photos[index]
+        }
+        let before = place.index - 1
+        if before >= 0, let index = ids[...before].lastIndex(where: { !leaving.contains($0) }) {
+            return library.photos[index]
+        }
+        return nil
     }
 
     func emptyBin() {

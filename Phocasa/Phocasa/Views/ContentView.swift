@@ -50,8 +50,13 @@ struct ContentView: View {
                     viewModel.photosToDelete = []
                 }
             } message: {
-                let count = viewModel.photosToDelete.count
-                Text("Permanently delete \(count) photo\(count == 1 ? "" : "s")? The file\(count == 1 ? "" : "s") will be moved to the system Trash.")
+                // One photo is named: it's the photo on screen in the detail view, or the one clicked.
+                let photos = viewModel.photosToDelete
+                if photos.count == 1, let photo = photos.first {
+                    Text("Permanently delete \(photo.fileName)? Its files will be moved to the system Trash.")
+                } else {
+                    Text("Permanently delete \(photos.count.formatted()) photos? Their files will be moved to the system Trash.")
+                }
             }
             .fileImporter(
                 isPresented: $viewModel.showFolderPicker,
@@ -102,15 +107,20 @@ struct ContentView: View {
             return .handled
 
         case .space:
+            if viewModel.showingDetail {
+                viewModel.closeDetail()
+                return .handled
+            }
             if let photo = firstSelectedPhoto {
-                if viewModel.showingDetail { viewModel.closeDetail() }
-                else { viewModel.openDetail(for: photo) }
+                viewModel.openDetail(for: photo)
                 return .handled
             }
             return .ignored
 
         case .return:
-            if let photo = firstSelectedPhoto {
+            // Only from the grid: in the detail view it would swap the grid's (hidden) selection in for the photo on
+            // screen, and in edit mode show one photo while the sliders edit another.
+            if !viewModel.showingDetail, let photo = firstSelectedPhoto {
                 viewModel.openDetail(for: photo)
                 return .handled
             }
@@ -149,17 +159,19 @@ struct ContentView: View {
             return .handled
 
         // The ⌫ key sends U+007F, which isn't SwiftUI's `.delete` (U+0008); ⌦ sends `.deleteForward` (U+F728).
+        // In the detail view: the photo on screen.
         case .delete, .deleteForward, KeyEquivalent("\u{7F}"):
-            viewModel.deleteSelected()
+            viewModel.deleteSelectionOrCurrent()
             return .handled
 
         default:
             break
         }
 
-        // Cmd+A: select all
+        // Cmd+A: select all. Not in the detail view, where the grid is hidden (a selection there is invisible, and
+        // ⌫ acts on the photo on screen anyway).
         if command && keyPress.characters == "a" {
-            viewModel.selection.selectAll()
+            if !viewModel.showingDetail { viewModel.selection.selectAll() }
             return .handled
         }
 

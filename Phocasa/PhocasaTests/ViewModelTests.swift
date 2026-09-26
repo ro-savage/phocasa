@@ -494,6 +494,127 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[3].id)
     }
 
+    // MARK: - The detail view acts on the photo on screen
+
+    /// Bug test (REL-1 #1): ⌫ in the detail view binned the grid's selection, whatever was on screen (open A, → to B,
+    /// ⌫: A went to the bin while B stayed on screen; opened from a selection of 200, ⌫ binned all 200). It bins the
+    /// photo on screen, then shows the next one (the previous one at the end), and closes when none is left.
+    func testDeleteInTheDetailViewBinsThePhotoOnScreenThenShowsTheNext() {
+        let photos = (0..<4).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: photos[0])
+        viewModel.navigateDetail(direction: 1)
+
+        viewModel.deleteSelectionOrCurrent()
+
+        XCTAssertEqual(ids(viewModel.library.binPhotos), [photos[1].id], "only the photo on screen")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "then the next photo")
+        XCTAssertTrue(viewModel.showingDetail)
+        viewModel.navigateDetail(direction: 1)
+        viewModel.deleteSelectionOrCurrent()
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "at the end, the previous photo")
+        viewModel.deleteSelectionOrCurrent()
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[0].id)
+        viewModel.deleteSelectionOrCurrent()
+        XCTAssertFalse(viewModel.showingDetail, "none left: the detail view closes")
+        XCTAssertNil(viewModel.selectedDetailPhoto)
+        XCTAssertEqual(viewModel.library.binCount, 4)
+    }
+
+    /// Deleting while editing saves the edit and carries on editing the next photo, as navigating does.
+    func testDeleteWhileEditingSavesAndEditsTheNextPhoto() throws {
+        let photos = (0..<2).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.openDetail(for: photos[0])
+        viewModel.startEditing(photo: photos[0], isRAW: false)
+        viewModel.editSession?.parameters.exposure = 1
+
+        viewModel.deleteSelectionOrCurrent()
+
+        XCTAssertEqual(photos[0].jpgEditParameters?.exposure, 1, "saved")
+        XCTAssertEqual(viewModel.editSession?.photo.id, photos[1].id)
+        viewModel.stopEditing(save: false)
+    }
+
+    /// In the bin, the Delete Forever prompt is about the photo on screen, not the grid's selection.
+    func testDeleteForeverInTheDetailViewAsksAboutThePhotoOnScreen() async {
+        let a = insertPhoto(name: "a", isInBin: true, creationDate: date(2000))
+        let b = insertPhoto(name: "b", isInBin: true, creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.bin)
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: a)
+        viewModel.navigateDetail(direction: 1)
+
+        viewModel.deleteSelectionOrCurrent()
+
+        XCTAssertTrue(viewModel.showPermanentDeleteConfirmation)
+        XCTAssertEqual(ids(viewModel.photosToDelete), [b.id])
+        await viewModel.confirmPermanentDelete()?.value
+        XCTAssertEqual(ids(viewModel.library.binPhotos), [a.id])
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, a.id, "the photo left")
+    }
+
+    /// Emptying the bin from the toolbar while one of its photos is on screen closes the detail view before the
+    /// photos are deleted (it mustn't go on showing a deleted photo).
+    func testEmptyingTheBinWhileItsPhotoIsOnScreenClosesTheDetailView() async {
+        let a = insertPhoto(name: "a", isInBin: true)
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.bin)
+        viewModel.openDetail(for: a)
+
+        viewModel.emptyBin()
+        let deleting = viewModel.confirmPermanentDelete()
+
+        XCTAssertFalse(viewModel.showingDetail)
+        XCTAssertNil(viewModel.selectedDetailPhoto)
+        await deleting?.value
+        XCTAssertEqual(viewModel.library.binCount, 0)
+    }
+
+    /// Restore in the bin's detail view restores the photo on screen, then shows the next one.
+    func testRestoreInTheDetailViewRestoresThePhotoOnScreen() {
+        let a = insertPhoto(name: "a", isInBin: true, creationDate: date(2000))
+        let b = insertPhoto(name: "b", isInBin: true, creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.bin)
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: a)
+
+        viewModel.restoreSelectionOrCurrent()
+
+        XCTAssertFalse(a.isInBin)
+        XCTAssertTrue(b.isInBin, "the rest of the selection stays in the bin")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, b.id)
+    }
+
+    /// Bug test (REL-1 #1): the detail view's tag editor tagged the grid's (hidden) multi-selection. It tags the photo
+    /// on screen; from the grid's context menu it still tags the selection.
+    func testTheDetailViewsTagEditorTagsOnlyThePhotoOnScreen() throws {
+        let a = insertPhoto(name: "a", creationDate: date(2000))
+        let b = insertPhoto(name: "b", creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: a)
+        viewModel.navigateDetail(direction: 1)
+
+        XCTAssertFalse(viewModel.tagEditorEditsSelection)
+        viewModel.addTagFromEditor(name: "x", category: "c", photo: b)
+        XCTAssertEqual(b.tags.map(\.name), ["x"])
+        XCTAssertTrue(a.tags.isEmpty, "not the rest of the selection")
+        let x = try XCTUnwrap(b.tags.first)
+        viewModel.toggleTagFromEditor(x, photo: b)
+        XCTAssertTrue(b.tags.isEmpty)
+
+        viewModel.closeDetail()
+        viewModel.selection.selectAll()
+        XCTAssertTrue(viewModel.tagEditorEditsSelection)
+        viewModel.toggleTagFromEditor(x, photo: a)
+        XCTAssertEqual(a.tags.map(\.id), [x.id])
+        XCTAssertEqual(b.tags.map(\.id), [x.id], "from the grid: the whole selection")
+    }
+
     // MARK: - In-memory state vs a fresh load
 
     /// A second view model on the same store, created before seeding so its one availability check
