@@ -31,11 +31,13 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
                             .foregroundStyle(.white.opacity(0.7))
                     }
 
-                    if let index = viewModel.library.index(of: photo.id) {
-                        Text("\(index + 1) / \(viewModel.library.photos.count)")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
+                    // A photo rated, tagged or binned out of the grid's filter shows no position of its own; the
+                    // arrows move on from where it was.
+                    let place = viewModel.library.gridPlace(of: photo)
+                    Text(place.isShown ? "\(place.index + 1) / \(viewModel.library.photos.count)"
+                                       : "– / \(viewModel.library.photos.count)")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
 
                     if photo.hasAnyEdits {
                         Text("Edited")

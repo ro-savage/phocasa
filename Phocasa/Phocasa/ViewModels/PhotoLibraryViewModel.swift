@@ -202,22 +202,28 @@ final class PhotoLibraryViewModel {
         showingDetail = true
     }
 
+    /// The next (`direction` 1) or previous (-1) photo in the grid. A detail photo the grid no longer shows (rated,
+    /// tagged or binned out of the filter while on screen) is where it was (`LibraryStore.gridPlace(of:)`): next is
+    /// the photo after its place, previous the one before it.
     func navigateDetail(direction: Int) {
-        guard let current = selectedDetailPhoto,
-              let index = library.index(of: current.id) else { return }
-
+        guard let current = selectedDetailPhoto else { return }
         let photos = library.photos
-        let newIndex = index + direction
-        if newIndex >= 0 && newIndex < photos.count {
-            // Save edits before navigating, then keep editing on the next photo (a session belongs to one photo).
-            let editingRAW = editSession?.isRAW
-            editSession?.end(save: true)
-            editSession = nil
-            savedEditHandoff = nil
-            selectedDetailPhoto = photos[newIndex]
-            if let editingRAW {
-                continueEditing(photos[newIndex], isRAW: editingRAW)
-            }
+        let place = library.gridPlace(of: current)
+        let newIndex = place.index + direction - (!place.isShown && direction > 0 ? 1 : 0)
+        guard photos.indices.contains(newIndex) else { return }
+        showInDetail(photos[newIndex])
+    }
+
+    /// Shows `photo` in the detail view. The session is ended first, saved unless `saveEdit` is false, and editing
+    /// carries on on `photo` when it has a file of the kind being edited (a session belongs to one photo).
+    private func showInDetail(_ photo: PhotoAsset, saveEdit: Bool = true) {
+        let editingRAW = editSession?.isRAW
+        editSession?.end(save: saveEdit)
+        editSession = nil
+        savedEditHandoff = nil
+        selectedDetailPhoto = photo
+        if let editingRAW {
+            continueEditing(photo, isRAW: editingRAW)
         }
     }
 

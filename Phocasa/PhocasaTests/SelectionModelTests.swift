@@ -226,6 +226,50 @@ final class SelectionModelTests: LibraryTestCase {
         XCTAssertEqual(selection.selectedPhotos, [a.id])
     }
 
+    /// Bug test (REL-1 #2): once the anchor had left the grid (rated out of the filter, moved to the bin), the next
+    /// arrow selected the first photo and scrolled to the top. It moves on from where the anchor was.
+    func testNavigateGridFromAnAnchorThatLeftTheGrid() {
+        let photos = (0..<6).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        library.loadExistingData()
+        library.applyFilter(.unrated)
+
+        selection.toggleSelection(for: photos[3], addToSelection: false)
+        library.setRating(2, for: photos[3])
+        XCTAssertNil(library.index(of: photos[3].id), "rated out of Unrated")
+        selection.navigateGrid(direction: .right, extendSelection: false, columns: columns)
+        XCTAssertEqual(selection.selectedPhotos, [photos[4].id], "the photo after it")
+        XCTAssertEqual(selection.lastSelectedId, photos[4].id)
+
+        library.moveToBin([photos[4]])
+        selection.deselect([photos[4].id])
+        selection.navigateGrid(direction: .left, extendSelection: false, columns: columns)
+        XCTAssertEqual(selection.selectedPhotos, [photos[2].id], "the photo before it")
+
+        // Rows: the grid is p0 p1 | p2 p5; with p2 gone, down goes to the photo that was below it.
+        columns = 2
+        library.applyFilter(.all)
+        XCTAssertEqual(ids(library.photos), ids([photos[0], photos[1], photos[2], photos[3], photos[5]]))
+        library.applyFilter(.unrated)
+        selection.select(only: photos[1].id)
+        library.setRating(1, for: photos[1])
+        selection.navigateGrid(direction: .down, extendSelection: false, columns: columns)
+        XCTAssertEqual(selection.selectedPhotos, [photos[5].id], "p0 p2 | p5: below p1's place")
+        library.setRating(1, for: photos[5])
+        selection.navigateGrid(direction: .up, extendSelection: false, columns: columns)
+        XCTAssertEqual(selection.selectedPhotos, [photos[0].id])
+    }
+
+    /// An anchor that is no longer loaded at all (deleted) falls back to the first photo, as before.
+    func testNavigateGridFromAnAnchorThatIsGoneSelectsTheFirstPhoto() {
+        let photos = (0..<3).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        library.loadExistingData()
+        selection.lastSelectedId = UUID()
+
+        selection.navigateGrid(direction: .right, extendSelection: false, columns: columns)
+
+        XCTAssertEqual(selection.selectedPhotos, [photos[0].id])
+    }
+
     func testNavigateGridUpAndDownUseColumns() {
         let photos = (0..<5).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
         library.loadExistingData()

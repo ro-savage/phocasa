@@ -468,6 +468,32 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedDetailPhoto?.id, a.id)
     }
 
+    /// Bug test (REL-1 #2): culling in a filter, the photo on screen is rated out of it. ←/→ did nothing (its index was
+    /// gone) and the counter disappeared. They now go to the photos either side of where it was.
+    func testNavigateDetailAfterThePhotoLeftTheFilter() {
+        let photos = (0..<4).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.unrated)
+        viewModel.openDetail(for: photos[1])
+
+        viewModel.setRatingForSelectionOrCurrent(3)
+        XCTAssertNil(viewModel.library.index(of: photos[1].id), "rated out of Unrated")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[1].id, "still on screen")
+        viewModel.navigateDetail(direction: 1)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "the photo after it")
+
+        viewModel.setRatingForSelectionOrCurrent(4)
+        viewModel.navigateDetail(direction: -1)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[0].id, "the photo before it")
+
+        // After the sort is reversed too.
+        viewModel.setRatingForSelectionOrCurrent(5)
+        viewModel.library.toggleSortOrder()
+        XCTAssertEqual(ids(viewModel.library.photos), [photos[3].id])
+        viewModel.navigateDetail(direction: -1)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[3].id)
+    }
+
     // MARK: - In-memory state vs a fresh load
 
     /// A second view model on the same store, created before seeding so its one availability check
