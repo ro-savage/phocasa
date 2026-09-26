@@ -208,10 +208,12 @@ final class MetadataService: Sendable {
             // whether or not the file write below succeeds.
             guard [.written, .unchanged].contains(updateSidecar(of: url, values)) else { return }
         }
-        let originalDates = Phocasa.captureFileDates(target)
-        guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
-        else { return }
-        Phocasa.restoreFileDates(target, dates: originalDates)
+        if bytes != original {
+            let originalDates = Phocasa.captureFileDates(target)
+            guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
+            else { return }
+            Phocasa.restoreFileDates(target, dates: originalDates)
+        }
         if sidecar != .none {
             // In step with the file: the same values, no longer overriding it.
             updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: false))
@@ -230,6 +232,9 @@ final class MetadataService: Sendable {
             // ImageIO calls a cut-short PNG complete, so the output's chunks are walked again, CRCs included.
             written = PNGMetadata.replacingXMP(in: original, update: packet)
                 .flatMap { (try? PNGMetadata.walk($0).get()) != nil ? $0 : nil }
+        } else if TIFFMetadata.isTIFF(original) {
+            // Checks its own output: every original byte outside the parts it may change, and IFD0's other entries.
+            written = TIFFMetadata.replacingXMP(in: original, update: packet, keywords: keywords)
         } else {
             return nil
         }
