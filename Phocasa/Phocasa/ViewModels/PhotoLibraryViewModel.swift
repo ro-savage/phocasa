@@ -45,6 +45,9 @@ final class PhotoLibraryViewModel {
     var exportNotice: ExportNotice?
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
+    /// Whether a text field in the window's content (the preset name) is being typed in: the Photo menu's shortcuts
+    /// (⌘⌫ above all) are off meanwhile, so they don't act on photos instead of the text.
+    var isTypingInContent = false
 
     /// `preferences` are this launch's (`ViewPreferences.forLaunch()`): in memory, fresh for each view model, in the
     /// test host.
@@ -363,12 +366,21 @@ final class PhotoLibraryViewModel {
     /// tagged or binned out of the filter while on screen) is where it was (`LibraryStore.gridPlace(of:)`): next is
     /// the photo after its place, previous the one before it.
     func navigateDetail(direction: Int) {
-        guard let current = selectedDetailPhoto else { return }
-        let photos = library.photos
+        guard let newIndex = detailIndex(direction: direction) else { return }
+        showInDetail(library.photos[newIndex])
+    }
+
+    /// Whether `navigateDetail(direction:)` has a photo to go to: false at either end (the chevrons are disabled).
+    func canNavigateDetail(direction: Int) -> Bool {
+        detailIndex(direction: direction) != nil
+    }
+
+    /// Where `navigateDetail(direction:)` goes in the grid, or nil past either end.
+    private func detailIndex(direction: Int) -> Int? {
+        guard let current = selectedDetailPhoto else { return nil }
         let place = library.gridPlace(of: current)
         let newIndex = place.index + direction - (!place.isShown && direction > 0 ? 1 : 0)
-        guard photos.indices.contains(newIndex) else { return }
-        showInDetail(photos[newIndex])
+        return library.photos.indices.contains(newIndex) ? newIndex : nil
     }
 
     /// Shows `photo` in the detail view. The session is ended first, saved unless `saveEdit` is false, and editing
@@ -398,6 +410,9 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Zoom and Sort
 
+    var canZoomIn: Bool { !showingDetail && gridColumns > ViewPreferences.columnRange.lowerBound }
+    var canZoomOut: Bool { !showingDetail && gridColumns < ViewPreferences.columnRange.upperBound }
+
     func zoomIn() {
         if gridColumns > ViewPreferences.columnRange.lowerBound {
             gridColumns -= 1
@@ -414,6 +429,63 @@ final class PhotoLibraryViewModel {
     func toggleSortOrder() {
         library.toggleSortOrder()
         preferences.sortNewestFirst = library.sortNewestFirst
+    }
+
+    // MARK: - Menu Commands
+    // The Photo menu acts as the keys and the toolbar do: on the photo in the detail view, or else the grid's
+    // selection (`deleteSelectionOrCurrent()` and the rest).
+
+    /// Whether the Photo menu has a photo to act on.
+    var hasCommandTarget: Bool {
+        showingDetail ? selectedDetailPhoto != nil : !selection.selectedPhotos.isEmpty
+    }
+
+    /// The photos the Photo menu acts on.
+    var commandTargets: [PhotoAsset] {
+        showingDetail ? (selectedDetailPhoto.map { [$0] } ?? []) : selection.selectedPhotosList
+    }
+
+    /// The one photo Edit acts on: the photo in the detail view, or the only selected photo.
+    var editTarget: PhotoAsset? {
+        if showingDetail { return selectedDetailPhoto }
+        return selection.selectedPhotos.count == 1 ? selection.primarySelectedPhoto : nil
+    }
+
+    /// Whether the session edits `photo`'s file of that kind.
+    func isEditing(_ photo: PhotoAsset, raw: Bool) -> Bool {
+        editSession.map { $0.photo.id == photo.id && $0.isRAW == raw } ?? false
+    }
+
+    /// The Photo menu's Edit: opens `editTarget` in the detail view and edits its RAW (`raw`, when it has one) or its
+    /// other file; while that edit is open, ends it, saved (as the detail view's edit buttons do).
+    func toggleEditing(raw: Bool) {
+        guard let photo = editTarget, (raw ? photo.rawPath : photo.jpgPath) != nil else { return }
+        if isEditing(photo, raw: raw) {
+            stopEditing(save: true)
+            return
+        }
+        if !showingDetail { openDetail(for: photo) }
+        startEditing(photo: photo, isRAW: raw)
+    }
+
+    /// The files Show in Finder selects: every file of the photos (a pair's two), from at most `folderLimit` folders,
+    /// as the Finder opens a window for each.
+    static func filesToShow(of photos: [PhotoAsset], folderLimit: Int = 10) -> [String] {
+        var folders = Set<String>()
+        var paths: [String] = []
+        for photo in photos {
+            for path in [photo.jpgPath, photo.rawPath].compactMap({ $0 }) {
+                let folder = (path as NSString).deletingLastPathComponent
+                guard folders.contains(folder) || folders.count < folderLimit else { continue }
+                folders.insert(folder)
+                paths.append(path)
+            }
+        }
+        return paths
+    }
+
+    func showCommandTargetsInFinder() {
+        ShowInFinder.reveal(Self.filesToShow(of: commandTargets))
     }
 
     // MARK: - Metadata Write Problems

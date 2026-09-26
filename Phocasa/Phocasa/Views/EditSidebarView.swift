@@ -9,6 +9,8 @@ struct EditSidebarView: View {
     @Bindable var viewModel: PhotoLibraryViewModel
     /// Revert clears the saved edit: asked first.
     @State private var confirmingRevert = false
+    /// The preset name field has focus: the Photo menu's shortcuts are off meanwhile (`isTypingInContent`).
+    @FocusState private var namingPreset: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -229,6 +231,10 @@ struct EditSidebarView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)
                     .controlSize(.small)
+                    .focused($namingPreset)
+                    .onSubmit { viewModel.savePreset() }
+                    .onChange(of: namingPreset, initial: true) { viewModel.isTypingInContent = namingPreset }
+                    .onDisappear { viewModel.isTypingInContent = false }
 
                 Button("Save") {
                     viewModel.savePreset()
