@@ -37,19 +37,24 @@ struct WriteChunkSizer {
     /// within a frame.
     let shortestChunk: Duration
     let rowTime: Duration
+    /// The rows' share of a chunk whose fixed part is long, as a fraction of that part: a half for what the user just
+    /// did (fewer, longer chunks: done sooner), less for a scan's inserts, which run while the owner browses.
+    let rowShare: Double
 
-    init(maximumRows: Int = 50_000, shortestChunk: Duration = .milliseconds(40), rowTime: Duration = .milliseconds(40)) {
+    init(maximumRows: Int = 50_000, shortestChunk: Duration = .milliseconds(40), rowTime: Duration = .milliseconds(40),
+         rowShare: Double = 0.5) {
         self.maximumRows = maximumRows
         self.shortestChunk = shortestChunk
         self.rowTime = rowTime
+        self.rowShare = rowShare
         rows = max(1, min(Self.firstRows, maximumRows))
     }
 
     /// What a chunk aims to take, for the fixed part measured.
     var target: Duration {
         let fixed = fixedCost ?? .zero
-        let wanted = max(shortestChunk, fixed + max(rowTime, fixed / 2))
-        return min(wanted, max(Self.longestChunk, fixed * 1.5))
+        let wanted = max(shortestChunk, fixed + max(rowTime, fixed * rowShare))
+        return min(wanted, max(Self.longestChunk, fixed * (1 + rowShare)))
     }
 
     /// Rows for a chunk of `target`, with the estimates so far (`fallback` before anything was timed).

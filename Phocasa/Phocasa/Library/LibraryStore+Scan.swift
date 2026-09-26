@@ -333,7 +333,9 @@ extension LibraryStore {
         var createdTags = false
         if !withKeywords.isEmpty {
             scanProgress = "Adding \(plan.newPhotos.count) new photos..."
-            var sizer = WriteChunkSizer(maximumRows: rowWrites.sizer.maximumRows) // starts small
+            // At 150,000 photos each insert chunk's save costs ~0.5 s whatever its size (every tag it links has its whole
+            // list diffed), so rows get a quarter of that on top: shorter blocks than the queue's, more of them.
+            var sizer = WriteChunkSizer(maximumRows: rowWrites.sizer.maximumRows, rowShare: 0.25)
             var start = 0
             while start < withKeywords.count {
                 let end = min(start + sizer.rows, withKeywords.count)
