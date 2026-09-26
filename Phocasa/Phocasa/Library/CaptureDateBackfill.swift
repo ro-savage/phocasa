@@ -7,8 +7,8 @@ import os
 /// 1. Off the main actor: find the rows with no capture date, and read their files, concurrently, at utility priority.
 /// 2. Off the main actor: plan the new order of every row (`LibrarySort.ranks(of:)`), from plain values.
 /// 3. On the main context, because a background context must never change a row the main context holds
-///    (CLAUDE.md): write the dates in chunks of about 12 ms each, saving each one and leaving the run loop as long again
-///    between them.
+///    (CLAUDE.md): write the dates in chunks sized by time (`WriteChunkSizer`: about 15 ms with 10k photos loaded,
+///    about 210 ms with 150,000), saving each one and leaving the run loop as long again between them.
 /// 4. On the main actor, once: put the library and the bin in the new order in memory (`LibrarySort.reorder`), with
 ///    no model reads and no reload.
 ///
@@ -125,12 +125,14 @@ extension LibraryStore {
         var didApplyChunk: ((Int) -> Void)?
     }
 
-    /// Main-actor time each write chunk aims at: chunks grow below 11 ms and shrink above 15 ms, so none takes much
-    /// more than a frame (about 16 ms). With 10k photos loaded, a main-context save costs about 7 ms however few rows
-    /// it writes (`setRating` pays it too), plus about 0.15 ms per row with its fetch, so chunks settle at about
-    /// 25–40 rows there, and at more in smaller libraries.
-    private static let captureDateChunkGrowBelow: Duration = .milliseconds(11)
-    private static let captureDateChunkShrinkAbove: Duration = .milliseconds(15)
+    /// The write chunks' sizer (`WriteChunkSizer`), with a target of about a frame where the library allows it: with
+    /// 10k photos loaded a main-context save costs about 7 ms however few rows it writes, plus about 0.15 ms per row
+    /// with its fetch, so chunks of about 15 ms take 50-odd rows. With 150,000 loaded the save alone costs ~140 ms:
+    /// chunks sized to a frame would shrink to a row a save (hours for a big backfill), so they take ~210 ms there.
+    private func captureDateChunkSizer() -> WriteChunkSizer {
+        WriteChunkSizer(maximumRows: captureDates.maxChunkRows, shortestChunk: .milliseconds(12),
+                        rowTime: .milliseconds(8))
+    }
 
     /// After launch (`PhotoLibraryViewModel.setModelContext`): once the launch rescan, and any scan queued behind it,
     /// is done, and `captureDates.startDelay` later, fills in the capture dates of photos stored without one
@@ -189,21 +191,17 @@ extension LibraryStore {
         let ranks = await CaptureDateBackfill.ranks(in: container, newDates: newDates)
         report.planTime = clock.now - phase
 
-        var chunkRows = min(32, captureDates.maxChunkRows)
+        var sizer = captureDateChunkSizer()
         var next = 0
         while next < found.count, let context = modelContext {
             let chunkStart = clock.now
-            let end = min(next + chunkRows, found.count)
+            let end = min(next + sizer.rows, found.count)
             report.datesWritten += applyCaptureDates(found[next..<end], in: context)
             let elapsed = clock.now - chunkStart
             report.chunkMainActorTimes.append(elapsed)
             captureDates.didApplyChunk?(report.chunkMainActorTimes.count - 1)
+            sizer.record(rows: end - next, took: elapsed)
             next = end
-            if elapsed < Self.captureDateChunkGrowBelow {
-                chunkRows = min(max(chunkRows * 5 / 4, chunkRows + 1), captureDates.maxChunkRows)
-            } else if elapsed > Self.captureDateChunkShrinkAbove {
-                chunkRows = max(chunkRows * 3 / 4, 1)
-            }
             // Sleep as long as the chunk took (not a yield): the run loop gets at least half the main actor to handle
             // events and draw while the backfill writes.
             if next < found.count { try? await Task.sleep(for: max(elapsed, .milliseconds(2))) }
