@@ -9,6 +9,10 @@ struct RatingView: View {
     /// A click on the current star clears the rating, but only once a double-click can no longer follow.
     @State private var pendingClear: Task<Void, Never>?
 
+    /// Filled stars: a dark gold on light backgrounds (the system yellow is 1.6:1 on white), the system yellow on dark
+    /// ones (the `RatingStar` asset). Empty stars are `.secondary`.
+    static let starColor = Color("RatingStar")
+
     init(rating: Int, compact: Bool = false, onRate: ((Int) -> Void)? = nil) {
         self.rating = rating
         self.compact = compact
@@ -20,10 +24,23 @@ struct RatingView: View {
             ForEach(1...5, id: \.self) { star in
                 Image(systemName: star <= rating ? "star.fill" : "star")
                     .font(compact ? .caption2 : .body)
-                    .foregroundStyle(star <= rating ? .yellow : .gray.opacity(0.5))
+                    .foregroundStyle(star <= rating ? AnyShapeStyle(Self.starColor) : AnyShapeStyle(.secondary))
                     .onTapGesture { tapped(star) }
             }
         }
+        // One element for VoiceOver, a slider: "Rating, 3 stars", adjusted a star at a time when it can be changed.
+        .accessibilityRepresentation {
+            Slider(value: Binding(get: { Double(rating) }, set: { onRate?(Int($0.rounded())) }), in: 0...5, step: 1) {
+                Text("Rating")
+            }
+            .accessibilityValue(Self.accessibilityValue(rating))
+            .disabled(onRate == nil)
+        }
+    }
+
+    /// "No rating", "1 star", "3 stars".
+    static func accessibilityValue(_ rating: Int) -> String {
+        rating == 0 ? "No rating" : rating.counted("star")
     }
 
     /// There is no double-click gesture to wait for, so a click on another star rates at once.

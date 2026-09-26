@@ -61,6 +61,7 @@ struct EditSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Crop & Rotate")
+                .accessibilityLabel("Crop and Rotate")
 
                 Button(action: {
                     // Turning it on turns the JPG comparison off.
@@ -71,6 +72,8 @@ struct EditSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Side-by-side comparison")
+                .accessibilityLabel("Side-by-Side Comparison")
+                .accessibilityAddTraits(session.showSideBySide ? .isSelected : [])
 
                 if session.isRAW && session.photo.hasRawPair {
                     Button(action: { session.toggleJPGComparison() }) {
@@ -80,6 +83,8 @@ struct EditSidebarView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(session.showJPGComparison ? .blue : .primary)
                     .help("Compare with JPG")
+                    .accessibilityLabel("Compare with JPG")
+                    .accessibilityAddTraits(session.showJPGComparison ? .isSelected : [])
                 }
 
                 if session.canExport {
@@ -89,6 +94,7 @@ struct EditSidebarView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Export")
+                    .accessibilityLabel("Export")
                 }
             }
 
@@ -263,6 +269,8 @@ struct EditSidebarView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
+                            .help("Delete the preset “\(preset.name)”")
+                            .accessibilityLabel("Delete Preset \(preset.name)")
                         }
                         .padding(.vertical, 3)
                         .padding(.horizontal, 6)
@@ -333,8 +341,13 @@ struct EditSlider: View {
                     .foregroundStyle(value == defaultValue ? .tertiary : .secondary)
                     .onTapGesture(count: 2) { value = defaultValue }
             }
+            // The slider is read out by its label and value; the row above is what it shows.
+            .accessibilityHidden(true)
 
-            Slider(value: $value, in: range) { EmptyView() }
+            Slider(value: $value, in: range) { Text(label) }
+                .labelsHidden()
+                .accessibilityValue(String(format: format, value))
+                .accessibilityAction(named: "Reset") { value = defaultValue }
                 .controlSize(.small)
                 .onTapGesture(count: 2) { value = defaultValue }
         }
