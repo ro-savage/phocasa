@@ -3,8 +3,9 @@ import Foundation
 
 // Changes to photos. Each patches the in-memory library at once (the facts, the counts, the grid) instead of reloading
 // it, and queues the rows' new values (`LibraryStore+RowWrites`: written in the same turn for a few photos, in chunks
-// sized by time for many), whose writes send the photos' rating and keywords to their files. None of them touches the
-// selection; the view model does that for the flows that act on it.
+// sized by time for many), whose writes send the photos' rating and keywords to their files. Rating and tag changes
+// register their undo here; the view model registers the bin's. None of them touches the selection; the view model
+// does that for the flows that act on it.
 extension LibraryStore {
     // MARK: - Rating
 
@@ -13,20 +14,32 @@ extension LibraryStore {
     }
 
     /// Rates `photos` (in grid order, as `SelectionModel.selectedPhotosList` gives them). Every photo's files get the
-    /// rating, even those that had it already.
+    /// rating, even those that had it already. Undo gives each photo the rating it had.
     func setRating(_ rating: Int, for photos: [PhotoAsset]) {
         setRatings(photos.map { ($0, rating) })
     }
 
-    /// Gives each photo its rating. The facts change in memory without reading the models.
-    func setRatings(_ ratings: [(photo: PhotoAsset, rating: Int)]) {
+    /// Gives each photo its rating (an undo gives each photo its own), and registers the undo, which gives back the
+    /// ratings the photos had. The facts change in memory without reading the models.
+    func setRatings(_ ratings: [(photo: PhotoAsset, rating: Int)], actionName: String = "Rating") {
         guard modelContext != nil, !ratings.isEmpty else { return }
-        let positions = positions(of: ratings.map(\.photo.id))
+        let ids = ratings.map(\.photo.id)
+        let positions = positions(of: ids)
+        var before: [(id: UUID, rating: Int)] = []
         var located: [(facts: PhotoFacts, position: ListPosition)] = []
+        var changes = false
+        before.reserveCapacity(ratings.count)
         located.reserveCapacity(ratings.count)
         for i in ratings.indices {
-            guard let position = positions[i] else { continue }
+            guard let position = positions[i] else {
+                let rating = rating(of: ratings[i].photo)
+                before.append((ids[i], rating))
+                changes = changes || rating != ratings[i].rating
+                continue
+            }
             var facts = facts(at: position)
+            before.append((ids[i], facts.rating))
+            changes = changes || facts.rating != ratings[i].rating
             facts.rating = ratings[i].rating
             located.append((facts, position))
         }
@@ -34,6 +47,16 @@ extension LibraryStore {
         applyFacts(located)
         refreshVisiblePhotos()
         writeQueuedRows(changedNow: ratings.map(\.photo))
+        guard changes else { return } // nothing to undo
+        registerUndo(actionName) { library in library.setRatings(ofPhotosWith: before, actionName: actionName) }
+    }
+
+    /// `setRatings` for loaded photos by id (undo and redo). Photos no longer loaded (deleted, missing) are skipped.
+    private func setRatings(ofPhotosWith ratings: [(id: UUID, rating: Int)], actionName: String) {
+        let positions = positions(of: ratings.map(\.id))
+        setRatings(zip(positions, ratings).compactMap { position, value in
+            position.map { (photo(at: $0), value.rating) }
+        }, actionName: actionName)
     }
 
     // MARK: - Tags
@@ -56,7 +79,7 @@ extension LibraryStore {
         addTag(name: name, category: category, to: [photo])
     }
 
-    /// Adds the tag to each of `photos` that doesn't have it yet.
+    /// Adds the tag to each of `photos` that doesn't have it yet. Undo takes it off those photos again.
     func addTag(name: String, category: String, to photos: [PhotoAsset]) {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
@@ -69,7 +92,7 @@ extension LibraryStore {
         removeTag(tag, from: [photo])
     }
 
-    /// Removes the tag from every one of `photos` that has it.
+    /// Removes the tag from every one of `photos` that has it. Undo gives it back to those photos.
     func removeTag(_ tag: Tag, from photos: [PhotoAsset]) {
         guard modelContext != nil else { return }
         setTag(tag, on: photos, to: false)
@@ -77,7 +100,8 @@ extension LibraryStore {
 
     /// Gives `tag` to (`has`), or takes it from, each of `photos` that has it the other way. The facts change in memory
     /// without reading the models (the counts, the grid and the search keys with them), and each changed photo's row
-    /// gains or loses the link. Only the photos that changed have their files written. Returns how many changed.
+    /// gains or loses the link. Only the photos that changed have their files written, and the undo acts on them.
+    /// Returns how many changed.
     @discardableResult
     private func setTag(_ tag: Tag, on photos: [PhotoAsset], to has: Bool) -> Int {
         guard !photos.isEmpty else { return 0 }
@@ -116,7 +140,19 @@ extension LibraryStore {
         refreshVisiblePhotos()
         sortTagCategories()
         writeQueuedRows(changedNow: changed.map(\.photo))
+        guard !changed.isEmpty else { return 0 }
+        let changedIDs = changed.map(\.id)
+        let tagID = tagFact.id
+        registerUndo(has ? "Add Tag “\(tag.name)”" : "Remove Tag “\(tag.name)”") { library in
+            library.setTag(withID: tagID, onPhotosWith: changedIDs, to: !has)
+        }
         return changed.count
+    }
+
+    /// `setTag` by the tag's id and the loaded photos' ids (undo and redo). Photos no longer loaded are skipped.
+    private func setTag(withID tagID: UUID, onPhotosWith ids: [UUID], to has: Bool) {
+        guard let tag = allTags.first(where: { tagFacts.facts(for: $0).id == tagID }) else { return }
+        setTag(tag, on: positions(of: ids).compactMap { $0.map(photo(at:)) }, to: has)
     }
 
     /// Every tag's facts by id (and `tag`'s, if the lists don't have it yet), for taking a tag out of photos' facts.
@@ -131,7 +167,8 @@ extension LibraryStore {
 
     // MARK: - Bin
 
-    /// Moves photos to the bin. Returns their ids.
+    /// Moves photos to the bin. Returns their ids. (The view model registers the undo: it also moves the detail view
+    /// off the photos.)
     @discardableResult
     func moveToBin(_ photosToMove: [PhotoAsset]) -> [UUID] {
         setInBin(photosToMove, true)
@@ -151,9 +188,18 @@ extension LibraryStore {
         return ids
     }
 
+    /// The loaded photos with `ids` in the bin (`inBin`) or the library, in `ids` order. Photos elsewhere or gone are
+    /// skipped.
+    func loadedPhotos(withIDs ids: [UUID], inBin: Bool) -> [PhotoAsset] {
+        positions(of: ids).compactMap { position in
+            guard let position, position.inBin == inBin else { return nil }
+            return photo(at: position)
+        }
+    }
+
     // MARK: - Saved Edits
 
-    /// Gives each photo its saved edits (presets, "Revert All Edits"): the rows through the write queue,
+    /// Gives each photo its saved edits (presets, their undo, "Revert All Edits"): the rows through the write queue,
     /// and for a photo with a RAW its sidecar's edit parameters (`rawParameters`; nil clears them) through
     /// `RAWEditStore`, whose reads see them at once.
     func setSavedEdits(_ changes: [(photo: PhotoAsset, edits: SavedEdits, rawParameters: EditParameters?)]) {
@@ -166,11 +212,26 @@ extension LibraryStore {
         queueRowChanges(changes.map { ($0.photo, RowChange(edits: $0.edits)) })
     }
 
+    // MARK: - Undo
+
+    /// Registers `undo` on the window's undo manager as one step, named for Edit › Undo ("Undo Rating"). Undoing runs
+    /// the opposite change through the same methods, which register the redo. Nothing without an undo manager.
+    func registerUndo(_ actionName: String, _ undo: @escaping @MainActor (LibraryStore) -> Void) {
+        guard let undoManager else { return }
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { library in
+            MainActor.assumeIsolated { undo(library) }
+        }
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
+    }
+
     // MARK: - Deleting Files
     // The files are moved to the Trash on `fileTrasher`, off the main actor (spec §G5); the store changes once they
     // are there, and only for the files that went (or were gone already): a file that couldn't be moved (locked,
     // read-only, a share without a Trash) or whose drive isn't connected keeps its photo as it was, and
     // `deleteProblem` says how many and why. A photo whose delete is still running can't be deleted again meanwhile.
+    // Neither kind of delete can be undone (both ask first): the files are in the Trash.
 
     /// Deletes one file type of each photo (with the RAW or JPG filter active): a pair loses that file, moved to the
     /// Trash; a photo with only one file, or both filters active, goes to the bin instead. A pair whose file can't be

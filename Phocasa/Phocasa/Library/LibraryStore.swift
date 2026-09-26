@@ -119,6 +119,9 @@ final class LibraryStore {
     /// Bumped whenever photos' facts change in place (`applyFacts`); with `gridVersion`, what values derived from the
     /// facts of the photos shown are cached against.
     @ObservationIgnored var factsVersion = 0
+    /// Where rating and tag changes register their undo: the window's (`ContentView`'s environment), through the view
+    /// model. None in most tests.
+    @ObservationIgnored weak var undoManager: UndoManager?
     /// What the last scan did. For tests and benchmarks.
     @ObservationIgnored var lastScanReport: ScanReport?
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted

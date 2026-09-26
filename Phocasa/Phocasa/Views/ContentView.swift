@@ -7,6 +7,9 @@ import UniformTypeIdentifiers
 /// the status bar are their own types, so selection changes don't re-evaluate this body.
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    /// The window's undo manager, handed to the view model: Edit › Undo and Redo (⌘Z, ⇧⌘Z) undo rating, tag, bin and
+    /// preset changes.
+    @Environment(\.undoManager) private var undoManager
     /// Owned by the app (`PhocasaApp`), not by the window, so a window that closes and opens again shows the same
     /// library.
     @Bindable private var viewModel: PhotoLibraryViewModel
@@ -94,7 +97,11 @@ struct ContentView: View {
             .focusedSceneValue(\.openFolderAction) { viewModel.openFolder() }
             .onAppear {
                 viewModel.setModelContext(modelContext)
+                viewModel.undoManager = undoManager
                 isContentFocused = true
+            }
+            .onChange(of: undoManager) { _, newValue in
+                viewModel.undoManager = newValue
             }
             .onKeyPress(phases: .down, action: handleKeyPress)
             .onKeyPress(.init("\\"), phases: .down) { _ in

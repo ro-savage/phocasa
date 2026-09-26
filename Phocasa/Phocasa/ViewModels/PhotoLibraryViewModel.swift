@@ -41,6 +41,13 @@ final class PhotoLibraryViewModel {
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
 
+    /// The window's undo manager, from `ContentView`'s environment (so Edit › Undo and Redo, ⌘Z and ⇧⌘Z, act on it).
+    /// Rating, tag, bin and preset changes register their undo there; the library gets it too, for the ratings and
+    /// tags. Permanent deletes, file-type deletes and exports can't be undone: they ask first, and their files are in
+    /// the Trash or rewritten.
+    @ObservationIgnored weak var undoManager: UndoManager? {
+        didSet { library.undoManager = undoManager }
+    }
     /// The context menu's checked tags for the selection (`contextMenuTagIDs`), and what they were worked out for.
     @ObservationIgnored private var selectionTags: (key: SelectionTagsKey, ids: Set<UUID>)?
     /// How often the selection's common tags were worked out, and how often a context menu asked for its checked tags.
@@ -313,14 +320,38 @@ final class PhotoLibraryViewModel {
         return Task { await library.deleteFileType(of: photosToRemove, raw: raw, jpg: jpg) }
     }
 
+    /// Undo restores the photos (those still in the bin).
     private func moveToBin(_ photosToMove: [PhotoAsset]) {
+        guard !photosToMove.isEmpty else { return }
         moveDetailOff(Set(photosToMove.map(\.id)), saveEdit: true)
-        selection.deselect(library.moveToBin(photosToMove))
+        let ids = library.moveToBin(photosToMove)
+        selection.deselect(ids)
+        registerUndo("Move to Bin") { viewModel in
+            viewModel.restoreFromBin(viewModel.library.loadedPhotos(withIDs: ids, inBin: true))
+        }
     }
 
+    /// Undo moves the photos back to the bin (those still in the library).
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) {
+        guard !photosToRestore.isEmpty else { return }
         moveDetailOff(Set(photosToRestore.map(\.id)), saveEdit: true)
-        selection.deselect(library.restoreFromBin(photosToRestore))
+        let ids = library.restoreFromBin(photosToRestore)
+        selection.deselect(ids)
+        registerUndo("Restore from Bin") { viewModel in
+            viewModel.moveToBin(viewModel.library.loadedPhotos(withIDs: ids, inBin: false))
+        }
+    }
+
+    /// Registers `undo` as one step named `actionName` on the window's undo manager (see `undoManager`); undoing runs
+    /// the opposite change, which registers the redo.
+    private func registerUndo(_ actionName: String, _ undo: @escaping @MainActor (PhotoLibraryViewModel) -> Void) {
+        guard let undoManager else { return }
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { viewModel in
+            MainActor.assumeIsolated { undo(viewModel) }
+        }
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
     }
 
     func restoreSelected() {
@@ -613,9 +644,11 @@ final class PhotoLibraryViewModel {
 
     /// Saves `preset`'s look as the edits of every selected photo, each keeping its own crop, rotation and flips: JPG
     /// edits in the model (through the library's write queue), RAW edits in the sidecar (through `MetadataWriter`).
+    /// Undo gives each photo back the edits it had, its sidecar's included.
     func applyPresetToSelection(_ preset: EditPreset) {
         let look = preset.parameters
         var changes: [(photo: PhotoAsset, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
+        var before: [(id: UUID, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
         for photo in selection.selectedPhotosList {
             let saved = library.savedEdits(of: photo)
             let rawPath = photo.rawPath
@@ -632,8 +665,35 @@ final class PhotoLibraryViewModel {
                 edits.hasRawEdits = true
             }
             changes.append((photo, edits, raw))
+            before.append((photo.id, saved, savedRAW))
+        }
+        guard !changes.isEmpty else { return }
+        library.setSavedEdits(changes)
+        let actionName = "Apply Preset “\(preset.name)”"
+        registerUndo(actionName) { viewModel in viewModel.restoreSavedEdits(before, actionName: actionName) }
+    }
+
+    /// Undo and redo of a preset: each loaded photo gets `edits` back (photos no longer loaded are skipped), and the
+    /// step that undoes this is registered. The edit session of one of them ends first, saved, as navigating away
+    /// would end it: the values put back then replace what it saved.
+    private func restoreSavedEdits(_ edits: [(id: UUID, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)],
+                                   actionName: String) {
+        let ids = Set(edits.map(\.id))
+        if let session = editSession, ids.contains(session.photo.id) { stopEditing(save: true) }
+        var changes: [(photo: PhotoAsset, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
+        var before: [(id: UUID, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
+        let positions = library.positions(of: edits.map(\.id))
+        for (position, value) in zip(positions, edits) {
+            guard let position else { continue }
+            let photo = library.photo(at: position)
+            let saved = library.savedEdits(of: photo)
+            let savedRAW = saved.hasRawEdits ? photo.rawPath.flatMap { RAWEditStore.shared.parameters(forRAWAt: $0) } : nil
+            changes.append((photo, value.edits, value.rawParameters))
+            before.append((value.id, saved, savedRAW))
         }
         library.setSavedEdits(changes)
+        settleDetailPhoto()
+        registerUndo(actionName) { viewModel in viewModel.restoreSavedEdits(before, actionName: actionName) }
     }
 }
 
