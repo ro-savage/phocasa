@@ -465,6 +465,17 @@ mode**. It was the first check to use it.
 
 ## Decisions for the user
 
+**Answered on 2026-09-26.** The work is handed over in `../post-wave-3-followup-prompt.md`.
+1. Recovering earlier exports: not asked for separately. The user's point was the same as 2: other apps must be able
+   to read the ratings.
+2. **Ratings and keywords go inside the files themselves**, only ever added: no original metadata erased or changed.
+   Sidecars stay for RAW files only. This replaces the sidecar fallback for unusual JPGs, PNG, TIFF and HEIC.
+3. Keep other apps' develop settings (`crs:`) in exported and baked JPGs, as today.
+4. Keep the MakerNote and its AF data after a crop, as today.
+- Also asked: RAW ratings stay in the `.xmp` sidecar next to the RAW (DNG included); the RAW file is never modified.
+
+The decisions as asked:
+
 1. **Recovering photos exported or baked in earlier builds** (their metadata is gone from those files). The
    options, and what each can restore, are in A, "Photos exported or baked in earlier builds". The code exists
    (`ExportMetadata`); it needs a command or a UI, and a list for you to confirm first.
