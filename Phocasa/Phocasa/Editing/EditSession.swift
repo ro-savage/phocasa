@@ -225,8 +225,9 @@ final class EditSession {
         parameters = jpgParameters
     }
 
+    /// The preset's look; the crop, rotation and flips stay this photo's.
     func apply(_ preset: EditPreset) {
-        parameters = preset.parameters
+        parameters = parameters.applyingLook(of: preset.parameters)
     }
 
     // MARK: - Rendering

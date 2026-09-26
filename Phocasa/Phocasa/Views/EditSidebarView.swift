@@ -7,6 +7,8 @@ struct EditSidebarView: View {
     @Bindable var session: EditSession
     /// Presets, which outlive a session.
     @Bindable var viewModel: PhotoLibraryViewModel
+    /// Revert clears the saved edit: asked first.
+    @State private var confirmingRevert = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -96,13 +98,19 @@ struct EditSidebarView: View {
                 .controlSize(.small)
                 .help("Reset all sliders to zero")
 
-                Button("Revert") {
-                    session.revert()
+                Button("Revert…") {
+                    confirmingRevert = true
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(.red)
                 .help("Revert and clear saved edits")
+                .confirmationDialog("Revert to the original?", isPresented: $confirmingRevert, titleVisibility: .visible) {
+                    Button("Revert", role: .destructive) { session.revert() }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This photo's saved \(session.isRAW ? "RAW" : "JPG") edit is cleared. The file itself doesn't change.")
+                }
 
                 if session.canCopyFromJPG {
                     Button("JPG Settings") {

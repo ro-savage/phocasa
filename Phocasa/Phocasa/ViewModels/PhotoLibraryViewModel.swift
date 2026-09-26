@@ -19,6 +19,8 @@ final class PhotoLibraryViewModel {
     var photosToDelete: [PhotoAsset] = []
     /// A delete with the RAW or JPG filter on, waiting for its confirmation: it moves files to the Trash.
     var pendingFileTypeDelete: FileTypeDelete?
+    /// Photos whose saved edits "Revert All Edits" clears once confirmed (`confirmRevertEdits()`); empty otherwise.
+    var photosToRevert: [PhotoAsset] = []
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
 
@@ -402,10 +404,31 @@ final class PhotoLibraryViewModel {
 
     /// Clears the photo's saved JPG and RAW edits. The sidecar write goes through `MetadataWriter`.
     func revertEditsForPhoto(_ photo: PhotoAsset) {
-        photo.jpgEditParametersData = nil
-        photo.hasRawEdits = false
-        if let rawPath = photo.rawPath {
-            RAWEditStore.shared.save(nil, forRAWAt: rawPath)
+        revertEdits(of: [photo])
+    }
+
+    /// The context menu's "Revert All Edits", asked first (`photosToRevert`, confirmed by `confirmRevertEdits()`): the
+    /// selected photos that have edits when `photo` is part of a multi-selection, else `photo`.
+    func requestRevertEdits(from photo: PhotoAsset) {
+        photosToRevert = selection.isPartOfMultiSelection(photo)
+            ? selection.selectedPhotosList.filter(\.hasAnyEdits) : [photo]
+    }
+
+    func confirmRevertEdits() {
+        let photos = photosToRevert
+        photosToRevert = []
+        revertEdits(of: photos)
+    }
+
+    /// Clears the photos' saved JPG and RAW edits, in one save. The sidecar writes go through `MetadataWriter`.
+    private func revertEdits(of photos: [PhotoAsset]) {
+        guard !photos.isEmpty else { return }
+        for photo in photos {
+            photo.jpgEditParametersData = nil
+            photo.hasRawEdits = false
+            if let rawPath = photo.rawPath {
+                RAWEditStore.shared.save(nil, forRAWAt: rawPath)
+            }
         }
         try? library.modelContext?.save()
     }
@@ -479,13 +502,14 @@ final class PhotoLibraryViewModel {
         editPresets = (try? context.fetch(descriptor)) ?? []
     }
 
-    /// Saves the session's current parameters (defaults when not editing) as a preset named `presetNameInput`.
+    /// Saves the session's current look (defaults when not editing) as a preset named `presetNameInput`. Not its crop,
+    /// rotation or flips (`EditParameters.look`): a preset applied to many photos must not crop or turn them.
     func savePreset() {
         guard let context = library.modelContext else { return }
         let name = presetNameInput.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
 
-        let preset = EditPreset(name: name, parameters: editSession?.parameters ?? EditParameters())
+        let preset = EditPreset(name: name, parameters: (editSession?.parameters ?? EditParameters()).look)
         context.insert(preset)
         try? context.save()
         presetNameInput = ""
@@ -502,17 +526,19 @@ final class PhotoLibraryViewModel {
         editSession?.apply(preset)
     }
 
-    /// Saves `preset` as the edits of every selected photo: JPG edits in the model, RAW edits in the sidecar
-    /// (through `MetadataWriter`).
+    /// Saves `preset`'s look as the edits of every selected photo, each keeping its own crop, rotation and flips: JPG
+    /// edits in the model, RAW edits in the sidecar (through `MetadataWriter`).
     func applyPresetToSelection(_ preset: EditPreset) {
         let params = preset.parameters
 
         for photo in selection.selectedPhotosList {
             if photo.jpgPath != nil {
-                photo.jpgEditParameters = params
+                photo.jpgEditParameters = (photo.jpgEditParameters ?? EditParameters()).applyingLook(of: params)
             }
             if let rawPath = photo.rawPath {
-                RAWEditStore.shared.save(params, forRAWAt: rawPath)
+                // The sidecar is read only for photos with RAW edits: only those can have a transform to keep.
+                let saved = photo.hasRawEdits ? RAWEditStore.shared.parameters(forRAWAt: rawPath) : nil
+                RAWEditStore.shared.save((saved ?? EditParameters()).applyingLook(of: params), forRAWAt: rawPath)
                 photo.hasRawEdits = true
             }
         }

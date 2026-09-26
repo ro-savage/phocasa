@@ -216,6 +216,35 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(photo.hasRawEdits)
     }
 
+    /// Bug test (REL-1 #6): "Revert All Edits" cleared the saved edits at once, and only the clicked photo's even on a
+    /// multi-selection. It asks first, with the count, and reverts every selected photo that has edits.
+    func testRevertAllEditsAsksFirstAndRevertsTheSelection() {
+        let photos = (0..<3).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        var params = EditParameters()
+        params.exposure = 1
+        photos[0].jpgEditParameters = params
+        photos[1].jpgEditParameters = params
+        try? context.save()
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+
+        viewModel.requestRevertEdits(from: photos[0])
+
+        XCTAssertEqual(Set(ids(viewModel.photosToRevert)), [photos[0].id, photos[1].id], "the selected photos with edits")
+        XCTAssertNotNil(photos[0].jpgEditParametersData, "nothing reverted before the confirmation")
+        viewModel.confirmRevertEdits()
+        XCTAssertTrue(viewModel.photosToRevert.isEmpty)
+        XCTAssertNil(photos[0].jpgEditParametersData)
+        XCTAssertNil(photos[1].jpgEditParametersData)
+
+        // Outside the selection: only the clicked photo.
+        photos[2].jpgEditParameters = params
+        photos[0].jpgEditParameters = params
+        viewModel.selection.select(only: photos[1].id)
+        viewModel.requestRevertEdits(from: photos[2])
+        XCTAssertEqual(ids(viewModel.photosToRevert), [photos[2].id])
+    }
+
     // MARK: - Smart Delete (File Type)
 
     /// ⌫ with the RAW or JPG filter on asks first (files go to the Trash); this confirms what it asked.
