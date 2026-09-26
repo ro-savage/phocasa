@@ -447,6 +447,13 @@ final class TIFFMetadataTests: XCTestCase {
         XCTAssertEqual(Self.xmpRating(meta), "\(rating)", "ImageIO reads the rating", file: file, line: line)
         XCTAssertEqual(Self.xmpSubject(meta), keywords, "ImageIO reads the keywords", file: file, line: line)
         let packetBefore = before.ifd0Value(700)?.data, packetAfter = after.ifd0Value(700)?.data
+        // Well-formed XML, padding included (ImageIO's parser also accepts junk after the root element; others don't).
+        if let packetAfter {
+            let parser = XMLParser(data: packetAfter)
+            parser.shouldResolveExternalEntities = false
+            XCTAssertTrue(parser.parse(), "the packet is well-formed XML: \(parser.parserError.map { "\($0)" } ?? "")",
+                          file: file, line: line)
+        }
         let xmpBefore = KeptMetadata.xmpValues(packetBefore), xmpAfter = KeptMetadata.xmpValues(packetAfter)
         for (path, value) in xmpBefore where !(path.hasPrefix("xmp:Rating") || path.hasPrefix("dc:subject")) {
             XCTAssertEqual(xmpAfter[path], value, "XMP \(path) must be kept", file: file, line: line)
@@ -513,7 +520,7 @@ final class TIFFMetadataTests: XCTestCase {
     func testAPacketThatFitsIsRewrittenInPlaceAndOnlyItsBytesAndTheIPTCChange() throws {
         for bigEndian in [false, true] {
             let original = RichTIFF.make(.init(bigEndian: bigEndian, xmp: RichTIFF.otherAppXMP(padding: 2048),
-                                               iptcSlack: 64, photoshopIPTCSlack: 64)).data
+                                               iptcSlack: 64, photoshopIPTCSlack: 48)).data
             let (url, output) = try writeThroughFile(original, rating: 3, keywords: ["new", "people:ann"])
 
             XCTAssertEqual(output.count, original.count, "nothing appended (\(bigEndian ? "MM" : "II"))")
@@ -602,7 +609,7 @@ final class TIFFMetadataTests: XCTestCase {
 
     func testAFileWithoutXMPGetsATag700InsertedInSortedOrder() throws {
         for bigEndian in [false, true] {
-            let original = RichTIFF.make(.init(bigEndian: bigEndian, xmp: nil, iptcSlack: 64, photoshopIPTCSlack: 64)).data
+            let original = RichTIFF.make(.init(bigEndian: bigEndian, xmp: nil, iptcSlack: 64, photoshopIPTCSlack: 48)).data
             XCTAssertEqual(Self.metadata(original).flatMap(Self.xmpRating), nil, "fixture: no XMP rating")
             let (url, output) = try writeThroughFile(original, rating: 4, keywords: ["new"])
 
@@ -665,6 +672,16 @@ final class TIFFMetadataTests: XCTestCase {
             XCTAssertEqual(output.count, original.count, "both fitted in place")
             assertKeeps(original: original, output: output, changeable: ranges(original, [700, 33723, 34377]),
                         rating: 2, keywords: ["a", "b", "c"])
+
+            // Both grow and are appended (33723 in whole LONGs): still identical.
+            let grownKeywords = (1...4).map { "grown keyword number \($0)" }
+            let grown = try XCTUnwrap(Self.written(original, rating: 2, keywords: grownKeywords))
+            let g = TIFFTestWalker(grown)!
+            XCTAssertGreaterThanOrEqual(g.ifd0Value(33723)!.range.lowerBound, original.count, "appended")
+            XCTAssertEqual(Self.resources(g.ifd0Value(34377)!.data).first { $0.id == 0x0404 }?.data, g.ifd0Value(33723)?.data,
+                           "the grown copies stay identical")
+            assertKeeps(original: original, output: grown, changeable: [Self.headerOffset] + ranges(original, [700]),
+                        rating: 2, keywords: grownKeywords)
         }
     }
 

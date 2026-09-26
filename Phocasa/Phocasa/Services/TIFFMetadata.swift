@@ -293,7 +293,7 @@ enum TIFFMetadata {
                 bytes = padded(packet, by: slack + (unpadded.count + slack) % 2)
                 change = .appended(type: xmpEntry?.type ?? 1)
             }
-            guard let bytes, xmpValues(bytes) == values else { throw Refusal.xmpNotUpdatable }
+            guard let bytes, isWellFormedXML(bytes), xmpValues(bytes) == values else { throw Refusal.xmpNotUpdatable }
             changes.append((xmpTag, change, bytes))
         }
 
@@ -486,6 +486,14 @@ enum TIFFMetadata {
     /// Every value in `packet`, or nil if ImageIO can't parse it.
     private static func xmpValues(_ packet: Data) -> [String: String]? {
         CGImageMetadataCreateFromXMPData(packet as CFData).map(XMPProperties.values)
+    }
+
+    /// Whether `packet` is well-formed XML. ImageIO's parser also accepts junk after the root element; other readers
+    /// don't, so the padded packet is checked on its own.
+    private static func isWellFormedXML(_ packet: Data) -> Bool {
+        let parser = XMLParser(data: packet)
+        parser.shouldResolveExternalEntities = false
+        return parser.parse()
     }
 
     /// `packet` in an XMP packet wrapper with `padding` bytes of whitespace before its trailer: the XMP
