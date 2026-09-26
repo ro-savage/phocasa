@@ -6,20 +6,33 @@ struct LibraryToolbar: ToolbarContent {
     let viewModel: PhotoLibraryViewModel
 
     var body: some ToolbarContent {
+        // A way back from the detail view you can see (Esc and Space close it too).
+        if viewModel.showingDetail {
+            ToolbarItem(placement: .navigation) {
+                Button(action: { viewModel.closeDetail() }) {
+                    Label("Library", systemImage: "chevron.left")
+                        .labelStyle(.titleAndIcon)
+                }
+                .help("Back to the library (Esc)")
+            }
+        }
+
         ToolbarItemGroup(placement: .primaryAction) {
             Button(action: { viewModel.openFolder() }) {
                 Label("Open Folder", systemImage: "folder.badge.plus")
             }
+            .help("Open a folder of photos (⌘O)")
 
-            if viewModel.library.currentLibrary != nil {
+            if !viewModel.library.libraryFolders.isEmpty {
                 Button(action: { viewModel.library.rescanCurrentLibrary() }) {
                     Label("Rescan", systemImage: "arrow.clockwise")
                 }
+                .help("Rescan every library folder (⌘R)")
             }
         }
 
         ToolbarItemGroup(placement: .automatic) {
-            Button(action: { viewModel.library.toggleSortOrder() }) {
+            Button(action: { viewModel.toggleSortOrder() }) {
                 Label(
                     viewModel.library.sortNewestFirst ? "Newest First" : "Oldest First",
                     systemImage: viewModel.library.sortNewestFirst ? "arrow.down" : "arrow.up"
@@ -30,13 +43,19 @@ struct LibraryToolbar: ToolbarContent {
             HStack(spacing: 4) {
                 Image(systemName: "minus.magnifyingglass")
                     .font(.caption)
+                    .accessibilityHidden(true)
                 Slider(value: Binding(
                     get: { Double(22 - viewModel.gridColumns) },
                     set: { viewModel.gridColumns = 22 - Int($0) }
-                ), in: 2...20, step: 1)
+                ), in: 2...20, step: 1) {
+                    Text("Thumbnail Size")
+                }
+                .labelsHidden()
                 .frame(width: 120)
+                .help("Thumbnail size (⌘+ and ⌘−)")
                 Image(systemName: "plus.magnifyingglass")
                     .font(.caption)
+                    .accessibilityHidden(true)
             }
         }
 

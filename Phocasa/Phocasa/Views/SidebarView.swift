@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct SidebarView: View {
-    let library: LibraryStore
+    let viewModel: PhotoLibraryViewModel
+
+    private var library: LibraryStore { viewModel.library }
 
     var body: some View {
         List {
@@ -36,10 +38,12 @@ struct SidebarView: View {
                             ForEach(0..<stars, id: \.self) { _ in
                                 Image(systemName: "star.fill")
                                     .font(.caption)
-                                    .foregroundStyle(.yellow)
+                                    .foregroundStyle(RatingView.starColor)
                             }
                             Spacer()
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(RatingView.accessibilityValue(stars))
                     }
                 }
             }
@@ -77,6 +81,8 @@ struct SidebarView: View {
                 }
             }
 
+            LibraryFoldersSection(viewModel: viewModel)
+
             Section {
                 sidebarRow(filter: .bin, badge: library.binCount) {
                     Label("Bin", systemImage: "trash")
@@ -84,6 +90,19 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // "Remove from Library…" (a library folder's context menu) takes its photos out of the library: asked first.
+        .confirmationDialog(
+            viewModel.pendingFolderRemoval?.title ?? "",
+            isPresented: Binding(get: { viewModel.pendingFolderRemoval != nil },
+                                 set: { if !$0 { viewModel.pendingFolderRemoval = nil } }),
+            titleVisibility: .visible,
+            presenting: viewModel.pendingFolderRemoval
+        ) { request in
+            Button("Remove from Library", role: .destructive) { viewModel.confirmFolderRemoval(request) }
+            Button("Cancel", role: .cancel) {}
+        } message: { request in
+            Text(request.message)
+        }
     }
 
     private func isFilterActive(_ filter: SidebarFilter) -> Bool {
@@ -136,7 +155,8 @@ private struct SidebarRowButton<Content: View>: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .badge(badge)
+        // Grouped for the locale ("12,345"); none for 0, as `badge(Int)` does.
+        .badge(badge == 0 ? nil : Text(badge.formatted()))
         .listRowBackground(Color.accentColor.opacity(backgroundOpacity))
         .onHover { hovering in
             isHovered = hovering

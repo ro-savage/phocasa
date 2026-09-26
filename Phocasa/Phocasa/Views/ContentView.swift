@@ -28,6 +28,8 @@ struct ContentView: View {
             .focusable()
             .focused($isContentFocused)
             .focusEffectDisabled()
+            // The Photo menu's target while the content has focus, not the search field (outside it) or a sheet.
+            .focusedValue(\.photoCommands, viewModel)
             .toolbar { LibraryToolbar(viewModel: viewModel) }
             .searchable(text: Bindable(viewModel.library).searchText, prompt: "Search by tag or filename")
             .searchSuggestions {
@@ -93,8 +95,12 @@ struct ContentView: View {
                     viewModel.library.handleFolderSelected(url: url)
                 }
             }
-            .overlay(alignment: .bottom) { StatusBarView(library: viewModel.library, selection: viewModel.selection) }
-            .focusedSceneValue(\.openFolderAction) { viewModel.openFolder() }
+            // In the window's bottom safe area, not over the content: an overlay covered the grid's last row, the
+            // sidebar's end, the detail view's rating panel and the crop controls.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                StatusBarView(library: viewModel.library, selection: viewModel.selection, viewModel: viewModel)
+            }
+            .focusedSceneValue(\.libraryWindow, viewModel)
             .onAppear {
                 viewModel.setModelContext(modelContext)
                 viewModel.undoManager = undoManager

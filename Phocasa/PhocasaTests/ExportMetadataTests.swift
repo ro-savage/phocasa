@@ -79,7 +79,9 @@ final class ExportMetadataTests: XCTestCase {
     private func exportToNewFile(_ viewModel: PhotoLibraryViewModel) async throws -> URL {
         viewModel.exportNotice = nil
         viewModel.exportToNewFile()
-        let notice = try await eventually(20, "the export finishes") { viewModel.exportNotice ?? viewModel.exportFailure }
+        let notice = try await eventually(20, "the export finishes") {
+            viewModel.exportNotice?.message ?? viewModel.exportFailure
+        }
         await MetadataWriter.shared.flush()
         XCTAssertNil(viewModel.exportFailure)
         return dir.appendingPathComponent(String(notice.dropFirst("Saved ".count)))

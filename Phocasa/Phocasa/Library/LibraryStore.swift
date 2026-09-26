@@ -11,6 +11,7 @@ import SwiftData
 /// - this file: the state, the grid (`photos`, `index(of:)`) and how it is kept current;
 /// - `LibraryStore+Loading`: launch (`open(_:)`), `loadExistingData()`, file availability;
 /// - `LibraryStore+Scan`: folder opening and scans;
+/// - `LibraryStore+Folders`: the library folders: where each is, and removing one;
 /// - `LibraryStore+Mutations`: rating, tags, bin, deletes, metadata write-back;
 /// - `LibraryStore+ListEditing`: moving photos between the library and the bin in memory;
 /// - `LibraryStore+Filtering`: filters, search, the sort toggle, the tag lists;
@@ -43,7 +44,14 @@ final class LibraryStore {
     var tagsByCategory: [String: [Tag]] = [:]
     /// Tags without a category, in `allTags` order.
     var uncategorizedTags: [Tag] = []
-    var currentLibrary: PhotoLibrary?
+    /// The library folders, a `PhotoLibrary` row each: every folder the owner opened (none inside another), sorted by
+    /// path. A rescan scans each in turn (`LibraryStore+Folders`).
+    var libraryFolders: [PhotoLibrary] = []
+    /// The first library folder, or nil when there is none: for code that asks whether the library has a folder.
+    var currentLibrary: PhotoLibrary? { libraryFolders.first }
+    /// Why each library folder that wasn't there at its last scan can't be scanned (its drive isn't connected, or it
+    /// was moved, renamed or deleted), by the folder's id. The sidebar marks those folders.
+    var folderIssues: [UUID: ScanIssue] = [:]
     var isScanning: Bool = false
     var scanProgress: String = ""
     /// Files being moved to the Trash by deletes still running, when there are more than
@@ -56,8 +64,8 @@ final class LibraryStore {
     /// one has. The library shown is the one before it (empty at launch), and the grid says the library couldn't be
     /// read rather than that there are no photos.
     var libraryReadFailure: String?
-    /// Why the last scan stopped or didn't run (the store couldn't be read or saved, or the library's folder isn't
-    /// there); nil after a scan that went through.
+    /// Why the last scan stopped or didn't run (the store couldn't be read or saved, or its library folder isn't
+    /// there); after a scan that went through, the first library folder that isn't there (`folderIssues`), if any.
     var scanIssue: ScanIssue?
 
     /// The problem the status bar shows once no scan is running, if any.

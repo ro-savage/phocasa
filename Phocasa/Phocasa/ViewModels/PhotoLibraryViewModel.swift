@@ -10,8 +10,13 @@ import SwiftData
 final class PhotoLibraryViewModel {
     let library: LibraryStore
     let selection: SelectionModel
+    /// The sort order and the zoom, remembered across launches.
+    let preferences: ViewPreferences
 
-    var gridColumns: Int = 6
+    /// The grid's zoom, within `ViewPreferences.columnRange`, remembered across launches.
+    var gridColumns: Int {
+        didSet { if gridColumns != oldValue { preferences.gridColumns = gridColumns } }
+    }
     var selectedDetailPhoto: PhotoAsset?
     var showingDetail: Bool = false
     var showFolderPicker: Bool = false
@@ -23,6 +28,8 @@ final class PhotoLibraryViewModel {
     var photosToRevert: [PhotoAsset] = []
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
+    /// A library folder's "Remove from Library…" waiting for its confirmation (`requestFolderRemoval(_:)`).
+    var pendingFolderRemoval: FolderRemoval?
 
     // MARK: - Image Editing State
     /// The edit in progress: its photo, parameters, renders, comparison and crop state. Exists only while editing.
@@ -35,11 +42,14 @@ final class PhotoLibraryViewModel {
     private(set) var editedFilesVersion = 0
     /// Why the last export didn't happen, for the alert; nil when there is nothing to report.
     var exportFailure: String?
-    /// Where the last new-file export went ("Saved IMG_1234-raw-edit.jpg"), for the alert; nil when there is nothing
-    /// to report.
-    var exportNotice: String?
+    /// Where the last new-file export went, for the status bar ("Saved IMG_1234-raw-edit.jpg", Show in Finder); nil
+    /// when there is nothing to report. An alert for every export got in the way of exporting several.
+    var exportNotice: ExportNotice?
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
+    /// Whether a text field in the window's content (the preset name) is being typed in: the Photo menu's shortcuts
+    /// (⌘⌫ above all) are off meanwhile, so they don't act on photos instead of the text.
+    var isTypingInContent = false
 
     /// The window's undo manager, from `ContentView`'s environment (so Edit › Undo and Redo, ⌘Z and ⇧⌘Z, act on it).
     /// Rating, tag, bin and preset changes register their undo there; the library gets it too, for the ratings and
@@ -61,19 +71,25 @@ final class PhotoLibraryViewModel {
         let grid: Int
     }
 
-    init() {
+    /// `preferences` are this launch's (`ViewPreferences.forLaunch()`): in memory, fresh for each view model, in the
+    /// test host.
+    init(preferences: ViewPreferences = .forLaunch()) {
         let library = LibraryStore()
         self.library = library
         self.selection = SelectionModel(library: library)
+        self.preferences = preferences
+        self.gridColumns = preferences.gridColumns
     }
 
     /// Launch. `library.open` shows the stored library and starts the launch rescan; work that should start after
-    /// launch goes after it here (`await library.waitForScans()` waits for that rescan).
+    /// launch goes after it here (`await library.waitForScans()` waits for that rescan). The library opens in the sort
+    /// order the owner last chose.
     ///
     /// A no-op for the context the library already has: the app owns this view model, so a window that closes and
     /// opens again appears with it, and must not load and rescan the library a second time.
     func setModelContext(_ context: ModelContext) {
         guard library.modelContext !== context else { return }
+        if library.modelContext == nil { library.sort.newestFirst = preferences.sortNewestFirst }
         library.open(context)
         library.backfillCaptureDatesAfterScans()
         loadPresets()
@@ -112,6 +128,34 @@ final class PhotoLibraryViewModel {
 
     func openFolder() {
         showFolderPicker = true
+    }
+
+    // MARK: - Library Folders
+
+    /// Asks for "Remove from Library…" to be confirmed, with how many photos would leave (counted off the main actor
+    /// first). Not while a scan runs (`LibraryStore.canRemoveLibraryFolders`).
+    func requestFolderRemoval(_ folder: PhotoLibrary) {
+        guard library.canRemoveLibraryFolders else { return }
+        let name = (folder.rootFolderPath as NSString).lastPathComponent
+        let path = folder.rootFolderPath
+        Task {
+            let count = await library.photoCount(inFolder: folder)
+            guard library.canRemoveLibraryFolders, library.libraryFolders.contains(where: { $0 === folder }) else { return }
+            pendingFolderRemoval = FolderRemoval(folder: folder, name: name, path: path, photoCount: count)
+        }
+    }
+
+    /// "Remove from Library…", confirmed: the folder's photos leave the library (their files stay as they are). The
+    /// detail view closes first if it shows one of them, and the selection loses them.
+    @discardableResult
+    func confirmFolderRemoval(_ request: FolderRemoval) -> Task<Void, Never>? {
+        pendingFolderRemoval = nil
+        // Before the models go: the detail view must not go on showing (or saving an edit of) a removed photo.
+        if showingDetail, let photo = selectedDetailPhoto, request.contains(photo) {
+            closeDetail()
+        }
+        guard let removal = library.removeLibraryFolder(request.folder) else { return nil }
+        return Task { selection.deselect(await removal.value) }
     }
 
     // MARK: - Rating and Tagging the Selection
@@ -414,12 +458,21 @@ final class PhotoLibraryViewModel {
     /// tagged or binned out of the filter while on screen) is where it was (`LibraryStore.gridPlace(of:)`): next is
     /// the photo after its place, previous the one before it.
     func navigateDetail(direction: Int) {
-        guard let current = selectedDetailPhoto else { return }
-        let photos = library.photos
+        guard let newIndex = detailIndex(direction: direction) else { return }
+        showInDetail(library.photos[newIndex])
+    }
+
+    /// Whether `navigateDetail(direction:)` has a photo to go to: false at either end (the chevrons are disabled).
+    func canNavigateDetail(direction: Int) -> Bool {
+        detailIndex(direction: direction) != nil
+    }
+
+    /// Where `navigateDetail(direction:)` goes in the grid, or nil past either end.
+    private func detailIndex(direction: Int) -> Int? {
+        guard let current = selectedDetailPhoto else { return nil }
         let place = library.gridPlace(of: current)
         let newIndex = place.index + direction - (!place.isShown && direction > 0 ? 1 : 0)
-        guard photos.indices.contains(newIndex) else { return }
-        showInDetail(photos[newIndex])
+        return library.photos.indices.contains(newIndex) ? newIndex : nil
     }
 
     /// Shows `photo` in the detail view. The session is ended first, saved unless `saveEdit` is false, and editing
@@ -448,17 +501,103 @@ final class PhotoLibraryViewModel {
         selectedDetailPhoto = nil
     }
 
-    // MARK: - Zoom
+    // MARK: - Zoom and Sort
+
+    var canZoomIn: Bool { !showingDetail && gridColumns > ViewPreferences.columnRange.lowerBound }
+    var canZoomOut: Bool { !showingDetail && gridColumns < ViewPreferences.columnRange.upperBound }
 
     func zoomIn() {
-        if gridColumns > 2 {
+        if gridColumns > ViewPreferences.columnRange.lowerBound {
             gridColumns -= 1
         }
     }
 
     func zoomOut() {
-        if gridColumns < 20 {
+        if gridColumns < ViewPreferences.columnRange.upperBound {
             gridColumns += 1
+        }
+    }
+
+    /// Newest first or oldest first (`LibraryStore.toggleSortOrder()`), remembered for the next launch.
+    func toggleSortOrder() {
+        library.toggleSortOrder()
+        preferences.sortNewestFirst = library.sortNewestFirst
+    }
+
+    // MARK: - Menu Commands
+    // The Photo menu acts as the keys and the toolbar do: on the photo in the detail view, or else the grid's
+    // selection (`deleteSelectionOrCurrent()` and the rest).
+
+    /// Whether the Photo menu has a photo to act on.
+    var hasCommandTarget: Bool {
+        showingDetail ? selectedDetailPhoto != nil : !selection.selectedPhotos.isEmpty
+    }
+
+    /// The photos the Photo menu acts on.
+    var commandTargets: [PhotoAsset] {
+        showingDetail ? (selectedDetailPhoto.map { [$0] } ?? []) : selection.selectedPhotosList
+    }
+
+    /// The one photo Edit acts on: the photo in the detail view, or the only selected photo.
+    var editTarget: PhotoAsset? {
+        if showingDetail { return selectedDetailPhoto }
+        return selection.selectedPhotos.count == 1 ? selection.primarySelectedPhoto : nil
+    }
+
+    /// Whether the session edits `photo`'s file of that kind.
+    func isEditing(_ photo: PhotoAsset, raw: Bool) -> Bool {
+        editSession.map { $0.photo.id == photo.id && $0.isRAW == raw } ?? false
+    }
+
+    /// The Photo menu's Edit: opens `editTarget` in the detail view and edits its RAW (`raw`, when it has one) or its
+    /// other file; while that edit is open, ends it, saved (as the detail view's edit buttons do).
+    func toggleEditing(raw: Bool) {
+        guard let photo = editTarget, (raw ? photo.rawPath : photo.jpgPath) != nil else { return }
+        if isEditing(photo, raw: raw) {
+            stopEditing(save: true)
+            return
+        }
+        if !showingDetail { openDetail(for: photo) }
+        startEditing(photo: photo, isRAW: raw)
+    }
+
+    /// The files Show in Finder selects: every file of the photos (a pair's two), from at most `folderLimit` folders,
+    /// as the Finder opens a window for each.
+    static func filesToShow(of photos: [PhotoAsset], folderLimit: Int = 10) -> [String] {
+        var folders = Set<String>()
+        var paths: [String] = []
+        for photo in photos {
+            for path in [photo.jpgPath, photo.rawPath].compactMap({ $0 }) {
+                let folder = (path as NSString).deletingLastPathComponent
+                guard folders.contains(folder) || folders.count < folderLimit else { continue }
+                folders.insert(folder)
+                paths.append(path)
+            }
+        }
+        return paths
+    }
+
+    func showCommandTargetsInFinder() {
+        ShowInFinder.reveal(Self.filesToShow(of: commandTargets))
+    }
+
+    // MARK: - Metadata Write Problems
+
+    /// The status bar's Retry: writes the problems' files again. Ratings and keywords go with the photo's current
+    /// values (a newer rating made since wins); a RAW edit with the edit that didn't reach the sidecar, unless a newer
+    /// one is waiting. A problem whose photo is no longer in the library or the bin has nothing to write: it's
+    /// dismissed. Writes kept in a sidecar aren't retried (they'd go there again). Returns the task that hands the
+    /// writer the edits and the dismissals, for tests.
+    @discardableResult
+    func retryWrites(_ problems: [MetadataWriteProblem], writer: MetadataWriter = .shared) -> Task<Void, Never> {
+        let retrying = problems.filter { $0.issue != .keptInSidecar }
+        let photos = library.photos(withFilesAt: Set(retrying.map(\.path)))
+        library.rewriteMetadata(of: retrying.filter { $0.kind == .ratingAndKeywords }.compactMap { photos[$0.path] })
+        let gone = retrying.filter { photos[$0.path] == nil }.map(\.key)
+        let edits = retrying.filter { $0.kind == .editParameters && photos[$0.path] != nil }
+        return Task {
+            await writer.dismissProblems(gone)
+            await writer.retry(editsOf: edits)
         }
     }
     // MARK: - Image Editing
@@ -541,7 +680,7 @@ final class PhotoLibraryViewModel {
                 return
             }
             library.addExportedPhoto(at: url, copying: source)
-            exportNotice = "Saved \(url.lastPathComponent)"
+            exportNotice = ExportNotice(url: url)
         }
     }
 
@@ -690,6 +829,16 @@ final class PhotoLibraryViewModel {
         settleDetailPhoto()
         registerUndo(actionName) { viewModel in viewModel.restoreSavedEdits(before, actionName: actionName) }
     }
+}
+
+/// A new-file export that went through, for the status bar: where it went.
+struct ExportNotice: Equatable, Identifiable {
+    let id = UUID()
+    let url: URL
+
+    var message: String { "Saved \(url.lastPathComponent)" }
+    /// How long the status bar shows it.
+    static let duration: Duration = .seconds(8)
 }
 
 /// A delete with the RAW or JPG sidebar filter on, as its confirmation shows it: each pair's file of that type (a RAW

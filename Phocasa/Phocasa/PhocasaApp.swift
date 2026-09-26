@@ -1,20 +1,8 @@
 import SwiftUI
 import SwiftData
 
-private struct OpenFolderActionKey: FocusedValueKey {
-    typealias Value = () -> Void
-}
-
-extension FocusedValues {
-    var openFolderAction: (() -> Void)? {
-        get { self[OpenFolderActionKey.self] }
-        set { self[OpenFolderActionKey.self] = newValue }
-    }
-}
-
 @main
 struct PhocasaApp: App {
-    @FocusedValue(\.openFolderAction) var openFolder
     /// Quit waits for pending metadata writes (see `AppDelegate`).
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -47,14 +35,6 @@ struct PhocasaApp: App {
                 LibraryUnavailableView(problem: problem)
             }
         }
-        .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Open Folder...") {
-                    openFolder?()
-                }
-                .keyboardShortcut("o", modifiers: .command)
-                .disabled(openFolder == nil)
-            }
-        }
+        .commands { LibraryCommands() }
     }
 }

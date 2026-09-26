@@ -259,7 +259,9 @@ final class MetadataSidecarUpdateTests: XCTestCase {
         """
         let raw = try makeRAW("PREFIX.ARW", sidecar: xmp)
 
-        XCTAssertEqual(service.updateSidecar(of: raw, .init(editParameters: .set(EditParameters(exposure: 1)))), .failed)
+        guard case .failed = service.updateSidecar(of: raw, .init(editParameters: .set(EditParameters(exposure: 1)))) else {
+            return XCTFail("a sidecar that binds Phocasa's namespace to another prefix can't take its values")
+        }
         XCTAssertEqual(try String(contentsOf: raw.xmpSidecarURL, encoding: .utf8), xmp)
         XCTAssertEqual(try listing(), ["PREFIX.ARW", "PREFIX.xmp"])
 

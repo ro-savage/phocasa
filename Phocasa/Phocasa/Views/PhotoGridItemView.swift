@@ -15,6 +15,8 @@ struct PhotoGridItemView: View {
     var library: LibraryStore?
 
     @State private var thumbnail: NSImage?
+    /// The path whose thumbnail couldn't be made (the file can't be decoded): the cell says so.
+    @State private var unreadablePath: String?
 
     private var rating: Int { library?.rating(of: photo) ?? photo.rating }
     private var hasAnyEdits: Bool { library?.hasAnyEdits(of: photo) ?? photo.hasAnyEdits }
@@ -82,6 +84,8 @@ struct PhotoGridItemView: View {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
+                } else if path.isEmpty || unreadablePath == path {
+                    UnreadableFileView(compact: true)
                 } else {
                     Rectangle()
                         .fill(.quaternary)
@@ -127,6 +131,10 @@ struct PhotoGridItemView: View {
         Self.thumbnailLoadsStarted += 1
         if let img = await ImageLoader.shared.loadThumbnail(for: path, maxSize: CGFloat(thumbnailBucket)) {
             thumbnail = img
+            unreadablePath = nil
+        } else if !Task.isCancelled {
+            // Not cancelled (scrolled away, paused under the detail view): the file couldn't be decoded.
+            unreadablePath = path
         }
     }
 }
