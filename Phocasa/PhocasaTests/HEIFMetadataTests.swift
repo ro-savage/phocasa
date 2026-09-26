@@ -161,6 +161,10 @@ final class HEIFMetadataTests: XCTestCase {
 
         let id = try XCTUnwrap(TestHEIF(output)?.primaryXMP.first?.id)
         XCTAssertEqual(id, max(heif.items.map(\.id).max() ?? 0, group.id) + 1, "an ID no item or group has")
+
+        var withXMP = try model(original)
+        withXMP.addXMP(HEIFFixtures.otherAppXMP, id: max(withXMP.maxID, group.id) + 1)
+        assertWrites(withXMP.bytes(), .tail)  // the builder puts the new item's data last
     }
 
     /// A spatial photo: two images in a `ster` group, which has a property association of its own.
@@ -175,6 +179,10 @@ final class HEIFMetadataTests: XCTestCase {
         let id = try XCTUnwrap(TestHEIF(output)?.primaryXMP.first?.id)
         XCTAssertNotEqual(id, group.id)
         XCTAssertEqual(id, max(heif.items.map(\.id).max() ?? 0, group.id) + 1)
+
+        var withXMP = try model(original)
+        withXMP.addXMP(HEIFFixtures.otherAppXMP, id: max(withXMP.maxID, group.id) + 1)
+        assertWrites(withXMP.bytes(), .tail)  // the builder puts the new item's data last
     }
 
     /// AV1 in HEIF (ImageIO can't write HEVC's sibling AVC): the codec doesn't matter.
@@ -200,12 +208,15 @@ final class HEIFMetadataTests: XCTestCase {
         for original in [HEIFFixtures.heic(auxiliary: true), HEIFFixtures.heic(xmp: nil, auxiliary: true)] {
             var current = original
             var largestPacket = 0
+            var growths = 0
             let lists: [[String]] = [["a"], Self.manyKeywords, [], (0..<30).map { "keyword \($0)" }, ["b"], [], Self.manyKeywords]
             for (step, keywords) in lists.enumerated() {
                 let rating = step % 6
                 let written = try write(current, rating: rating, keywords: keywords).get()
                 HEIFProof.assertLossless(original: original, output: written.data, rating: rating, keywords: keywords)
-                if step > 0 { XCTAssertTrue([.inPlace, .tail].contains(written.change), "step \(step): \(written.change)") }
+                // The packet moves to the end of the file at most once; then it's replaced there.
+                if [.appended, .newItem].contains(written.change) { growths += 1 }
+                XCTAssertLessThanOrEqual(growths, 1, "step \(step): \(written.change)")
                 let after = try XCTUnwrap(TestHEIF(written.data))
                 let packet = try XCTUnwrap(after.data(of: after.primaryXMP[0].id)).count
                 largestPacket = max(largestPacket, packet)
@@ -306,8 +317,10 @@ final class HEIFMetadataTests: XCTestCase {
         let output = try XCTUnwrap(assertWrites(original, .inPlace))
 
         XCTAssertEqual(output.count, original.count, "the same size")
-        let changed = zip(original, output).enumerated().filter { $0.element.0 != $0.element.1 }.map(\.offset)
-        XCTAssertTrue(changed.allSatisfy(packet.contains), "only the packet's bytes change")
+        XCTAssertEqual(output.subdata(in: 0..<packet.lowerBound), original.subdata(in: 0..<packet.lowerBound),
+                       "every byte before the packet")
+        XCTAssertEqual(output.subdata(in: packet.upperBound..<output.count), original.subdata(in: packet.upperBound..<original.count),
+                       "every byte after it")
     }
 
     /// A packet at the end of the file is replaced there: the file doesn't grow by the old packet.
@@ -339,8 +352,11 @@ final class HEIFMetadataTests: XCTestCase {
         let original = HEIFFixtures.heic(width: 320, height: 240)
         XCTAssertEqual(refusal(original.dropLast(40)), .malformed, "truncated: an extent past the end")
         var oversized = original
-        oversized[oversized.startIndex + 3] = 0xFF  // ftyp's size runs past the file
+        oversized[oversized.startIndex] = 0x7F  // ftyp's size runs past the file
         XCTAssertEqual(refusal(oversized), .notHEIF)
+        var longFtyp = original
+        longFtyp[longFtyp.startIndex + 3] = 0xFF  // ftyp runs into meta
+        XCTAssertEqual(refusal(longFtyp), .malformed)
         var metaSize = original
         let meta = try XCTUnwrap(TestHEIF(original)?.meta)
         metaSize[meta.start + 3] &+= 1  // meta's children no longer fill it
