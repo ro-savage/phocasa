@@ -73,7 +73,13 @@ struct PhotoGridView: View {
         }
         .overlay {
             if viewModel.library.photos.isEmpty && !viewModel.library.isScanning {
-                if viewModel.library.viewingBin {
+                if let failure = viewModel.library.libraryReadFailure {
+                    ContentUnavailableView {
+                        Label("Couldn’t Read the Library", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(failure)
+                    }
+                } else if viewModel.library.viewingBin {
                     ContentUnavailableView {
                         Label("Bin is Empty", systemImage: "trash")
                     } description: {

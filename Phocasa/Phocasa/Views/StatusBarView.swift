@@ -44,6 +44,13 @@ struct StatusBarView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if !library.isScanning, let message = library.statusMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(message)
+            }
             Spacer()
         }
         .padding(.horizontal, 16)

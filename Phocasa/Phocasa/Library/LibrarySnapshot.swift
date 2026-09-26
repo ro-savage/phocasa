@@ -31,10 +31,10 @@ struct LibrarySnapshot: Sendable {
     private static let parallelParts = 2
 
     /// `read(from:sort:)` on a global queue.
-    static func readInBackground(from container: ModelContainer, sort: LibrarySort) async -> LibrarySnapshot {
-        await withCheckedContinuation { continuation in
+    static func readInBackground(from container: ModelContainer, sort: LibrarySort) async throws -> LibrarySnapshot {
+        try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: read(from: container, sort: sort))
+                continuation.resume(with: Result { try read(from: container, sort: sort) })
             }
         }
     }
@@ -51,32 +51,42 @@ struct LibrarySnapshot: Sendable {
     /// Reads the snapshot through new contexts on `container`, which only read. Don't call it on the main thread.
     /// The order (one ordered fetch per list, through `sort`) and the rows (`parallelParts` unordered ranges, which
     /// give the facts and the stored rows) are read in parallel, then put together.
-    static func read(from container: ModelContainer, sort: LibrarySort) -> LibrarySnapshot {
-        let rowCount = (try? ModelContext(container).fetchCount(FetchDescriptor<PhotoAsset>())) ?? 0
+    ///
+    /// Throws if any read fails: a snapshot with rows missing would show a library with photos missing, and the launch
+    /// rescan would take them for new photos and insert them again.
+    static func read(from container: ModelContainer, sort: LibrarySort) throws -> LibrarySnapshot {
+        let rowCount = try ModelContext(container).fetchCount(FetchDescriptor<PhotoAsset>())
+        guard rowCount != NSNotFound else { throw StoreReadError() }
         let parts = max(1, parallelParts)
         let partSize = max(1, (rowCount + parts - 1) / parts)
         let order = OSAllocatedUnfairLock<(library: [PersistentIdentifier], bin: [PersistentIdentifier])>(
             initialState: ([], []))
         let rows = OSAllocatedUnfairLock(initialState: [PersistentIdentifier: Row](minimumCapacity: rowCount))
+        let failure = OSAllocatedUnfairLock<(any Error)?>(initialState: nil)
         DispatchQueue.concurrentPerform(iterations: parts + 1) { part in
             let context = ModelContext(container)
-            if part == 0 {
-                let library = sort.fetch(where: #Predicate { !$0.isInBin }, in: context).map(\.persistentModelID)
-                let bin = sort.fetch(where: #Predicate { $0.isInBin }, in: context).map(\.persistentModelID)
-                order.withLock { $0 = (library, bin) }
-            } else {
-                var range = FetchDescriptor<PhotoAsset>()
-                range.fetchOffset = (part - 1) * partSize
-                range.fetchLimit = partSize
-                var tagFacts: [PersistentIdentifier: SnapshotTagFacts] = [:]
-                let read = ((try? context.fetch(range)) ?? []).map { photo in
-                    (photo.persistentModelID, readRow(of: photo, tagFacts: &tagFacts))
+            do {
+                if part == 0 {
+                    let library = try sort.fetch(where: #Predicate { !$0.isInBin }, in: context).map(\.persistentModelID)
+                    let bin = try sort.fetch(where: #Predicate { $0.isInBin }, in: context).map(\.persistentModelID)
+                    order.withLock { $0 = (library, bin) }
+                } else {
+                    var range = FetchDescriptor<PhotoAsset>()
+                    range.fetchOffset = (part - 1) * partSize
+                    range.fetchLimit = partSize
+                    var tagFacts: [PersistentIdentifier: SnapshotTagFacts] = [:]
+                    let read = try context.fetch(range).map { photo in
+                        (photo.persistentModelID, readRow(of: photo, tagFacts: &tagFacts))
+                    }
+                    rows.withLock { rows in
+                        for (id, row) in read { rows[id] = row }
+                    }
                 }
-                rows.withLock { rows in
-                    for (id, row) in read { rows[id] = row }
-                }
+            } catch {
+                failure.withLock { $0 = $0 ?? error }
             }
         }
+        if let error = failure.withLock({ $0 }) { throw error }
 
         let (libraryOrder, binOrder) = order.withLock { $0 }
         var byID = rows.withLock { $0 }

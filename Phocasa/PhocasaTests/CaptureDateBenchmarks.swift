@@ -185,7 +185,7 @@ final class CaptureDateBenchmarks: XCTestCase {
             let context = try XCTUnwrap(library.modelContext)
             var fetches: [Double] = []
             for _ in 0..<5 {
-                fetches.append(ms(clock.measure { _ = sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context) }))
+                fetches.append(ms(clock.measure { _ = try! sort.fetch(where: #Predicate<PhotoAsset> { _ in true }, in: context) }))
             }
             report(tag, "LibrarySort.fetch warm, \(label)", fetches)
         }

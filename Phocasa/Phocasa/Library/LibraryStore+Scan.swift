@@ -26,6 +26,24 @@ extension LibraryStore {
         var rows: (rows: [StoredPhoto], generation: Int)?
     }
 
+    /// Why a scan stopped, or didn't run (`LibraryStore.scanIssue`).
+    enum ScanIssue: Equatable {
+        /// The store couldn't be read (or the changes waiting in the context couldn't be saved first), so the scan
+        /// stopped before changing anything: a diff against rows it couldn't read would insert the library again.
+        case storeUnreadable(String)
+        /// The scan's changes couldn't be saved. They wait in the context, and a later save writes them.
+        case storeUnsaved(String)
+
+        var statusText: String {
+            switch self {
+            case .storeUnreadable(let reason):
+                "Scan stopped: Phocasa couldn’t read its library (\(reason)). Nothing was added or changed."
+            case .storeUnsaved(let reason):
+                "The scan’s changes couldn’t be saved (\(reason)). Rescan to try again."
+            }
+        }
+    }
+
     // MARK: - Folder Opening
 
     func handleFolderSelected(url: URL) {
@@ -84,6 +102,8 @@ extension LibraryStore {
         var missing = 0
         /// Whether the scan ended in a full `loadExistingData()`.
         var reloaded = false
+        /// Why the scan stopped early or didn't run, if it did.
+        var issue: ScanIssue?
         /// Whether the scan used the folder walk, and the stored rows, that the launch read ahead (`ReadAhead`).
         var usedWalkReadAhead = false
         var usedRowsReadAhead = false
@@ -151,9 +171,16 @@ extension LibraryStore {
         scanProgress = "Scanning folder..."
         let readAhead = scanning.readAhead?.url == url ? scanning.readAhead : nil
         scanning.readAhead = nil
-        // The stored rows are read through another context, which can't see unsaved changes.
+        // The stored rows are read through another context, which can't see unsaved changes: if they can't be saved
+        // (photos a scan inserted, say), the diff would find those photos new again.
         let hadChanges = context.hasChanges
-        if hadChanges { try? context.save() }
+        if hadChanges {
+            do {
+                try context.save()
+            } catch {
+                return scanDidStop(.storeUnreadable(error.localizedDescription), report: &report)
+            }
+        }
         let container = context.container
         let scanner = self.scanner
         // What the library shows now, which the end of the scan patches.
@@ -169,7 +196,13 @@ extension LibraryStore {
         // Off the main actor: the store and the file system are read at the same time (or were read ahead).
         async let storedRows = Self.storedRows(readAhead: rowsReadAhead, in: container)
         async let foundPhotos = Self.walk(url, readAhead: readAhead?.walk, with: scanner)
-        let stored = await storedRows
+        let stored: [StoredPhoto]
+        do {
+            stored = try await storedRows
+        } catch {
+            _ = await foundPhotos
+            return scanDidStop(.storeUnreadable(error.localizedDescription), report: &report)
+        }
         let discovered = await foundPhotos
         var plan = await ScanPlan.make(stored: stored, discovered: discovered, previouslyMissing: previouslyMissing,
                                        root: url.path)
@@ -217,12 +250,19 @@ extension LibraryStore {
                     sectionStart = clock.now
                 }
                 let end = min(start + Self.scanInsertChunkSize, withKeywords.count)
-                let inserted = insertScannedPhotos(withKeywords[start..<end], into: context)
+                let inserted: (photos: [PhotoAsset], createdTags: Bool)
+                do {
+                    inserted = try insertScannedPhotos(withKeywords[start..<end], into: context)
+                } catch {
+                    // Without the tags, each keyword would get a new tag. The rest wait for the next scan.
+                    report.issue = .storeUnreadable(error.localizedDescription)
+                    break
+                }
                 insertedHere += inserted.photos
                 createdTags = createdTags || inserted.createdTags
                 start = end
             }
-            report.inserted += withKeywords.count
+            report.inserted += insertedHere.count
         }
 
         // What the scan found is available; see `ScanPlan.missingIDs` for what it didn't find.
@@ -231,7 +271,14 @@ extension LibraryStore {
 
         scanWillSave?(context)
         currentLibrary?.lastScanDate = Date()
-        if context.hasChanges { try? context.save() }
+        if context.hasChanges {
+            do {
+                try context.save()
+            } catch {
+                // What it changed waits in the context (and shows in memory); the next scan saves it before it reads.
+                report.issue = report.issue ?? .storeUnsaved(error.localizedDescription)
+            }
+        }
 
         // Patch the in-memory library with what changed. An unchanged rescan changes nothing.
         let fetchIDs = insertedInBackground + plan.foundAgainIDs
@@ -248,8 +295,9 @@ extension LibraryStore {
                 ?? []
             start += chunk.count
         }
-        if loading.generation != generation {
-            // A full load ran during the scan and may already hold some of the new photos: load again, don't patch.
+        if loading.generation != generation || libraryReadFailure != nil {
+            // A full load ran during the scan and may already hold some of the new photos, or the last one failed and
+            // memory doesn't hold the library: load again, don't patch.
             loadExistingData()
             report.reloaded = true
         } else {
@@ -266,7 +314,16 @@ extension LibraryStore {
         }
 
         scanProgress = "Found \(plan.discoveredCount) photos (\(report.inserted) new)"
+        scanIssue = report.issue
         report.mainActorTime += clock.now - sectionStart
+        lastScanReport = report
+    }
+
+    /// A scan that stops before it changes anything: the status bar says why until a scan goes through.
+    private func scanDidStop(_ issue: ScanIssue, report: inout ScanReport) {
+        report.issue = issue
+        scanIssue = issue
+        scanProgress = issue.statusText
         lastScanReport = report
     }
 
@@ -274,11 +331,11 @@ extension LibraryStore {
     /// each (measured, 10k library), so a big import never holds the main actor for long.
     private static let scanFetchChunkSize = 500
 
-    private nonisolated static func storedRows(readAhead: [StoredPhoto]?, in container: ModelContainer) async
+    private nonisolated static func storedRows(readAhead: [StoredPhoto]?, in container: ModelContainer) async throws
         -> [StoredPhoto]
     {
         if let readAhead { return readAhead }
-        return await StoredPhoto.fetchAll(in: container)
+        return try await StoredPhoto.fetchAll(in: container)
     }
 
     private nonisolated static func walk(_ url: URL, readAhead: Task<[DiscoveredPhoto], Never>?,
@@ -319,8 +376,8 @@ extension LibraryStore {
 
     /// Inserts new photos with the rating and keywords read from their files. Tags are looked up in one
     /// dictionary built from a single fetch (no fetch per keyword; spec §B2), and created when missing. Returns the
-    /// photos inserted, and whether any tag was created.
-    private func insertScannedPhotos(_ newPhotos: ArraySlice<DiscoveredPhoto>, into context: ModelContext)
+    /// photos inserted, and whether any tag was created. Throws, inserting nothing, if the tags can't be read.
+    private func insertScannedPhotos(_ newPhotos: ArraySlice<DiscoveredPhoto>, into context: ModelContext) throws
         -> (photos: [PhotoAsset], createdTags: Bool)
     {
         var inserted: [PhotoAsset] = []
@@ -328,7 +385,7 @@ extension LibraryStore {
         // Fetched per chunk: a tag may have been added between chunks (from the tag editor, say).
         var tagsByKey: [TagKey: Tag] = [:]
         if newPhotos.contains(where: { !($0.metadata?.keywords.isEmpty ?? true) }) {
-            let tags = (try? context.fetch(FetchDescriptor<Tag>())) ?? []
+            let tags = try context.fetch(FetchDescriptor<Tag>())
             tagsByKey = Dictionary(tags.map { (TagKey(category: $0.category, name: $0.name), $0) },
                                    uniquingKeysWith: { first, _ in first })
         }

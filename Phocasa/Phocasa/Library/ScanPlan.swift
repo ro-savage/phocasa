@@ -13,24 +13,33 @@ struct StoredPhoto: Sendable, Equatable {
     let isInBin: Bool
 }
 
+/// A read of the store that gave no usable answer without throwing: `fetchCount` of a store it can't read answers
+/// `NSNotFound`.
+struct StoreReadError: LocalizedError {
+    var errorDescription: String? { "The library’s database couldn’t be read." }
+}
+
 extension StoredPhoto {
     /// Every photo row in the store (binned ones and ones whose files are missing included), read through a
     /// new context on `container`, off the main thread. It only reads: all writes go through the view
     /// model's context. That context's unsaved changes aren't visible here, so save it first.
-    static func fetchAll(in container: ModelContainer) async -> [StoredPhoto] {
-        await withCheckedContinuation { continuation in
+    ///
+    /// Throws if the store can't be read: a scan's diff against no rows would find every photo new and insert the
+    /// whole library again.
+    static func fetchAll(in container: ModelContainer) async throws -> [StoredPhoto] {
+        try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: fetchAllNow(in: container))
+                continuation.resume(with: Result { try fetchAllNow(in: container) })
             }
         }
     }
 
     /// Synchronous `fetchAll(in:)`, for the calling thread. Don't call it on the main thread.
-    static func fetchAllNow(in container: ModelContainer) -> [StoredPhoto] {
+    static func fetchAllNow(in container: ModelContainer) throws -> [StoredPhoto] {
         let context = ModelContext(container)
-        let binned = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))) ?? []
+        let binned = try context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { $0.isInBin }))
         let binnedIDs = Set(binned.map(\.id))
-        let photos = (try? context.fetch(FetchDescriptor<PhotoAsset>())) ?? []
+        let photos = try context.fetch(FetchDescriptor<PhotoAsset>())
         var rows: [StoredPhoto] = []
         rows.reserveCapacity(photos.count)
         for photo in photos {

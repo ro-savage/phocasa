@@ -774,8 +774,8 @@ final class ScanTests: XCTestCase {
             library.sort = LibrarySort(newestFirst: newestFirst)
             library.loadExistingData()
             let sort = library.sort
-            let snapshot = await Task.detached { LibrarySnapshot.read(from: container, sort: sort) }.value
-            let stored = await StoredPhoto.fetchAll(in: container)
+            let snapshot = try await Task.detached { try LibrarySnapshot.read(from: container, sort: sort) }.value
+            let stored = try await StoredPhoto.fetchAll(in: container)
 
             XCTAssertEqual(snapshot.library.ids, library.allPhotos.map(\.persistentModelID))
             XCTAssertEqual(snapshot.bin.ids, library.binPhotos.map(\.persistentModelID))
@@ -1000,6 +1000,113 @@ final class ScanTests: XCTestCase {
         assertMatchesFreshLoad(vm, "a file-type delete with the RAW filter on")
         vm.library.applyFilter(.all)
         assertMatchesFreshLoad(vm, "then all photos")
+    }
+
+    // MARK: - A store that can't be read
+
+    /// Moves the store's files aside and puts garbage at its path, so every read and save through the open container
+    /// fails as a damaged store's would (Core Data opens the file again for each request: code 259, and `fetchCount`
+    /// answers `NSNotFound`). Returns a function that puts the files back, after which the container works again.
+    private func breakStore(_ container: ModelContainer) throws -> () throws -> Void {
+        let storeURL = try XCTUnwrap(container.configurations.first?.url)
+        let folder = storeURL.deletingLastPathComponent()
+        let aside = try makeTempDir("aside")
+        let fm = FileManager.default
+        let names = try fm.contentsOfDirectory(atPath: folder.path)
+        for name in names {
+            try fm.moveItem(at: folder.appendingPathComponent(name), to: aside.appendingPathComponent(name))
+        }
+        try Data("not a store".utf8).write(to: storeURL)
+        return {
+            // Whatever was made meanwhile (the garbage file, an external-data folder) goes.
+            for name in try fm.contentsOfDirectory(atPath: folder.path) {
+                try fm.removeItem(at: folder.appendingPathComponent(name))
+            }
+            for name in names {
+                try fm.moveItem(at: aside.appendingPathComponent(name), to: folder.appendingPathComponent(name))
+            }
+        }
+    }
+
+    func testStoreReadsOfABrokenStoreThrowRatherThanReturnNothing() async throws {
+        let (_, storeURL) = try await importedLibrary()
+        let container = try makeContainer(storeURL: storeURL)
+        XCTAssertEqual(try StoredPhoto.fetchAllNow(in: container).count, 7)
+        let restore = try breakStore(container)
+        defer { try? restore() }
+
+        XCTAssertThrowsError(try StoredPhoto.fetchAllNow(in: container))
+        XCTAssertThrowsError(try LibrarySnapshot.read(from: container, sort: LibrarySort()))
+        XCTAssertThrowsError(try LibrarySort().fetch(where: #Predicate { !$0.isInBin }, in: ModelContext(container)))
+    }
+
+    /// A scan whose read of the stored rows fails stops before it inserts anything, and says so. (It used to take the
+    /// failed read for an empty library, find every photo new, and insert the whole library a second time once the
+    /// store could be written again.)
+    func testScanWhoseStoreReadFailsAddsNothing() async throws {
+        let photos = try makeTempDir("photos")
+        try makeJPEG("a.jpg", in: photos, keywords: ["k:a"])
+        let (vm, context, container) = try await openLibrary(at: photos)
+        try makeJPEG("b.jpg", in: photos, keywords: ["k:b"])
+        try makeJPEG("c.jpg", in: photos)
+        let restore = try breakStore(container)
+
+        try await rescan(vm)
+
+        guard case .storeUnreadable? = vm.library.scanIssue else {
+            return XCTFail("scanIssue: \(String(describing: vm.library.scanIssue))")
+        }
+        XCTAssertEqual(vm.library.lastScanReport?.inserted, 0)
+        XCTAssertFalse(context.hasChanges, "nothing waits in the context to be saved later")
+        XCTAssertEqual(vm.library.allFacts.count, 1) // plain values: no model read while the store is broken
+        XCTAssertTrue(vm.library.statusMessage?.contains("Nothing was added or changed") == true,
+                      String(describing: vm.library.statusMessage))
+
+        try restore()
+        try await rescan(vm)
+
+        XCTAssertNil(vm.library.scanIssue)
+        XCTAssertEqual(try storedPhotos(container).map(\.fileName).sorted(), ["a", "b", "c"], "no duplicates")
+        XCTAssertEqual(try storedTags(container).count, 2)
+    }
+
+    /// A relaunch whose store can't be read doesn't show an empty library ("Open a folder to get started"): it says the
+    /// library couldn't be read, and its launch leaves nothing in the context to be saved later. (Before, the
+    /// big-library path trapped on `fetchCount`'s `NSNotFound`.) A relaunch on the repaired store isn't checked here:
+    /// SQLite won't reopen files moved under a live connection.
+    func testLaunchWhoseStoreCannotBeReadSaysSoAndInsertsNothing() async throws {
+        for big in [false, true] {
+            let (_, storeURL) = try await importedLibrary()
+            let container = try makeContainer(storeURL: storeURL)
+            let restore = try breakStore(container)
+            defer { try? restore() }
+            let vm = PhotoLibraryViewModel()
+            vm.library.loading.backgroundLoadThreshold = big ? 0 : .max
+            vm.setModelContext(container.mainContext)
+            await vm.library.waitForScans()
+
+            XCTAssertNotNil(vm.library.libraryReadFailure, "big: \(big)")
+            XCTAssertTrue(vm.library.statusMessage?.contains("couldn’t read its library") == true, "big: \(big)")
+            XCTAssertTrue(vm.library.allPhotos.isEmpty)
+            XCTAssertFalse(container.mainContext.hasChanges, "big: \(big)")
+        }
+    }
+
+    /// A full load that fails keeps the library it showed, rather than an empty one.
+    func testFailedReloadKeepsTheLibraryShown() async throws {
+        let photos = try makeTempDir("photos")
+        try makeJPEG("a.jpg", in: photos)
+        try makeJPEG("b.jpg", in: photos)
+        let (vm, _, container) = try await openLibrary(at: photos)
+        let restore = try breakStore(container)
+        defer { try? restore() }
+
+        let shown = vm.library.allFacts.map(\.id)
+        vm.library.refreshAvailability()
+
+        XCTAssertEqual(vm.library.allFacts.map(\.id), shown)
+        XCTAssertEqual(vm.library.allPhotos.count, 2)
+        XCTAssertNotNil(vm.library.libraryReadFailure)
     }
 
     // MARK: - Scan plan (pure)

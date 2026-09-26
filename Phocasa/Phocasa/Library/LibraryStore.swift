@@ -48,6 +48,18 @@ final class LibraryStore {
     /// The last delete that left photos as they were because files couldn't be moved to the Trash, for the alert; nil
     /// once dismissed.
     var deleteProblem: DeleteProblem?
+    /// Why the last full load (`loadExistingData()` or the launch's background load) couldn't read the store; nil once
+    /// one has. The library shown is the one before it (empty at launch), and the grid says the library couldn't be
+    /// read rather than that there are no photos.
+    var libraryReadFailure: String?
+    /// Why the last scan stopped or didn't run (the store couldn't be read or saved, or the library's folder isn't
+    /// there); nil after a scan that went through.
+    var scanIssue: ScanIssue?
+
+    /// The problem the status bar shows once no scan is running, if any.
+    var statusMessage: String? {
+        libraryReadFailure ?? scanIssue?.statusText
+    }
 
     // Sidebar counts, for the active filters (published by `publishCounts()`).
     private(set) var ratingCounts: [Int: Int] = [:]

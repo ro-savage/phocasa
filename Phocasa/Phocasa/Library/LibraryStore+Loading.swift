@@ -61,13 +61,26 @@ extension LibraryStore {
 
     /// The one place (besides scans and the launch's background load) that reads photos and tags from the store.
     /// Everything else works on the in-memory state this builds.
+    ///
+    /// If the store can't be read, the library shown stays as it was and `libraryReadFailure` says why: a failed read
+    /// isn't an empty library.
     func loadExistingData() {
         guard let context = modelContext else { return }
 
-        let tags = fetchTags(in: context)
+        let tags: [Tag]
+        let fetchedPhotos: [PhotoAsset]
+        let fetchedBin: [PhotoAsset]
+        let photoLibrary: PhotoLibrary?
+        do {
+            tags = try fetchTags(in: context)
+            fetchedPhotos = try sort.fetch(where: #Predicate { !$0.isInBin }, in: context)
+            fetchedBin = try sort.fetch(where: #Predicate { $0.isInBin }, in: context)
+            photoLibrary = try context.fetch(FetchDescriptor<PhotoLibrary>()).first
+        } catch {
+            libraryReadDidFail(error)
+            return
+        }
         tagFacts = TagFactsCache(tags: tags)
-
-        let fetchedPhotos = sort.fetch(where: #Predicate { !$0.isInBin }, in: context)
 
         if loading.needsAvailabilityCheck {
             checkFileAvailability(for: fetchedPhotos)
@@ -75,10 +88,15 @@ extension LibraryStore {
 
         showLibrary(fetchedPhotos, facts: makeFacts(for: fetchedPhotos))
 
-        binPhotos = sort.fetch(where: #Predicate { $0.isInBin }, in: context)
+        binPhotos = fetchedBin
         binFacts = makeFacts(for: binPhotos)
 
-        finishLoad(tags: tags, in: context)
+        finishLoad(tags: tags, library: photoLibrary)
+    }
+
+    private func libraryReadDidFail(_ error: any Error) {
+        libraryReadFailure = "Phocasa couldn’t read its library (\(error.localizedDescription)). Your photos and "
+            + "their files haven’t been changed. Quit Phocasa and open it again."
     }
 
     /// `loadExistingData()` for a big library at launch, without blocking the main actor (spec §B1).
@@ -128,18 +146,36 @@ extension LibraryStore {
             page.fetchOffset = rows.count
             page.fetchLimit = pageSize
             page.includePendingChanges = false
+            // A page that fails ends the paging; the snapshot's read then fails too, and the load isn't applied.
             let fetched = (try? context.fetch(page)) ?? []
             rows += fetched
             loaded = await nextTurn()
             if fetched.count < pageSize { break }
         }
         var tags: [Tag] = []
+        var photoLibrary: PhotoLibrary?
+        var readError: (any Error)?
         if loaded {
-            tags = fetchTags(in: context) // ~9 ms, so a turn of its own
+            do {
+                tags = try fetchTags(in: context) // ~9 ms, so a turn of its own
+                photoLibrary = try context.fetch(FetchDescriptor<PhotoLibrary>()).first
+            } catch {
+                readError = error
+            }
             loaded = await nextTurn()
         }
-        let snapshot = await snapshotRead
+        let snapshot: LibrarySnapshot
+        do {
+            snapshot = try await snapshotRead
+        } catch {
+            readError = readError ?? error
+            snapshot = LibrarySnapshot(sort: sort)
+        }
         guard loaded && loading.generation == generation && modelContext === context else { return }
+        if let readError {
+            libraryReadDidFail(readError) // the library stays as it is: empty, at launch
+            return
+        }
         turnStart = clock.now
 
         // The models in the snapshot's order, with their facts.
@@ -177,7 +213,7 @@ extension LibraryStore {
         binPhotos = bin.photos
         binFacts = bin.facts
         let complete = missingPhotoIDs.isEmpty && library.facts.count == snapshot.library.facts.count
-        finishLoad(tags: tags, counts: complete ? snapshot.libraryCounts : nil, in: context)
+        finishLoad(tags: tags, counts: complete ? snapshot.libraryCounts : nil, library: photoLibrary)
         scanning.readAhead?.rows = (snapshot.storedRows, loading.generation)
         report.applied = true
         endTurn()
@@ -189,8 +225,8 @@ extension LibraryStore {
     /// `context.model(for:)` lookups per main-actor turn in `loadInBackground`: about 1 µs each for a registered row.
     private static let modelLookupsPerTurn = 5_000
 
-    private func fetchTags(in context: ModelContext) -> [Tag] {
-        (try? context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))) ?? []
+    private func fetchTags(in context: ModelContext) throws -> [Tag] {
+        try context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))
     }
 
     /// The library photos a load found, less those whose files were missing at the last scan.
@@ -206,8 +242,9 @@ extension LibraryStore {
     }
 
     /// The end of every full load, once the library and the bin are in place: counts (`counts`, when the caller has
-    /// them for `allFacts` already), tag lists, the grid.
-    private func finishLoad(tags: [Tag], counts: FacetCounts? = nil, in context: ModelContext) {
+    /// them for `allFacts` already), tag lists, the grid, and `library`, the `PhotoLibrary` it read.
+    private func finishLoad(tags: [Tag], counts: FacetCounts? = nil, library: PhotoLibrary?) {
+        libraryReadFailure = nil
         loading.generation += 1
         libraryVersion += 1
         binVersion += 1
@@ -216,9 +253,7 @@ extension LibraryStore {
         setTagLists(tags)
         refreshVisiblePhotos()
         sortTagCategories()
-
-        let libDescriptor = FetchDescriptor<PhotoLibrary>()
-        currentLibrary = (try? context.fetch(libDescriptor))?.first
+        currentLibrary = library
     }
 
     func makeFacts(for photos: [PhotoAsset]) -> [PhotoFacts] {
