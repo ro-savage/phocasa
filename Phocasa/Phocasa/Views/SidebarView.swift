@@ -38,10 +38,12 @@ struct SidebarView: View {
                             ForEach(0..<stars, id: \.self) { _ in
                                 Image(systemName: "star.fill")
                                     .font(.caption)
-                                    .foregroundStyle(.yellow)
+                                    .foregroundStyle(RatingView.starColor)
                             }
                             Spacer()
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(RatingView.accessibilityValue(stars))
                     }
                 }
             }
@@ -153,7 +155,8 @@ private struct SidebarRowButton<Content: View>: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .badge(badge)
+        // Grouped for the locale ("12,345"); none for 0, as `badge(Int)` does.
+        .badge(badge == 0 ? nil : Text(badge.formatted()))
         .listRowBackground(Color.accentColor.opacity(backgroundOpacity))
         .onHover { hovering in
             isHovered = hovering

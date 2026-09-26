@@ -12,6 +12,8 @@ struct PhotoGridItemView: View {
     var thumbnailsPaused = false
 
     @State private var thumbnail: NSImage?
+    /// The path whose thumbnail couldn't be made (the file can't be decoded): the cell says so.
+    @State private var unreadablePath: String?
 
     /// Identity of the thumbnail load. A window resize that stays within one bucket keeps the same identity,
     /// so it never restarts the load. Pausing cancels the load, and resuming starts it again.
@@ -76,6 +78,8 @@ struct PhotoGridItemView: View {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
+                } else if path.isEmpty || unreadablePath == path {
+                    UnreadableFileView(compact: true)
                 } else {
                     Rectangle()
                         .fill(.quaternary)
@@ -121,6 +125,10 @@ struct PhotoGridItemView: View {
         Self.thumbnailLoadsStarted += 1
         if let img = await ImageLoader.shared.loadThumbnail(for: path, maxSize: CGFloat(thumbnailBucket)) {
             thumbnail = img
+            unreadablePath = nil
+        } else if !Task.isCancelled {
+            // Not cancelled (scrolled away, paused under the detail view): the file couldn't be decoded.
+            unreadablePath = path
         }
     }
 }

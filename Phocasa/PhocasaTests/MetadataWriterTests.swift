@@ -60,19 +60,27 @@ final class RecordingMetadataService: MetadataWriting, @unchecked Sendable {
         semaphore.wait(timeout: .now() + timeout) == .success
     }
 
-    func writeMetadata(rating: Int, keywords: [String], toImageAt path: String) {
+    /// What the writes to each path say they did; `.writtenIntoFile` for a path not listed.
+    private var outcomes: [String: MetadataWriteOutcome] = [:]
+
+    /// Makes the writes to `path` report `outcome` from now on.
+    func setOutcome(_ outcome: MetadataWriteOutcome, for path: String) {
+        locked { outcomes[path] = outcome }
+    }
+
+    func writeMetadata(rating: Int, keywords: [String], toImageAt path: String) -> MetadataWriteOutcome {
         record(.metadata(path: path, rating: rating, keywords: keywords))
     }
 
-    func writeEditParameters(_ params: EditParameters, forRAWAt path: String) {
+    func writeEditParameters(_ params: EditParameters, forRAWAt path: String) -> MetadataWriteOutcome {
         record(.editParameters(path: path, exposure: params.exposure))
     }
 
-    func clearEditParameters(forRAWAt path: String) {
+    func clearEditParameters(forRAWAt path: String) -> MetadataWriteOutcome {
         record(.clearEdits(path: path))
     }
 
-    private func record(_ call: Call) {
+    private func record(_ call: Call) -> MetadataWriteOutcome {
         let hold: DispatchSemaphore? = locked {
             recorded.append(call)
             active += 1
@@ -83,9 +91,10 @@ final class RecordingMetadataService: MetadataWriting, @unchecked Sendable {
         started.signal()
         hold?.wait()
         if writeDuration > 0 { Thread.sleep(forTimeInterval: writeDuration) }
-        locked {
+        return locked {
             active -= 1
             finished += 1
+            return outcomes[call.path] ?? .writtenIntoFile
         }
     }
 }

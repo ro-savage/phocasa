@@ -9,6 +9,10 @@ struct RatingView: View {
     /// A click on the current star clears the rating, but only once a double-click can no longer follow.
     @State private var pendingClear: Task<Void, Never>?
 
+    /// Filled stars: a dark gold on light backgrounds (the system yellow is 1.6:1 on white), the system yellow on dark
+    /// ones (the `RatingStar` asset). Empty stars are `.secondary`.
+    static let starColor = Color("RatingStar")
+
     init(rating: Int, compact: Bool = false, onRate: ((Int) -> Void)? = nil) {
         self.rating = rating
         self.compact = compact
@@ -16,14 +20,36 @@ struct RatingView: View {
     }
 
     var body: some View {
-        HStack(spacing: compact ? 1 : 4) {
+        let stars = HStack(spacing: compact ? 1 : 4) {
             ForEach(1...5, id: \.self) { star in
                 Image(systemName: star <= rating ? "star.fill" : "star")
                     .font(compact ? .caption2 : .body)
-                    .foregroundStyle(star <= rating ? .yellow : .gray.opacity(0.5))
+                    .foregroundStyle(star <= rating ? AnyShapeStyle(Self.starColor) : AnyShapeStyle(.secondary))
                     .onTapGesture { tapped(star) }
             }
         }
+        // One element for VoiceOver: a slider, "Rating, 3 stars", adjusted a star at a time; read-only without onRate.
+        if let onRate {
+            stars.accessibilityRepresentation {
+                Slider(value: Binding(get: { Double(rating) }, set: { onRate(Int($0.rounded())) }), in: 0...5, step: 1) {
+                    Text("Rating")
+                }
+                .accessibilityValue(Self.accessibilityValue(rating))
+            }
+        } else {
+            stars
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Rating")
+                .accessibilityValue(Self.accessibilityValue(rating))
+        }
+    }
+
+    /// "No rating", "1 star" … "5 stars", worked out once: every grid cell has a rating.
+    private static let spokenValues = (0...5).map { $0 == 0 ? "No rating" : $0.counted("star") }
+
+    /// "No rating", "1 star", "3 stars".
+    static func accessibilityValue(_ rating: Int) -> String {
+        spokenValues[min(max(rating, 0), 5)]
     }
 
     /// There is no double-click gesture to wait for, so a click on another star rates at once.

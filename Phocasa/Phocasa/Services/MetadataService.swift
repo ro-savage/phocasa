@@ -162,15 +162,18 @@ final class MetadataService: Sendable {
 
     /// Writes the rating and keywords back to the file: into a JPEG itself when that keeps everything else in it,
     /// otherwise into the `.xmp` sidecar (RAW files, other formats, JPEGs the splice can't handle). A sidecar is
-    /// updated in place: saved RAW edit parameters and everything other apps wrote there are kept.
-    func writeMetadata(rating: Int, keywords: [String], toImageAt path: String) {
+    /// updated in place: saved RAW edit parameters and everything other apps wrote there are kept. Returns where they
+    /// went, or why they didn't (`MetadataWriter` reports the problems).
+    @discardableResult
+    func writeMetadata(rating: Int, keywords: [String], toImageAt path: String) -> MetadataWriteOutcome {
         let url = URL(fileURLWithPath: path)
         let ext = url.pathExtension.lowercased()
 
         if FolderScanner.rawExtensions.contains(ext) {
-            updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords))
+            return updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords))
+                .outcome(written: .writtenToSidecar)
         } else {
-            writeToImageFile(rating: rating, keywords: keywords, at: url)
+            return writeToImageFile(rating: rating, keywords: keywords, at: url)
         }
     }
 
@@ -188,36 +191,45 @@ final class MetadataService: Sendable {
     /// - The last resort, a file that can't take the values without losing something, keeps its bytes, and they go to
     ///   its sidecar, marked `phocasa:OverridesEmbedded` so they win on reading.
     /// - Read-only files, and files ImageIO doesn't read as an image, are left alone.
-    private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
+    private func writeToImageFile(rating: Int, keywords: [String], at url: URL) -> MetadataWriteOutcome {
         let fm = FileManager.default
         let target = url.resolvingSymlinksInPath()
-        guard fm.isWritableFile(atPath: target.path) else { return }
+        guard fm.isWritableFile(atPath: target.path) else {
+            return fm.fileExists(atPath: target.path) ? .skippedReadOnly : .skippedUnreadable
+        }
         // Something that isn't an image (empty, damaged) has no metadata to keep or to write into; it's left alone.
         guard let original = try? Data(contentsOf: target, options: .mappedIfSafe),
               let source = CGImageSourceCreateWithData(original as CFData, nil),
-              CGImageSourceGetType(source) != nil, CGImageSourceGetCount(source) > 0 else { return }
+              CGImageSourceGetType(source) != nil, CGImageSourceGetCount(source) > 0 else { return .skippedUnreadable }
         let values = SidecarUpdate(rating: rating, keywords: keywords)
         guard let bytes = Self.fileWritingRatingAndKeywords(original, rating: rating, keywords: keywords) else {
-            updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: true))
-            return
+            return updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: true))
+                .outcome(written: .keptInSidecar)
         }
 
         let sidecar = sidecarState(url)
         if sidecar == .overridesFile {
             // Leaving sidecar mode: the sidecar takes the new values first, still overriding the file, so they win
             // whether or not the file write below succeeds.
-            guard [.written, .unchanged].contains(updateSidecar(of: url, values)) else { return }
+            let result = updateSidecar(of: url, values)
+            guard [.written, .unchanged].contains(result) else { return result.outcome(written: .keptInSidecar) }
         }
         if bytes != original {
             let originalDates = Phocasa.captureFileDates(target)
-            guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
-            else { return }
+            do {
+                try Self.replaceThrowing(target, exists: true,
+                                         writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
+            } catch {
+                // A sidecar still overriding the file holds the new values (above), and they win.
+                return sidecar == .overridesFile ? .keptInSidecar : .failed(writing: error)
+            }
             Phocasa.restoreFileDates(target, dates: originalDates)
         }
         if sidecar != .none {
             // In step with the file: the same values, no longer overriding it.
             updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: false))
         }
+        return .writtenIntoFile
     }
 
     /// `original` with this rating and these keywords inside it, keeping every other byte of metadata, by its format
@@ -525,6 +537,11 @@ final class MetadataService: Sendable {
     /// creation date; a new one is moved into place, which fails rather than overwrite a file that appeared
     /// meanwhile. On any failure the temp file is removed and the original is untouched.
     static func replace(_ target: URL, exists: Bool, writingTempWith write: (URL) throws -> Void) -> Bool {
+        (try? replaceThrowing(target, exists: exists, writingTempWith: write)) != nil
+    }
+
+    /// `replace(_:exists:writingTempWith:)`, throwing the error that stopped it.
+    static func replaceThrowing(_ target: URL, exists: Bool, writingTempWith write: (URL) throws -> Void) throws {
         let fm = FileManager.default
         let stem = target.deletingPathExtension().lastPathComponent
         let ext = target.pathExtension.isEmpty ? "" : ".\(target.pathExtension)"
@@ -537,10 +554,9 @@ final class MetadataService: Sendable {
             } else {
                 try fm.moveItem(at: tmp, to: target)
             }
-            return true
         } catch {
             try? fm.removeItem(at: tmp)
-            return false
+            throw error
         }
     }
 
@@ -554,14 +570,18 @@ final class MetadataService: Sendable {
     }
 
     /// Saves RAW edit parameters to the sidecar. Only `phocasa:EditParameters` changes.
-    func writeEditParameters(_ params: EditParameters, forRAWAt path: String) {
+    @discardableResult
+    func writeEditParameters(_ params: EditParameters, forRAWAt path: String) -> MetadataWriteOutcome {
         updateSidecar(of: URL(fileURLWithPath: path), SidecarUpdate(editParameters: .set(params)))
+            .outcome(written: .writtenToSidecar)
     }
 
     /// Removes saved RAW edit parameters from the sidecar. Only `phocasa:EditParameters` changes, and a
     /// missing sidecar isn't created.
-    func clearEditParameters(forRAWAt path: String) {
+    @discardableResult
+    func clearEditParameters(forRAWAt path: String) -> MetadataWriteOutcome {
         updateSidecar(of: URL(fileURLWithPath: path), SidecarUpdate(editParameters: .set(nil)))
+            .outcome(written: .writtenToSidecar)
     }
 
     func readEditParameters(forRAWAt path: String) -> EditParameters? {
@@ -607,8 +627,8 @@ final class MetadataService: Sendable {
         case skippedUnparseable
         /// It exists but isn't writable, so it was left alone.
         case skippedReadOnly
-        /// The write failed. The sidecar, if there was one, is unchanged.
-        case failed
+        /// The write failed, for this reason (a sentence). The sidecar, if there was one, is unchanged.
+        case failed(String)
     }
 
     /// Updates the `.xmp` sidecar of `imageURL` in place: only the fields in `update` change, and everything
@@ -647,23 +667,30 @@ final class MetadataService: Sendable {
         }
 
         switch Self.apply(update, to: metadata) {
-        case .failed: return .failed
+        case .failed: return .failed("Phocasa couldn’t put its values into the sidecar.")
         case .unchanged: return .unchanged
         case .changed: break
         }
 
         // A mutable copy with every property removed still serialises (to an empty packet); a new, empty
         // metadata object doesn't, and then there is nothing to write.
-        guard let xmp = CGImageMetadataCreateXMPData(metadata, nil) as Data? else { return exists ? .failed : .unchanged }
+        guard let xmp = CGImageMetadataCreateXMPData(metadata, nil) as Data? else {
+            return exists ? .failed("Phocasa couldn’t write the sidecar as XMP.") : .unchanged
+        }
         // Everything else in the sidecar must come back from the serialised packet. (ImageIO can't parse a packet
         // with no properties left; that's fine when there was nothing else to keep.)
         if let original {
             guard XMPProperties.keepsEverything(of: original, in: CGImageMetadataCreateFromXMPData(xmp as CFData),
                                                 changing: Self.phocasaSidecarProperties)
-            else { return .failed }
+            else { return .failed("Updating the sidecar would lose or change something another app wrote in it.") }
         }
-        let written = Self.replace(sidecar, exists: exists, writingTempWith: { try xmp.write(to: $0, options: .withoutOverwriting) })
-        return written ? .written : .failed
+        do {
+            try Self.replaceThrowing(sidecar, exists: exists,
+                                     writingTempWith: { try xmp.write(to: $0, options: .withoutOverwriting) })
+            return .written
+        } catch {
+            return .failed(MetadataWriteOutcome.describe(error))
+        }
     }
 
     /// The sidecar properties Phocasa writes.

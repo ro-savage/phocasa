@@ -11,6 +11,10 @@ struct TagEditorView: View {
     @State private var newTagName = ""
     @State private var newTagCategory = ""
     @State private var searchText = ""
+    /// The new tag's fields: Return in the category moves to the name, Return in the name adds the tag.
+    @FocusState private var focusedField: NewTagField?
+
+    enum NewTagField: Hashable { case category, name }
 
     private var isMultiSelection: Bool {
         viewModel.tagEditorEditsSelection
@@ -29,7 +33,7 @@ struct TagEditorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(isMultiSelection ? "Tags (\(viewModel.selection.selectedPhotos.count) photos)" : "Tags")
+                Text(isMultiSelection ? "Tags (\(viewModel.selection.selectedPhotos.count.counted("photo")))" : "Tags")
                     .font(.headline)
                 Spacer()
                 Button {
@@ -40,6 +44,8 @@ struct TagEditorView: View {
                         .font(.title3)
                 }
                 .buttonStyle(.plain)
+                .help("Close")
+                .accessibilityLabel("Close")
             }
             .padding(.horizontal)
             .padding(.top, 12)
@@ -59,6 +65,8 @@ struct TagEditorView: View {
                                         .font(.caption2)
                                 }
                                 .buttonStyle(.plain)
+                                .help("Remove “\(tag.fullName)”")
+                                .accessibilityLabel("Remove \(tag.fullName)")
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -118,14 +126,24 @@ struct TagEditorView: View {
                     TextField("Category (optional)", text: $newTagCategory)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 120)
+                        .focused($focusedField, equals: .category)
+                        .onSubmit {
+                            if Self.newTag(name: newTagName, category: newTagCategory) == nil {
+                                focusedField = .name
+                            } else {
+                                addNewTag()
+                            }
+                        }
 
                     TextField("Name", text: $newTagName)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedField, equals: .name)
+                        .onSubmit { addNewTag() }
 
                     Button("Add") {
                         addNewTag()
                     }
-                    .disabled(newTagName.isEmpty)
+                    .disabled(Self.newTag(name: newTagName, category: newTagCategory) == nil)
                 }
             }
             .padding(.horizontal)
@@ -140,12 +158,19 @@ struct TagEditorView: View {
         viewModel.toggleTagFromEditor(tag, photo: photo)
     }
 
-    private func addNewTag() {
-        let name = newTagName.trimmingCharacters(in: .whitespaces)
-        let category = newTagCategory.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !name.isEmpty else { return }
+    /// The tag the new-tag fields describe: the name trimmed, the category trimmed and lowercased; nil without a name.
+    static func newTag(name: String, category: String) -> (name: String, category: String)? {
+        let name = name.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return nil }
+        return (name, category.trimmingCharacters(in: .whitespaces).lowercased())
+    }
 
-        viewModel.addTagFromEditor(name: name, category: category, photo: photo)
+    /// Adds the tag (the Add button, or Return in the fields) and clears the name for the next one, which keeps the
+    /// focus. The category stays, for adding several in it.
+    private func addNewTag() {
+        guard let tag = Self.newTag(name: newTagName, category: newTagCategory) else { return }
+        viewModel.addTagFromEditor(name: tag.name, category: tag.category, photo: photo)
         newTagName = ""
+        focusedField = .name
     }
 }

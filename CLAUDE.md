@@ -62,7 +62,8 @@ keep it in step. See `Tools/imagebench/README.md`.
 Phocasa/
 ├── Phocasa.xcodeproj/              — objectVersion 77, synchronized folders (see Build Settings)
 ├── Phocasa/
-│   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host), menu commands
+│   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host)
+│   ├── LibraryCommands.swift       — the menus (File, Library, Photo, View) and their focused values
 │   ├── AppDelegate.swift           — quit saves open edit sessions (`PhotoLibraryViewModel.saveEditsBeforeQuit`),
 │   │                                 then waits for pending metadata writes (at most 5 s, then journals the rest);
 │   │                                 launch replays the journal
@@ -73,8 +74,10 @@ Phocasa/
 │   │                                 the test host's in-memory one, or the development library); LibraryLaunch
 │   │                                 (lock, legacy move, backup, open), LibraryLock, StoreBackup
 │   ├── ViewModels/
-│   │   └── PhotoLibraryViewModel   — coordinator: owns LibraryStore, SelectionModel, editSession; UI flags; detail,
-│   │                                 delete, selection-wide rating/tagging, editing entry points, presets
+│   │   ├── PhotoLibraryViewModel   — coordinator: owns LibraryStore, SelectionModel, editSession; UI flags; detail,
+│   │   │                             delete, selection-wide rating/tagging, editing entry points, presets, the menus'
+│   │   │                             targets, the write problems' Retry
+│   │   └── ViewPreferences         — the sort order and the grid's zoom, remembered across launches
 │   ├── Library/
 │   │   ├── LibraryStore            — the in-memory library: model context, allPhotos/bin + facts, counts, tag
 │   │   │                             lists, the grid (`photos`, `index(of:)`), photosDidChange. Extension files:
@@ -86,6 +89,7 @@ Phocasa/
 │   │   │   +Mutations                rating, tags, bin, deletes (files trashed via FileTrasher), metadata write-back
 │   │   │   +ListEditing              in-memory list edits: bin moves, scan inserts/removals, deletes
 │   │   │   +Filtering                filters, search, sort toggle, tag lists
+│   │   │   +WriteProblems            the photos a write problem's files belong to, their values written again
 │   │   ├── LibrarySort             — THE definition of photo order: capture date, then creation date (fetch,
 │   │   │                             key, insertion index, merge, toggle, re-order)
 │   │   ├── LibrarySnapshot         — the library as plain values, read in background contexts (launch of a big
@@ -108,6 +112,8 @@ Phocasa/
 │   │   │                             PhotoGridItemView, RatingView, TagEditorView, EditSidebarView, CropOverlayView,
 │   │   │                             PhotoDetailView (container), LibraryUnavailableView (library locked or unopenable),
 │   │   │                             LibraryFoldersSection (the sidebar's library folders)
+│   │   │                             WriteProblemsView (the status bar's list of writes that didn't reach their files),
+│   │   │                             UnreadableFileView, ShowInFinder, CountFormatting (`Int.counted(_:)`)
 │   │   └── Detail/                 — DisplayImage (CGImage + orientation), ZoomableImageView (+ZoomPanState),
 │   │                                 MinimapView, DetailOverlayControls, ComparisonView
 │   └── Services/
@@ -123,6 +129,7 @@ Phocasa/
 │       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through (re-keys cached
 │       │                             thumbnails after JPEG metadata rewrites)
 │       ├── MetadataWriteJournal    — the writes not made yet, on disk next to the store; MetadataWriteProgress
+│       ├── MetadataWriteOutcome    — what each write did; MetadataWriteProblem(s), the report the status bar shows
 │       ├── VolumeCheck             — a missing file: gone, or on a drive that isn't connected (`/Volumes/<name>`)
 │       ├── ImageLoader             — grid thumbnails: size buckets, memory cache, disk cache, invalidation
 │       ├── ThumbnailScheduler      — bounded, newest-first, cancellable work scheduler
@@ -179,7 +186,22 @@ Tools/
   `Tag.parse(keyword:)`)
 - **Folder access:** Uses SwiftUI `.fileImporter` for folder selection, security-scoped bookmarks for persistent access
   (and to find a library folder that moved; resolved `.withoutUI, .withoutMounting`)
-- **Menu commands:** Uses SwiftUI `FocusedValues` to communicate between App-level commands and views
+- **Menu commands** (`LibraryCommands`): SwiftUI `FocusedValues`. File › Open Folder… (⌘O), Library › Rescan (⌘R),
+  View › Zoom In/Out (⌘+ / ⌘−), Sort, Back to Library and `SidebarCommands`, from `libraryWindow` (the window's
+  `focusedSceneValue`: these mean nothing to a text field). The Photo menu (Rate, Move to Bin ⌘⌫, Restore, Show in
+  Finder ⇧⌘R, Edit ⌘E / ⌥⌘E) acts like the keys, on the photo on screen or the selection, from `photoCommands`, a
+  `focusedValue` published only while the window's content has focus: not the search field, a sheet or a popover,
+  nor the edit sidebar's preset name (`isTypingInContent`), so ⌘⌫ there stays the text's. A menu's key equivalent
+  comes before a text field's typing: no menu item has a plain-key shortcut, and none repeats a key the window already
+  handles (digits, arrows, Space, Return, ⌫, Esc). `LibraryCommandsTests` checks the menu bar the test host builds.
+- **Remembered across launches** (`ViewPreferences`): the sort order and the grid's column count, in the app's
+  `UserDefaults` (the development library's own suite; in memory in the test host, fresh per view model). Not the
+  filter, the search or the bin: a launch opening on a filter looks like photos went missing.
+- **The status bar** sits in the window's bottom safe area (`.safeAreaInset`), not over the content. Counts show
+  through `Int.counted(_:)` ("1 photo", "12,345 photos": Foundation's grammar agreement) or `formatted()`. A new-file
+  export says "Saved x.jpg" there, with Show in Finder (a failed one is an alert).
+- **A file that can't be decoded** shows `UnreadableFileView`, in the grid and the detail view (which never leaves the
+  previous photo on screen under its name).
 - **Data flow:** the library is fetched from the store only by `LibraryStore.loadExistingData()`, the launch's
   background load and scans. UI interactions (filters, search, sort, rating, tags, bin) work on the in-memory library
   and its `PhotoFacts` and must never re-fetch: mutations patch the lists, the grid and the counts in place. Scans and
@@ -289,6 +311,8 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   don't expose the click count)
 - `@NSApplicationDelegateAdaptor` with `applicationShouldTerminate` → `.terminateLater`, so quit waits for pending
   metadata writes (SwiftUI has no termination hook on macOS; `scenePhase` doesn't report quitting)
+- `NSWorkspace.activateFileViewerSelecting` for Show in Finder (`ShowInFinder`: `openURL` opens a folder but can't
+  select a file in it)
 
 ### Swift 6 Concurrency
 
@@ -310,6 +334,15 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   (`Application Support/Phocasa/PendingMetadataWrites.jsonl`, or the development library's folder; none in the test
   host), saved on take-in and about once a second, and replayed first at launch (`resumeJournaledWrites()`). A write
   for a file on an unmounted volume waits in the journal (`retryWaitingWrites()` after a scan) instead of failing.
+- **Every write says what it did** (`MetadataWriteOutcome`: into the file, to the sidecar, kept in a sidecar as the
+  last resort, skipped read-only / unparseable sidecar / unreadable, or failed with a reason). The writer keeps the
+  problems in `report` (`MetadataWriteProblemList`: the latest per file and kind, at most 2,000, the oldest dropped
+  and counted), the last-resort sidecars apart; a write that goes through clears its file's. A skipped or failed
+  write is checked for where it's read-only (drive, folder, locked file, file, sidecar), and a read-only folder or
+  drive is one row in the status bar's list ("⚠︎ 3 files not updated", `WriteProblemsView`) with Show in Finder and
+  Retry. Retry writes a rating's photo's *current* values (`LibraryStore.rewriteMetadata(of:)`), and a RAW edit
+  again only while it's still that RAW's latest (`MetadataWriter.retry(editsOf:)`); a problem whose photo is gone is
+  dismissed. Nothing is retried on its own, and the report isn't kept across launches.
 - One-off background reads use `withCheckedContinuation` + `DispatchQueue.global()` (the scan's `StoredPhoto` read,
   `FolderScanner`, `FullImageLoader`)
 - Don't use `FileManager.enumerator` `for-in` loops in async contexts — use `nextObject()` in a sync wrapper
@@ -474,6 +507,11 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - Moved photos and library folders (`ScanRelinkTests`, `LibraryFolderTests`) share `LibraryScanTestCase`: temp folders,
   temp stores, JPEGs with capture dates. A renamed library folder or a remounted drive is a temp folder renamed (the
   bookmark follows it); "Photo Drive 1" is a folder in a temp `VolumeCheck(volumesDirectory:)`.
+- Accessibility tests read the tree through the AX API as a client of the test process (`AccessibilityTree`; no
+  permission is needed for one's own process). SwiftUI builds its accessibility elements only once a client asks, so
+  `NSHostingView.accessibilityChildren()` alone finds none.
+- `PhotoLibraryViewModel()` in the test host keeps its preferences in memory (`ViewPreferences.forLaunch`); tests
+  never read or write the app's `UserDefaults`.
 
 ### Build Settings
 
