@@ -68,7 +68,8 @@ Phocasa/
 │   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
 │   │                                 store lives, and the one-time move of a legacy `default.store`);
 │   │                                 LibraryLocation (which store and thumbnail cache a launch uses: the user's,
-│   │                                 the test host's in-memory one, or the development library)
+│   │                                 the test host's in-memory one, or the development library); LibraryLaunch
+│   │                                 (lock, legacy move, backup, open), LibraryLock, StoreBackup
 │   ├── ViewModels/
 │   │   └── PhotoLibraryViewModel   — coordinator: owns LibraryStore, SelectionModel, editSession; UI flags; detail,
 │   │                                 delete, selection-wide rating/tagging, editing entry points, presets
@@ -100,7 +101,7 @@ Phocasa/
 │   ├── Views/                      — ContentView (keys, search, alerts), MainContentView (grid kept alive under
 │   │   │                             the detail view), LibraryToolbar, StatusBarView, SidebarView, PhotoGridView,
 │   │   │                             PhotoGridItemView, RatingView, TagEditorView, EditSidebarView, CropOverlayView,
-│   │   │                             PhotoDetailView (container)
+│   │   │                             PhotoDetailView (container), LibraryUnavailableView (library locked or unopenable)
 │   │   └── Detail/                 — DisplayImage (CGImage + orientation), ZoomableImageView (+ZoomPanState),
 │   │                                 MinimapView, DetailOverlayControls, ComparisonView
 │   └── Services/
@@ -135,6 +136,25 @@ Tools/
   moves such a store into the Phocasa folder once, before the container opens (companions first, the store file
   last), only when its metadata names Phocasa's `PhotoAsset` entity; another app's `default.store` is left alone, and
   one whose metadata can't be read is opened where it is.
+- **Launch order** (`LibraryLaunch.open`, once per process): lock the library's folder (`LibraryLock`: a `flock` on
+  `Phocasa.lock`, held for the process's life; a second Phocasa on the same library, such as a Debug build beside the
+  installed app, opens, moves and backs up nothing and says who has it open), then the legacy move, then the backup,
+  then open the store. A store that doesn't open (damaged, or a migration that can't be inferred) is never deleted,
+  moved or overwritten: the window says where it is, that nothing changed and where the backups are
+  (`LibraryUnavailableView`), instead of crashing. SwiftData renames and removes nothing on a failed open, but SQLite
+  rewrites the `-shm`, so a file without SQLite's header isn't handed to it. The in-memory test host takes no lock.
+- **Backups** (`StoreBackup`): at launch, with no process holding the SQLite files, the store, its `-wal`, `-shm` and
+  `.Phocasa_SUPPORT` are copied (APFS clones) into `Backups/<yyyy-MM-dd-HHmmss>/` in the library's folder
+  (`Application Support/Phocasa/Backups/`, or the development library's own), at most once a day, through a hidden
+  `.partial` folder so an interrupted copy never looks complete. Only a launch that opened the store prunes, to the
+  newest 5, so failing launches never push out the good copies. A failed copy is logged and the launch goes on; the
+  live store is only ever read. Never backed up: a `default.store` still opened in place (it may be another app's).
+  **Restoring:** quit Phocasa, move `Phocasa.store`, `-wal`, `-shm` and `.Phocasa_SUPPORT` out of the library's
+  folder, and copy the backup's files in their place.
+- **One window, one library:** the app's only scene is a `Window` (no New Window, no tabs), and `PhocasaApp` owns the
+  `PhotoLibraryViewModel`; `setModelContext` is a no-op for the context it already has. A `WindowGroup` built a
+  library per window on the same store: a second scan beside the first inserted every photo twice. Closing the
+  window quits the app (a `Window` primary scene does), through `AppDelegate`'s quit path.
 - **Development library:** a Debug launch with `PHOCASA_DEVELOPMENT_LIBRARY=1` (Release ignores it) keeps its library
   in `Application Support/Phocasa-Development/Phocasa.store` and its thumbnails in `Phocasa-Development/Thumbnails/v1`
   (`PHOCASA_THUMBNAIL_CACHE_DIR` overrides the cache), for real-app checks that relaunch. It never reads, moves or
@@ -366,7 +386,8 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - Hosted-window tests (`GridKeepAliveTests`) need the display awake: run `xcodebuild test` under `caffeinate -d -u`.
 - The test host (`XCTestConfigurationFilePath` set) uses an in-memory SwiftData store, and `ImageLoader.shared` has no
   disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names a folder (pass `TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR`).
-  Tests must never open or modify anything under `~/Library/Application Support` (the user's real library) or write to
+  Tests must never open or modify anything under `~/Library/Application Support` (the user's real library;
+  `LibraryLaunchTests`, `StoreBackupTests` and `LibraryLockTests` use temp folders) or write to
   `~/Library/Caches/com.phocasa.app`. `StoreLocationTests` pass a temp folder in place of Application Support.
 - The test host stays in memory even with `PHOCASA_DEVELOPMENT_LIBRARY=1` (the scheme's Test action shares the Run
   action's environment). Development-library tests pass temp folders to `LibraryLocation.resolve`.

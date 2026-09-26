@@ -7,14 +7,16 @@ import UniformTypeIdentifiers
 /// the status bar are their own types, so selection changes don't re-evaluate this body.
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @State private var viewModel: PhotoLibraryViewModel
+    /// Owned by the app (`PhocasaApp`), not by the window, so a window that closes and opens again shows the same
+    /// library.
+    @Bindable private var viewModel: PhotoLibraryViewModel
     @FocusState private var isContentFocused: Bool
 
     /// Body evaluations, for tests.
     @MainActor static var bodyEvaluations = 0
 
-    init(viewModel: PhotoLibraryViewModel = PhotoLibraryViewModel()) {
-        _viewModel = State(initialValue: viewModel)
+    init(viewModel: PhotoLibraryViewModel) {
+        self.viewModel = viewModel
     }
 
     var body: some View {

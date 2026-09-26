@@ -49,6 +49,23 @@ final class ViewModelTests: XCTestCase {
         return photo
     }
 
+    // MARK: - Launch
+
+    /// The app owns the view model, so a window that closes and opens again calls `setModelContext` with the context
+    /// the library already has: nothing is loaded or rescanned again.
+    func testSettingTheSameContextAgainIsANoOp() {
+        insertPhoto(name: "a")
+        viewModel.loadExistingData()
+        let generation = viewModel.library.loading.generation
+        let photos = viewModel.library.photos
+
+        viewModel.setModelContext(context)
+
+        XCTAssertEqual(viewModel.library.loading.generation, generation, "no second load")
+        XCTAssertEqual(viewModel.library.photos.map(\.id), photos.map(\.id))
+        XCTAssertTrue(viewModel.library.modelContext === context)
+    }
+
     // MARK: - Rating
 
     func testSetRatingForSelection() {
