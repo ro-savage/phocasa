@@ -14,6 +14,11 @@ cd /Users/rowan/www/phocasa/Phocasa
 # Run the built app
 open ~/Library/Developer/Xcode/DerivedData/Phocasa-*/Build/Products/Debug/Phocasa.app
 
+# Install the release build (quit Phocasa with ⌘Q first; it opens the user's real library)
+/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project Phocasa.xcodeproj -scheme Phocasa \
+  -configuration Release -derivedDataPath ~/Library/Developer/Xcode/DerivedData/Phocasa-release build
+ditto ~/Library/Developer/Xcode/DerivedData/Phocasa-release/Build/Products/Release/Phocasa.app /Applications/Phocasa.app
+
 # Or open in Xcode
 open Phocasa/Phocasa.xcodeproj
 
@@ -557,5 +562,9 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - `SWIFT_STRICT_CONCURRENCY = minimal`
 - `MACOSX_DEPLOYMENT_TARGET = 14.0`
 - App Sandbox OFF, Hardened Runtime ON (Release only)
+- The app's Release build is what's installed: no code-coverage instrumentation (`ENABLE_CODE_COVERAGE = NO`; a
+  plain `xcodebuild build` of the scheme otherwise instruments it, and it writes `default.profraw` into its working
+  directory) and stripped (`DEPLOYMENT_POSTPROCESSING = YES`), its symbols in the `Phocasa.app.dSYM` beside it
+  (about 4 MB instead of 9). Debug and the tests keep coverage.
 - The project is objectVersion 77 with synchronized folders: any file under `Phocasa/Phocasa/` or
   `Phocasa/PhocasaTests/` is built into its target automatically. Never hand-edit `project.pbxproj` to add files.
