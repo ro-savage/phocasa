@@ -8,6 +8,8 @@ struct StatusBarView: View {
 
     /// Body evaluations, for tests.
     @MainActor static var bodyEvaluations = 0
+    /// Fewer metadata writes left than this aren't shown (a few ratings take a moment), as with `trashProgressMinimum`.
+    static let writesShownFrom = LibraryStore.trashProgressMinimum
 
     var body: some View {
         let _ = Self.bodyEvaluations += 1
@@ -52,6 +54,17 @@ struct StatusBarView: View {
                     .help(message)
             }
             Spacer()
+            let writesLeft = MetadataWriteProgress.shared.pending
+            if writesLeft > Self.writesShownFrom {
+                ProgressView()
+                    .scaleEffect(0.5)
+                    .frame(width: 16, height: 16)
+                Text("Saving to files… \(writesLeft.formatted()) left")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Ratings, keywords and RAW edits being written into the photos’ files. Anything not written "
+                          + "when Phocasa quits is written the next time it opens.")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)

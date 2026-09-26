@@ -7,8 +7,15 @@ import os
 /// SwiftUI has no hook for app termination on macOS (`scenePhase` doesn't report it), so this is an app delegate,
 /// installed with `@NSApplicationDelegateAdaptor`: `applicationShouldTerminate` answers `.terminateLater` and replies
 /// once the flush is done or the timeout has passed. A known AppKit exception (see CLAUDE.md).
+///
+/// Writes the wait gives up on aren't lost: `MetadataWriter` keeps what it hasn't written in its journal, which the
+/// next launch writes first (`applicationDidFinishLaunching`).
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let quitFlushTimeout: Duration = .seconds(5)
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        MetadataWriter.shared.resumeJournaledWrites()
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         Self.replyAfterFlushing(timeout: Self.quitFlushTimeout) {
@@ -17,14 +24,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    /// Waits for the pending writes (`flushPendingWrites`), then calls `reply` on the main actor.
+    /// Waits for the pending writes (`flushPendingWrites`), then calls `reply` on the main actor. If the wait gives up,
+    /// `journal` first keeps what's still queued for the next launch.
     static func replyAfterFlushing(
         timeout: Duration,
         flush: @escaping @Sendable () async -> Void = { await MetadataWriter.shared.flush() },
+        journal: @escaping @Sendable () -> Void = { MetadataWriter.shared.journalBeforeQuit() },
         reply: @escaping @MainActor () -> Void
     ) {
         Task { @MainActor in
-            await flushPendingWrites(timeout: timeout, flush: flush)
+            if await !flushPendingWrites(timeout: timeout, flush: flush) {
+                journal()
+            }
             reply()
         }
     }

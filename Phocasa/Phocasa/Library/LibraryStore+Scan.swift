@@ -342,6 +342,8 @@ extension LibraryStore {
 
         scanProgress = "Found \(plan.discoveredCount) photos (\(report.inserted) new)"
         scanIssue = report.issue
+        // The folder is there: writes that waited for its drive can be made now.
+        MetadataWriter.shared.retryWaitingWrites()
         report.mainActorTime += clock.now - sectionStart
         lastScanReport = report
     }
