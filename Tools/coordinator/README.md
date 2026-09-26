@@ -139,12 +139,17 @@ Launch a **Debug** build of the binary in one of two ways instead (`LibraryLocat
 
 ### Driving the app: lessons from wave 2
 
-- **Target the app by its process ID, not its name (post-wave-3 task D).** A test host that another agent is running
-  (hosted-window tests, `ScaleChecks`) is also a process called "Phocasa", and `tell process "Phocasa"` may pick it:
-  a window move, a key or a Cmd-Q then goes to the test host, and its in-memory library looks like yours gone empty.
-  Use `tell application "System Events" to tell (first process whose unix id is $PID)`, with the `PID` from the
-  launch, for every pin, key and quit.
-
+- **Keys need a key window, and only one "Phocasa" process (post-wave-3).**
+  - A test host another agent is running (hosted-window tests, `ScaleChecks`) is also a process called "Phocasa":
+    `tell process "Phocasa"` may pick it, and a window move, a key or a Cmd-Q goes to the test host (whose in-memory
+    library looks like yours gone empty). Check `pgrep -x Phocasa | wc -l` is 1 first.
+  - **An app launched from the terminal may be frontmost without its window being key**, and then every key press
+    vanishes (clicks still select). Check `value of attribute "AXFocused" of window 1` is `true` before testing keys.
+    What made it key here: Open Folder (Cmd-O) and choosing a folder with Open in the panel (Cancel didn't). A long
+    detour in the release check came from missing this: it looked like the photo keys were broken after a launch.
+    `KeyboardShortcutTests` covers the keys in a key window, the sidebar's list included.
+  - Send each key in its own `osascript`: `tell process "Phocasa"`, `set frontmost to true`, the `key code`. Targeting
+    by `first process whose unix id is …` delivered typed text but not plain key codes.
 - **Focus moves.** Another window can come to the front between commands, or the window can move. Before *every*
   click or key, pin the window in the same shell command:
   `osascript -e 'tell application "System Events" to tell process "Phocasa"' -e 'set frontmost to true' -e 'set position of window 1 to {40, 60}' -e 'set size of window 1 to {1400, 900}' -e 'end tell' -e 'delay 0.3'`.

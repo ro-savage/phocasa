@@ -66,6 +66,33 @@ final class KeyboardShortcutTests: XCTestCase {
         return photo
     }
 
+    private func firstView<V: NSView>(_ type: V.Type, in view: NSView) -> V? {
+        if let match = view as? V { return match }
+        for subview in view.subviews { if let match = firstView(type, in: subview) { return match } }
+        return nil
+    }
+
+    /// The sidebar's list as first responder (where AppKit puts it at launch, and a closing folder picker leaves it)
+    /// doesn't keep the photo keys from the photos: digits, arrows, Space, Esc and ⌫ still reach the handler. (Checked
+    /// in the release check, where a window that wasn't key looked like this failing.)
+    func testThePhotoKeysReachThePhotosWithTheSidebarAsFirstResponder() throws {
+        let photo = try selectFirstPhoto()
+        let outline = try XCTUnwrap(firstView(NSOutlineView.self, in: try XCTUnwrap(window.contentView)), "the sidebar's list")
+        XCTAssertTrue(window.makeFirstResponder(outline), "fixture: focus in the sidebar")
+        press(keyCode: 20, characters: "3")
+        XCTAssertEqual(photo.rating, 3, "a digit")
+        press(keyCode: 124, characters: String(UnicodeScalar(NSRightArrowFunctionKey)!))
+        let second = viewModel.library.photos[1]
+        XCTAssertEqual(viewModel.selection.selectedPhotos, [second.id], "→ moves the selection")
+        press(keyCode: 49, characters: " ")
+        XCTAssertTrue(viewModel.showingDetail, "Space opens the photo")
+        press(keyCode: 53, characters: "\u{1B}")
+        XCTAssertFalse(viewModel.showingDetail, "Esc closes it")
+        XCTAssertTrue(window.makeFirstResponder(outline))
+        press(keyCode: 51, characters: "\u{7F}")
+        XCTAssertTrue(second.isInBin, "⌫ moves the selection to the Bin")
+    }
+
     /// The harness itself: a digit key reaches the handler (it rates the selection).
     func testDigitKeyRatesTheSelection() throws {
         let photo = try selectFirstPhoto()
