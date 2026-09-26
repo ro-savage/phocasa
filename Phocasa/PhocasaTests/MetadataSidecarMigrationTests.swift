@@ -167,6 +167,28 @@ final class MetadataSidecarMigrationTests: XCTestCase {
         }
     }
 
+    /// Every PNG was in sidecar mode before task D.
+    func testAPNGInSidecarModeMovesIntoTheFile() throws {
+        let image = try XCTUnwrap(CGImageSourceCreateWithData(T.imageIOJPEG() as CFData, nil)
+            .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
+        let out = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(out as CFMutableData, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, [
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2024:05:01 10:00:00"],
+        ] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let png = try write(out as Data, "shot.png")
+        flaggedSidecar(for: png, rating: 2, keywords: ["x"])
+
+        service.writeMetadata(rating: 4, keywords: ["y"], toImageAt: png.path)
+
+        XCTAssertEqual(try inFile(png).rating, 4)
+        XCTAssertEqual(try inFile(png).keywords, ["y"])
+        XCTAssertEqual(sidecarValue(png, "xmp:Rating"), "4")
+        XCTAssertNil(sidecarValue(png, "phocasa:OverridesEmbedded"))
+        XCTAssertEqual(service.readMetadata(from: png.path).rating, 4)
+    }
+
     func testAFileThatStillCantTakeItsValuesKeepsTheSidecar() throws {
         let original = jpegWithFullXMPSegment()
         let jpg = try write(original, "full.jpg")

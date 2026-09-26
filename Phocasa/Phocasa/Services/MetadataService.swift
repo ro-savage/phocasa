@@ -224,7 +224,45 @@ final class MetadataService: Sendable {
         if JPEGStructure.isJPEG(original) {
             return jpegWritingRatingAndKeywords(original, rating: rating, keywords: keywords)
         }
-        return nil
+        let packet = { (existing: Data?) in xmpPacket(rating: rating, keywords: keywords, updating: existing) }
+        let written: Data?
+        if PNGMetadata.isPNG(original) {
+            // ImageIO calls a cut-short PNG complete, so the output's chunks are walked again, CRCs included.
+            written = PNGMetadata.replacingXMP(in: original, update: packet)
+                .flatMap { (try? PNGMetadata.walk($0).get()) != nil ? $0 : nil }
+        } else {
+            return nil
+        }
+        guard let written, image(written, keepsEverythingIn: original, reading: rating, keywords) else { return nil }
+        return written
+    }
+
+    /// Whether ImageIO reads `written` as a complete image with this rating and these keywords, and with every property
+    /// `original` has, at the same value, apart from the ones that are Phocasa's (IPTC keywords and star rating): a check
+    /// on a container edit before it replaces anyone's photo. (ImageIO's view may gain keys, e.g. IPTC fields it
+    /// derives from the Exif once a file has XMP.)
+    static func image(_ written: Data, keepsEverythingIn original: Data, reading rating: Int,
+                              _ keywords: [String]) -> Bool {
+        guard let source = CGImageSourceCreateWithData(written as CFData, nil),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil),
+              xmpRating(in: meta) == rating, xmpSubject(in: meta) == keywords,
+              let after = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let before = CGImageSourceCreateWithData(original as CFData, nil)
+                .flatMap({ CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [String: Any] }) else { return false }
+        let phocasas: Set<String> = [kCGImagePropertyIPTCKeywords as String, kCGImagePropertyIPTCStarRating as String]
+        for (key, value) in before {
+            guard let now = after[key] else { return false }
+            if key == kCGImagePropertyIPTCDictionary as String,
+               let old = value as? [String: Any], let new = now as? [String: Any] {
+                for (field, oldValue) in old where !phocasas.contains(field) {
+                    guard let newValue = new[field], (oldValue as AnyObject).isEqual(newValue) else { return false }
+                }
+            } else if !(value as AnyObject).isEqual(now) {
+                return false
+            }
+        }
+        return CGImageSourceGetCount(source) == CGImageSourceCreateWithData(original as CFData, nil).map(CGImageSourceGetCount)
     }
 
     private enum SidecarState { case none, inStep, overridesFile }

@@ -184,10 +184,72 @@ final class MetadataKeepOriginalTests: XCTestCase {
         XCTAssertEqual(service.readMetadata(from: jpg.path).keywords, ["y"])
     }
 
+    /// Task D: PNG takes its values in the file (`PNGMetadataTests` has the byte-level checks). This checks that
+    /// `writeMetadata` puts them there, keeping every other property, with no sidecar.
+    func testAPNGGetsItsValuesInTheFile() throws {
+        let image = try XCTUnwrap(CGImageSourceCreateWithData(T.imageIOJPEG() as CFData, nil)
+            .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
+        let out = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(out as CFMutableData, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, [
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2024:05:01 10:00:00",
+                                             kCGImagePropertyExifUserComment: "keep me"],
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Acme"],
+        ] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let original = out as Data
+        let url = try write(original, "p.png")
+
+        service.writeMetadata(rating: 3, keywords: ["k"], toImageAt: url.path)
+
+        let after = try Data(contentsOf: url)
+        XCTAssertNotEqual(after, original, "the values are in the file")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.xmpSidecarURL.path), "no sidecar")
+        let meta = try XCTUnwrap(CGImageSourceCreateWithData(after as CFData, nil).flatMap { CGImageSourceCopyMetadataAtIndex($0, 0, nil) })
+        XCTAssertEqual(CGImageMetadataCopyStringValueWithPath(meta, nil, "xmp:Rating" as CFString) as String?, "3")
+        let before = KeptMetadata.properties(original), now = KeptMetadata.properties(after)
+        for dictionary in ["{Exif}", "{TIFF}", "{PNG}"] {
+            let old = before[dictionary] as? [String: Any] ?? [:], new = now[dictionary] as? [String: Any] ?? [:]
+            for (key, value) in old { XCTAssertEqual(new[key].map { "\($0)" }, "\(value)", "\(dictionary).\(key)") }
+        }
+        XCTAssertEqual(service.readMetadata(from: url.path).rating, 3)
+        XCTAssertEqual(service.readMetadata(from: url.path).keywords, ["k"])
+    }
+
+    /// The check every container edit (PNG, TIFF, HEIC) passes before it replaces a file: a result that lost a property,
+    /// or doesn't hold the new values, is refused.
+    func testTheContainerCheckRefusesAFileThatLostAProperty() throws {
+        let image = try XCTUnwrap(CGImageSourceCreateWithData(T.imageIOJPEG() as CFData, nil)
+            .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
+        func png(exif: Bool, rating: Int?) throws -> Data {
+            let out = NSMutableData()
+            let destination = try XCTUnwrap(CGImageDestinationCreateWithData(out as CFMutableData, UTType.png.identifier as CFString, 1, nil))
+            let meta = CGImageMetadataCreateMutable()
+            if let rating {
+                XCTAssertTrue(CGImageMetadataSetValueWithPath(meta, nil, "xmp:Rating" as CFString, "\(rating)" as CFString))
+            }
+            if exif {
+                XCTAssertTrue(CGImageMetadataSetValueMatchingImageProperty(meta, kCGImagePropertyExifDictionary,
+                                                                           kCGImagePropertyExifUserComment, "keep me" as CFString))
+            }
+            CGImageDestinationAddImageAndMetadata(destination, image, meta, nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+            return out as Data
+        }
+        let original = try png(exif: true, rating: nil)
+        XCTAssertTrue(MetadataService.image(try png(exif: true, rating: 3), keepsEverythingIn: original, reading: 3, []))
+        XCTAssertFalse(MetadataService.image(try png(exif: false, rating: 3), keepsEverythingIn: original, reading: 3, []),
+                       "the Exif comment is gone")
+        XCTAssertFalse(MetadataService.image(try png(exif: true, rating: 2), keepsEverythingIn: original, reading: 3, []),
+                       "the new rating isn't there")
+        // (ImageIO calls a cut-short PNG complete; the PNG path walks its output's chunks and CRCs as well.)
+    }
+
     func testOtherFormatsKeepTheirBytesAndGetASidecar() throws {
         let image = try XCTUnwrap(CGImageSourceCreateWithData(T.imageIOJPEG() as CFData, nil)
             .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
-        for (name, type) in [("p.png", UTType.png), ("t.tiff", UTType.tiff), ("h.heic", UTType.heic)] {
+        // Task D: PNG went in-file (testAPNGGetsItsValuesInTheFile).
+        for (name, type) in [("t.tiff", UTType.tiff), ("h.heic", UTType.heic)] {
             let out = NSMutableData()
             let destination = try XCTUnwrap(CGImageDestinationCreateWithData(out as CFMutableData, type.identifier as CFString, 1, nil))
             CGImageDestinationAddImage(destination, image, [
