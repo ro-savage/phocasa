@@ -431,65 +431,142 @@ final class EditSession {
     }
 
     // MARK: - Export
+    // What the export dialog offers depends on the session and on the files' bytes (`presentExportOptions()`):
+    // - every session: a new JPG beside the photo (`exportToNewFile()`), a photo of its own in the library;
+    // - a RAW session whose pair's other file really is a JPEG: that camera JPG replaced (`exportReplacingCameraJPG`);
+    // - a JPG session on a file that really is a JPEG: the edits applied to it (`exportJPGPermanent`).
+    // A HEIC, PNG or TIFF is never overwritten (the service refuses to replace anything but a JPEG), and a file that is
+    // replaced goes to the Trash first, as a copy, so the original can be recovered.
 
-    /// Renders the RAW with the current parameters to a JPEG: over the paired JPG (`replaceExisting`), or to a new
-    /// `<stem>-raw-edit.jpg`, which becomes the photo's JPG. The JPEG carries the original metadata
-    /// (`metadataSources(forRAWExportTo:replacing:)`) and then gets the photo's rating and keywords.
-    func exportRAWToJPG(replaceExisting: Bool) async -> ExportResult {
-        guard let rawPath = photo.rawPath else { return .failed }
+    /// What the export dialog can offer, read from the files when it opens.
+    struct ExportOptions: Equatable {
+        /// A RAW session's camera JPG (its file name), when that file is a JPEG by its bytes: it can be replaced.
+        var replaceableCameraJPG: String?
+        /// A JPG session on a file that is a JPEG by its bytes: the edits can be applied to it.
+        var canApplyPermanently = false
+    }
 
-        let rawURL = URL(fileURLWithPath: rawPath)
-        let params = parameters
+    /// The destructive exports, confirmed in a second step.
+    enum ExportConfirmation: Equatable { case replaceCameraJPG, applyPermanently }
 
-        let outputURL: URL
-        let replacing = replaceExisting && photo.jpgPath != nil
-        if replacing, let jpgPath = photo.jpgPath {
-            outputURL = URL(fileURLWithPath: jpgPath)
-        } else {
-            let dir = rawURL.deletingLastPathComponent()
-            let stem = rawURL.deletingPathExtension().lastPathComponent
-            outputURL = dir.appendingPathComponent("\(stem)-raw-edit.jpg")
+    private(set) var exportOptions = ExportOptions()
+    /// The replace or apply the dialog's "…" button chose, waiting for its confirmation.
+    var pendingExportConfirmation: ExportConfirmation?
+
+    /// What the session edits, for titles: "RAW", or the other file's kind ("JPG", "HEIC", "PNG", "TIFF").
+    var fileKind: String { isRAW ? "RAW" : Self.kind(ofStandardFileAt: photo.jpgPath) }
+
+    /// The kind of a non-RAW file by its extension: "JPG", "HEIC", "PNG", "TIFF".
+    static func kind(ofStandardFileAt path: String?) -> String {
+        let ext = path.map { ($0 as NSString).pathExtension.lowercased() } ?? ""
+        switch ext {
+        case "", "jpg", "jpeg": return "JPG"
+        case "tif", "tiff": return "TIFF"
+        case "heic", "heif": return "HEIC"
+        default: return ext.uppercased()
         }
+    }
 
-        let result = await service.exportRAWToJPEG(
-            rawURL: rawURL, parameters: params, outputURL: outputURL,
-            metadataSources: metadataSources(forRAWExportTo: outputURL, replacing: replacing))
-        if result == .written {
-            // Update the photo's jpgPath if a new file was created
-            if !replaceExisting || photo.jpgPath == nil {
-                photo.jpgPath = outputURL.path
+    /// Opens the export dialog, with the options the files allow (a three-byte read of the file to replace).
+    func presentExportOptions() {
+        var options = ExportOptions()
+        if let jpgPath = photo.jpgPath, ImageEditingService.isJPEGFile(at: URL(fileURLWithPath: jpgPath)) {
+            if isRAW {
+                options.replaceableCameraJPG = (jpgPath as NSString).lastPathComponent
+            } else {
+                options.canApplyPermanently = true
             }
-            try? modelContext?.save()
-            writeRatingAndKeywords(to: outputURL)
         }
+        exportOptions = options
+        pendingExportConfirmation = nil
+        showExportOptions = true
+    }
+
+    /// Saves the current parameters as a new JPG beside the photo's file: `<stem>-raw-edit.jpg` from a RAW,
+    /// `<stem>-edit.jpg` from another file, or `-2`, `-3`, … when that name is taken (`newExportURL`). Nothing is
+    /// overwritten, and the photo's own files and paths don't change: the caller adds the new file to the library as
+    /// a photo of its own. The JPEG carries the original metadata, then gets the photo's rating and keywords.
+    func exportToNewFile() async -> (result: ExportResult, url: URL?) {
+        guard let source = sourceURL else { return (.failed, nil) }
+        let params = parameters
+        guard let output = await newExportURL(beside: source, suffix: isRAW ? "raw-edit" : "edit") else {
+            return (.failed, nil)
+        }
+        let result = isRAW
+            ? await service.exportRAWToJPEG(rawURL: source, parameters: params, to: .newFile(output),
+                                            metadataSources: rawExportMetadataSources)
+            : await service.exportStandardToJPEG(sourceURL: source, parameters: params, to: .newFile(output))
+        guard result == .written else { return (result, nil) }
+        writeRatingAndKeywords(to: output)
+        return (.written, output)
+    }
+
+    /// Renders the RAW with the current parameters over the pair's camera JPG, once a copy of it is in the Trash (put
+    /// there with `trasher`). The JPG keeps its own metadata (read before it's replaced), then gets the photo's rating
+    /// and keywords. Refused unless it is a JPEG by its bytes. The photo's paths don't change.
+    func exportReplacingCameraJPG(originalTo trasher: FileTrasher) async -> ExportResult {
+        guard isRAW, let rawPath = photo.rawPath, let jpgPath = photo.jpgPath else { return .failed }
+        let jpg = URL(fileURLWithPath: jpgPath)
+        let result = await service.exportRAWToJPEG(rawURL: URL(fileURLWithPath: rawPath), parameters: parameters,
+                                                   to: .replacing(jpg, originalTo: trasher), metadataSources: [jpg])
+        if result == .written { writeRatingAndKeywords(to: jpg) }
         return result
     }
 
-    /// Where a RAW export takes its metadata from, in order of preference:
-    /// - replacing the paired JPG: that JPG, read before it's replaced, and nothing else (it must keep its own);
-    /// - a new file: the pair's camera JPG (the photo's JPG unless that is the export itself, as after an earlier
-    ///   export, else the JPG beside the RAW with its stem), then the RAW.
-    private func metadataSources(forRAWExportTo output: URL, replacing: Bool) -> [URL] {
+    /// Where a new RAW export takes its metadata from, in order of preference: the pair's camera JPG (the photo's
+    /// JPG, else the JPG beside the RAW with its stem), then the RAW.
+    private var rawExportMetadataSources: [URL] {
         guard let rawPath = photo.rawPath else { return [] }
         let raw = URL(fileURLWithPath: rawPath)
-        if replacing { return [output] }
         let fm = FileManager.default
-        let cameraJPG = photo.jpgPath.map(URL.init(fileURLWithPath:)).flatMap { $0.path == output.path ? nil : $0 }
+        let cameraJPG = photo.jpgPath.map(URL.init(fileURLWithPath:))
             ?? ["jpg", "JPG", "jpeg", "JPEG"].lazy
                 .map { raw.deletingPathExtension().appendingPathExtension($0) }
-                .first { $0.path != output.path && fm.fileExists(atPath: $0.path) }
+                .first { fm.fileExists(atPath: $0.path) }
         return (cameraJPG.map { [$0] } ?? []) + [raw]
     }
 
-    /// Bakes the current parameters into the JPG file, keeping its metadata, and clears its saved edits. Nothing is
-    /// written, and the edit stays, if the metadata can't be kept.
-    func exportJPGPermanent() async -> ExportResult {
-        guard let jpgPath = photo.jpgPath else { return .failed }
+    /// A free name for a new export beside `source`: the first of `<stem>-<suffix>`, `<stem>-<suffix>-2`, … that no
+    /// file in the folder has as its stem (any extension, any case: a scan would pair them) and no photo of the library
+    /// has in that folder (its file may be missing now). The folder is listed off the main actor.
+    private func newExportURL(beside source: URL, suffix: String) async -> URL? {
+        let folder = source.deletingLastPathComponent()
+        let stems = await Task.detached(priority: .userInitiated) {
+            Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+                .map { ($0 as NSString).deletingPathExtension.lowercased() })
+        }.value
+        let folderPath = folder.path
+        let context = modelContext
+        let stem = Self.freeExportStem(source.deletingPathExtension().lastPathComponent, suffix: suffix) { candidate in
+            if stems.contains(candidate.lowercased()) { return true }
+            guard let context else { return false }
+            let known = FetchDescriptor<PhotoAsset>(
+                predicate: #Predicate { $0.folderPath == folderPath && $0.fileName == candidate })
+            return ((try? context.fetchCount(known)) ?? 0) > 0
+        }
+        return stem.map { folder.appendingPathComponent("\($0).jpg") }
+    }
+
+    /// The first of `<stem>-<suffix>`, `<stem>-<suffix>-2`, `<stem>-<suffix>-3`, … that isn't taken; nil after 9999.
+    static func freeExportStem(_ stem: String, suffix: String, isTaken: (String) -> Bool) -> String? {
+        for n in 1...9999 {
+            let candidate = n == 1 ? "\(stem)-\(suffix)" : "\(stem)-\(suffix)-\(n)"
+            if !isTaken(candidate) { return candidate }
+        }
+        return nil
+    }
+
+    /// Bakes the current parameters into the JPG file, keeping its metadata, and clears its saved edits. A copy of the
+    /// original goes to the Trash first (with `trasher`). Nothing is written, and the edit stays, if the file isn't a
+    /// JPEG by its bytes, if the copy can't be trashed, or if the metadata can't be kept.
+    func exportJPGPermanent(originalTo trasher: FileTrasher) async -> ExportResult {
+        guard !isRAW, let jpgPath = photo.jpgPath else { return .failed }
 
         let url = URL(fileURLWithPath: jpgPath)
         let params = parameters
 
-        let result = await service.exportStandardToJPEG(sourceURL: url, parameters: params, outputURL: url)
+        let result = await service.exportStandardToJPEG(sourceURL: url, parameters: params,
+                                                        to: .replacing(url, originalTo: trasher))
         guard result == .written else { return result }
         writeRatingAndKeywords(to: url)
         // Clear saved edit parameters since they're baked in

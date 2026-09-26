@@ -255,6 +255,28 @@ extension LibraryStore {
         if trashProgress != shown { trashProgress = shown }
     }
 
+    // MARK: - Exports
+
+    /// A new JPG exported from `source` (`EditSession.exportToNewFile()`) joins the library as a photo of its own, as a
+    /// scan would insert it (its folder, file name and path, so the next scan knows it rather than adding it again),
+    /// with `source`'s rating, tags and capture date: the export carries the original's metadata, so it sorts beside
+    /// it. `source` doesn't change. Patched in memory, no reload.
+    @discardableResult
+    func addExportedPhoto(at url: URL, copying source: PhotoAsset) -> PhotoAsset? {
+        guard let context = modelContext else { return nil }
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey])
+        let photo = PhotoAsset(fileName: url.deletingPathExtension().lastPathComponent, jpgPath: url.path,
+                               folderPath: url.deletingLastPathComponent().path, creationDate: values?.creationDate,
+                               fileSize: Int64(values?.fileSize ?? 0))
+        photo.rating = source.rating
+        photo.captureDate = source.captureDate
+        context.insert(photo)
+        photo.tags = source.tags
+        try? context.save()
+        updateLibrary(adding: [photo], facts: makeFacts(for: [photo]), removing: [])
+        return photo
+    }
+
     // MARK: - Background Metadata Write-back
 
     /// The photo's rating and keywords, for its file. A JPG+RAW pair writes both: the JPG and the RAW's

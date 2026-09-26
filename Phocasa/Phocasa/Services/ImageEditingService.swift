@@ -111,19 +111,37 @@ actor ImageEditingService {
     /// RAW → JPEG at full quality: a fresh filter with draft mode off. Exports are never skipped. The JPEG carries
     /// the metadata of the first of `metadataSources` whose metadata can be carried over whole (`ExportMetadata`);
     /// if none can, nothing is written.
-    nonisolated func exportRAWToJPEG(rawURL: URL, parameters: EditParameters, outputURL: URL, metadataSources: [URL],
-                                     quality: Double = 0.95) async -> ExportResult {
-        await fullLane.exportRAW(rawURL: rawURL, parameters: parameters, outputURL: outputURL,
+    nonisolated func exportRAWToJPEG(rawURL: URL, parameters: EditParameters, to destination: ExportDestination,
+                                     metadataSources: [URL], quality: Double = 0.95) async -> ExportResult {
+        await fullLane.exportRAW(rawURL: rawURL, parameters: parameters, destination: destination,
                                  metadataSources: metadataSources, quality: quality)
     }
 
     /// Bakes `parameters` into a JPEG, reading the source fresh from disk. Exports are never skipped. The JPEG carries
-    /// `sourceURL`'s metadata (read before `outputURL` is replaced, which may be the same file); if it can't be
+    /// `sourceURL`'s metadata (read before the destination is replaced, which may be the same file); if it can't be
     /// carried over whole, nothing is written.
-    nonisolated func exportStandardToJPEG(sourceURL: URL, parameters: EditParameters, outputURL: URL,
+    nonisolated func exportStandardToJPEG(sourceURL: URL, parameters: EditParameters, to destination: ExportDestination,
                                           quality: Double = 0.95) async -> ExportResult {
-        await fullLane.exportStandard(sourceURL: sourceURL, parameters: parameters, outputURL: outputURL, quality: quality)
+        await fullLane.exportStandard(sourceURL: sourceURL, parameters: parameters, destination: destination,
+                                      quality: quality)
     }
+
+    /// Whether the file at `url` is a JPEG by its first bytes, whatever its name says (a HEIC, PNG or TIFF isn't).
+    nonisolated static func isJPEGFile(at url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 3)).map(JPEGStructure.isJPEG) ?? false
+    }
+}
+
+/// Where an export's JPEG goes.
+enum ExportDestination: Sendable {
+    /// A new file. The export fails rather than overwrite a file that is there.
+    case newFile(URL)
+    /// Over an existing JPEG, once a copy of it is in the Trash (put there with `originalTo`), so the original can be
+    /// recovered. Refused, the file untouched, when it isn't a JPEG by its bytes (Phocasa never writes JPEG bytes over
+    /// a HEIC, PNG or TIFF) or when the copy can't be put in the Trash.
+    case replacing(URL, originalTo: FileTrasher)
 }
 
 /// How an export ended.
@@ -133,6 +151,10 @@ enum ExportResult: Sendable, Equatable {
     case failed
     /// Nothing was written: the photo's metadata couldn't be carried into the new file whole.
     case metadataNotKept
+    /// Nothing was written: the file to replace isn't a JPEG.
+    case notAJPEG
+    /// Nothing was written: a copy of the file to replace couldn't be put in the Trash first.
+    case originalNotTrashed
 }
 
 // MARK: - Render result
@@ -269,27 +291,30 @@ private actor RenderLane {
         return render(EditPipeline.editedStandard(source, parameters: parameters, maxSize: maxSize))
     }
 
-    func exportRAW(rawURL: URL, parameters: EditParameters, outputURL: URL, metadataSources: [URL],
+    func exportRAW(rawURL: URL, parameters: EditParameters, destination: ExportDestination, metadataSources: [URL],
                    quality: Double) async -> ExportResult {
+        if let refusal = Self.refusal(of: destination) { return refusal }
         // A fresh filter, not the cached one: full quality, and no preview state.
         guard let filter = CIRAWFilter(imageURL: rawURL),
               let edited = EditPipeline.editedRAW(filter, parameters: parameters, maxSize: nil),
               let encoded = encodeJPEG(edited, quality: quality) else { return .failed }
         for source in metadataSources {
             if let jpeg = ExportMetadata.jpeg(encoded: encoded, metadataFrom: source) {
-                return await write(jpeg, to: outputURL) ? .written : .failed
+                return await write(jpeg, to: destination)
             }
         }
         return .metadataNotKept
     }
 
-    func exportStandard(sourceURL: URL, parameters: EditParameters, outputURL: URL, quality: Double) async -> ExportResult {
+    func exportStandard(sourceURL: URL, parameters: EditParameters, destination: ExportDestination,
+                        quality: Double) async -> ExportResult {
+        if let refusal = Self.refusal(of: destination) { return refusal }
         // Read fresh from disk: the export may overwrite the source file.
         guard let image = CIImage(contentsOf: sourceURL) else { return .failed }
         let edited = EditPipeline.editedStandard(EditPipeline.orientedImage(image), parameters: parameters, maxSize: nil)
         guard let encoded = encodeJPEG(edited, quality: quality) else { return .failed }
         guard let jpeg = ExportMetadata.jpeg(encoded: encoded, metadataFrom: sourceURL) else { return .metadataNotKept }
-        return await write(jpeg, to: outputURL) ? .written : .failed
+        return await write(jpeg, to: destination)
     }
 
     // MARK: Output
@@ -319,19 +344,61 @@ private actor RenderLane {
         return CGImageDestinationFinalize(destination) ? output as Data : nil
     }
 
-    /// Writes `jpeg` to `url` through a temp file, on the metadata writer's queue so no rating write can interleave.
-    /// An existing file keeps its permissions, extended attributes and dates.
-    private func write(_ jpeg: Data, to url: URL) async -> Bool {
-        await MetadataWriter.shared.runExclusively {
+    /// Why an export to `destination` can't happen, checked before rendering: a file to replace that isn't a JPEG.
+    /// (`write` checks again, just before replacing.)
+    private static func refusal(of destination: ExportDestination) -> ExportResult? {
+        guard case .replacing(let url, _) = destination else { return nil }
+        return ImageEditingService.isJPEGFile(at: url.resolvingSymlinksInPath()) ? nil : .notAJPEG
+    }
+
+    /// Writes `jpeg` to its destination through a temp file, on the metadata writer's queue so no rating write can
+    /// interleave. A new file never overwrites one that is there. A replaced file must be a JPEG, and a copy of it
+    /// goes to the Trash first; it keeps its permissions, extended attributes and dates.
+    private func write(_ jpeg: Data, to destination: ExportDestination) async -> ExportResult {
+        switch destination {
+        case .newFile(let url):
+            return await MetadataWriter.shared.runExclusively {
+                let target = url.resolvingSymlinksInPath()
+                guard !FileManager.default.fileExists(atPath: target.path) else { return .failed }
+                // Moved into place, which fails rather than overwrite a file that appeared meanwhile.
+                return MetadataService.replace(target, exists: false, writingTempWith: {
+                    try jpeg.write(to: $0, options: .withoutOverwriting)
+                }) ? .written : .failed
+            }
+        case .replacing(let url, let trasher):
             let target = url.resolvingSymlinksInPath()
-            let exists = FileManager.default.fileExists(atPath: target.path)
-            let originalDates = exists ? Phocasa.captureFileDates(target) : nil
-            guard MetadataService.replace(target, exists: exists, writingTempWith: {
-                try jpeg.write(to: $0, options: .withoutOverwriting)
-            }) else { return false }
-            Phocasa.restoreFileDates(target, dates: originalDates)
-            return true
+            guard FileManager.default.fileExists(atPath: target.path) else { return .failed }
+            guard ImageEditingService.isJPEGFile(at: target) else { return .notAJPEG }
+            guard await Self.trashCopy(of: target, with: trasher) else { return .originalNotTrashed }
+            return await MetadataWriter.shared.runExclusively {
+                guard ImageEditingService.isJPEGFile(at: target) else { return .notAJPEG }
+                let originalDates = Phocasa.captureFileDates(target)
+                guard MetadataService.replace(target, exists: true, writingTempWith: {
+                    try jpeg.write(to: $0, options: .withoutOverwriting)
+                }) else { return .failed }
+                Phocasa.restoreFileDates(target, dates: originalDates)
+                return .written
+            }
         }
+    }
+
+    /// Puts a copy of `file` in the Trash with `trasher`, under the file's own name, and returns whether it's there.
+    /// The copy is made in a hidden folder beside the file (the same volume, so a clone on APFS; a scan skips hidden
+    /// folders), which is removed afterwards, with the copy if it couldn't be trashed.
+    private static func trashCopy(of file: URL, with trasher: FileTrasher) async -> Bool {
+        let fm = FileManager.default
+        let folder = file.deletingLastPathComponent()
+            .appendingPathComponent(".phocasa-original-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: folder) }
+        let copy = folder.appendingPathComponent(file.lastPathComponent)
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+            try fm.copyItem(at: file, to: copy)
+        } catch {
+            return false
+        }
+        await trasher.trash([copy])
+        return !fm.fileExists(atPath: copy.path)
     }
 }
 

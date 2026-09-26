@@ -431,7 +431,7 @@ final class ImageEditingServiceTests: XCTestCase {
             let serviceOut = tempDir.appendingPathComponent("service-\(label).jpg")
             let referenceOut = tempDir.appendingPathComponent("reference-\(label).jpg")
             let result = await ImageEditingService.shared.exportStandardToJPEG(
-                sourceURL: sourceURL, parameters: params, outputURL: serviceOut, quality: 1.0)
+                sourceURL: sourceURL, parameters: params, to: .newFile(serviceOut), quality: 1.0)
             XCTAssertEqual(result, .written, label)
             XCTAssertTrue(reference.exportStandardToJPEG(sourceURL: sourceURL, parameters: params,
                                                          outputURL: referenceOut, quality: 1.0), label)

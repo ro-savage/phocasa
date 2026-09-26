@@ -35,6 +35,9 @@ final class PhotoLibraryViewModel {
     private(set) var editedFilesVersion = 0
     /// Why the last export didn't happen, for the alert; nil when there is nothing to report.
     var exportFailure: String?
+    /// Where the last new-file export went ("Saved IMG_1234-raw-edit.jpg"), for the alert; nil when there is nothing
+    /// to report.
+    var exportNotice: String?
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
 
@@ -434,34 +437,48 @@ final class PhotoLibraryViewModel {
     }
 
     // MARK: - Export
+    // The export dialog's choices (see `EditSession`'s export section). Exports that replace a file put a copy of the
+    // original in the Trash first, through the library's `fileTrasher`.
 
-    /// Exports the session's RAW edit to a JPEG (see `EditSession.exportRAWToJPG`), then refreshes what depends
-    /// on the file: the in-memory library facts when the photo got a new JPG, and cached decodes of the written file.
-    func exportRAWToJPG(replaceExisting: Bool) {
+    /// Saves the session's edit as a new JPG beside the photo (`EditSession.exportToNewFile()`) and adds it to the
+    /// library as a photo of its own, with the photo's rating and tags, next to it in the order. The photo itself and
+    /// its files don't change. `exportNotice` then says where it went.
+    func exportToNewFile() {
         guard let session = editSession else { return }
-        let photo = session.photo
-        let jpgBefore = photo.jpgPath
-        let replacing = replaceExisting && jpgBefore != nil
+        let source = session.photo
         Task {
-            let result = await session.exportRAWToJPG(replaceExisting: replaceExisting)
-            guard result == .written else {
-                exportFailure = Self.failureMessage(result, replacing: replacing)
+            let (result, url) = await session.exportToNewFile()
+            guard result == .written, let url else {
+                exportFailure = Self.failureMessage(result, replacing: false)
                 return
             }
-            if photo.jpgPath != jpgBefore {
-                library.photosDidChange([photo])
-            }
-            if let written = photo.jpgPath {
-                fileWasRewritten(written)
-            }
+            library.addExportedPhoto(at: url, copying: source)
+            exportNotice = "Saved \(url.lastPathComponent)"
         }
     }
 
-    /// Bakes the session's edits into the JPG file (see `EditSession.exportJPGPermanent`).
+    /// Replaces the pair's camera JPG with the session's RAW edit (`EditSession.exportReplacingCameraJPG`), a copy of
+    /// the original going to the Trash first.
+    func exportReplacingCameraJPG() {
+        guard let session = editSession, let jpgPath = session.photo.jpgPath else { return }
+        let trasher = library.fileTrasher
+        Task {
+            let result = await session.exportReplacingCameraJPG(originalTo: trasher)
+            guard result == .written else {
+                exportFailure = Self.failureMessage(result, replacing: true)
+                return
+            }
+            fileWasRewritten(jpgPath)
+        }
+    }
+
+    /// Bakes the session's edits into the JPG file (see `EditSession.exportJPGPermanent`), a copy of the original
+    /// going to the Trash first.
     func exportJPGPermanent() {
         guard let session = editSession, let jpgPath = session.photo.jpgPath else { return }
+        let trasher = library.fileTrasher
         Task {
-            let result = await session.exportJPGPermanent()
+            let result = await session.exportJPGPermanent(originalTo: trasher)
             guard result == .written else {
                 exportFailure = Self.failureMessage(result, bakingEdits: true)
                 return
@@ -482,9 +499,15 @@ final class PhotoLibraryViewModel {
                 + "kept as a saved edit."
         case .metadataNotKept where replacing:
             return "The JPG wasn't replaced. Phocasa couldn't carry its metadata (camera details, capture date, "
-                + "location, captions) into the new file. Use \"Create new file\" instead."
+                + "location, captions) into the new file. Use \"Save as New JPG\" instead."
         case .metadataNotKept:
             return "No file was written. Phocasa couldn't carry the photo's metadata into the new file."
+        case .notAJPEG:
+            return "The file wasn't changed: it isn't a JPEG, and Phocasa only rewrites JPEG files. Use \"Save as New "
+                + "JPG\" instead."
+        case .originalNotTrashed:
+            return "The file wasn't changed: Phocasa couldn't put a copy of the original in the Trash first (this drive "
+                + "may have no Trash). Use \"Save as New JPG\" instead."
         }
     }
 

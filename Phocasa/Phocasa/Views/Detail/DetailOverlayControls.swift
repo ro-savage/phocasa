@@ -136,7 +136,8 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
             HStack(spacing: 4) {
                 Image(systemName: isRAW ? "camera.filters" : "photo.on.rectangle")
                     .font(.caption)
-                Text(isRAW ? "RAW" : "JPG")
+                // The file's kind: a HEIC, PNG or TIFF isn't called a JPG.
+                Text(isRAW ? "RAW" : EditSession.kind(ofStandardFileAt: photo.jpgPath))
                     .font(.caption.weight(.bold))
             }
             .padding(.horizontal, 10)

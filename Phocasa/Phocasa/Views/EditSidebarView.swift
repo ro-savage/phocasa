@@ -47,7 +47,7 @@ struct EditSidebarView: View {
     private var editToolbar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 12) {
-                Text(session.isRAW ? "RAW Edit" : "JPG Edit")
+                Text("\(session.fileKind) Edit")
                     .font(.headline)
                     .foregroundStyle(session.isRAW ? .blue : .orange)
 
@@ -81,7 +81,7 @@ struct EditSidebarView: View {
                 }
 
                 if session.canExport {
-                    Button(action: { session.showExportOptions = true }) {
+                    Button(action: { session.presentExportOptions() }) {
                         Image(systemName: "square.and.arrow.up")
                             .font(.body)
                     }

@@ -93,6 +93,12 @@ final class EditSessionTests: XCTestCase {
         let viewModel = PhotoLibraryViewModel()
         viewModel.setModelContext(context)
         viewModels.append(viewModel)
+        // Exports that replace a file put a copy of the original in the Trash: here, a temp folder.
+        let trash = dir.appendingPathComponent("trash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        viewModel.library.fileTrasher = FileTrasher { url in
+            try FileManager.default.moveItem(at: url, to: trash.appendingPathComponent(UUID().uuidString))
+        }
         return viewModel
     }
 
@@ -1053,10 +1059,11 @@ final class EditSessionTests: XCTestCase {
         XCTAssertLessThanOrEqual(preview.size.width, 1600)
         _ = try await eventually(10) { session.fullImage }
 
-        viewModel.exportRAWToJPG(replaceExisting: false)
-        _ = try await eventually(20, "the export becomes the photo's JPG") { photo.jpgPath }
-        XCTAssertEqual(photo.jpgPath, export.path)
-        XCTAssertEqual(viewModel.library.jpgCount, 1, "photosDidChange: the library counts the new JPG")
+        viewModel.exportToNewFile()
+        _ = try await eventually(20, "the export is a photo of its own") { viewModel.exportNotice }
+        XCTAssertNil(photo.jpgPath, "the RAW photo doesn't change")
+        XCTAssertEqual(viewModel.library.allPhotos.compactMap(\.jpgPath), [export.path])
+        XCTAssertEqual(viewModel.library.jpgCount, 1, "the library counts the new photo")
 
         viewModel.stopEditing(save: true)
         XCTAssertTrue(photo.hasRawEdits)
