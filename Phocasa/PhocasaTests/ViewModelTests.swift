@@ -850,9 +850,23 @@ final class ViewModelTests: XCTestCase {
     }
 
     /// Random sequences of every interaction, checked against a fresh load after each step.
-    func testRandomisedInteractionsMatchFreshLoad() {
+    func testRandomisedInteractionsMatchFreshLoad() async {
+        await randomisedInteractions(seed: 0x5EED_0010)
+    }
+
+    /// The same with the rows written in chunks of 2 (actions on more than 2 photos are queued). Two steps in three go
+    /// on without waiting, so later actions meet queued changes (merged, or written early by a small action); every
+    /// third waits for the queue, then checks that the store holds what memory shows.
+    func testRandomisedInteractionsWithRowsWrittenInChunksMatchFreshLoad() async {
+        viewModel.library.rowWrites.sizer.maximumRows = 2
+        viewModel.library.rowWrites.immediateMinimum = 2
+        viewModel.library.rowWrites.pausesBetweenChunks = false
+        await randomisedInteractions(seed: 0x5EED_0011, chunked: true)
+    }
+
+    private func randomisedInteractions(seed: UInt64, chunked: Bool = false) async {
         let oracle = makeOracle()
-        var rng = SeededGenerator(seed: 0x5EED_0010)
+        var rng = SeededGenerator(seed: seed)
         let tagPool: [(name: String, category: String)] = [
             ("alice", "people"), ("bob", "people"), ("paris", "places"), ("rome", "places"), ("misc", ""), ("x", "zz"),
         ]
@@ -893,7 +907,7 @@ final class ViewModelTests: XCTestCase {
                     viewModel.library.addTag(name: tag.name, category: tag.category, to: photo)
                 }
             case 5:
-                if let photo = viewModel.library.allPhotos.randomElement(using: &rng), let tag = photo.tags.randomElement(using: &rng) {
+                if let photo = viewModel.library.allPhotos.randomElement(using: &rng), let tag = viewModel.library.tags(of: photo).randomElement(using: &rng) {
                     viewModel.library.removeTag(tag, from: photo)
                 }
             case 6 where !visible.isEmpty:
@@ -925,6 +939,11 @@ final class ViewModelTests: XCTestCase {
                 viewModel.library.applyCurrentFilter()
             default:
                 break
+            }
+            if chunked {
+                // Every third step goes on before the queue is written, so later actions meet queued changes.
+                guard step % 3 == 0 else { continue }
+                await viewModel.library.waitForRowWrites()
             }
             assertMatchesFreshLoad(oracle, "step \(step) (action \(action))")
         }

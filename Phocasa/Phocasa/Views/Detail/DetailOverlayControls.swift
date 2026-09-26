@@ -39,7 +39,7 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.7))
 
-                    if photo.hasAnyEdits {
+                    if viewModel.library.hasAnyEdits(of: photo) {
                         Text("Edited")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.white)
@@ -48,9 +48,9 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
                             .background(.orange.opacity(0.6), in: Capsule())
                     }
 
-                    if !photo.tags.isEmpty {
+                    if !viewModel.library.tags(of: photo).isEmpty {
                         HStack(spacing: 4) {
-                            ForEach(photo.tags, id: \.id) { tag in
+                            ForEach(viewModel.library.tags(of: photo), id: \.id) { tag in
                                 Text(tag.name)
                                     .font(.caption2)
                                     .padding(.horizontal, 6)
@@ -91,7 +91,7 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
                 Spacer()
 
                 VStack(spacing: 8) {
-                    RatingView(rating: photo.rating) { newRating in
+                    RatingView(rating: viewModel.library.rating(of: photo)) { newRating in
                         viewModel.library.setRating(newRating, for: photo)
                     }
 

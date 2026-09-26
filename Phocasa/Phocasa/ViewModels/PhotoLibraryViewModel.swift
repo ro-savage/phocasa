@@ -76,6 +76,15 @@ final class PhotoLibraryViewModel {
         }
     }
 
+    /// Quitting, after `saveEditsBeforeQuit()`: the changes still queued for the store (a big action's later chunks)
+    /// are written at once, in one save, so the store holds them and their files' writes are queued before quit waits
+    /// for those.
+    static func writePendingChangesBeforeQuit() {
+        for entry in openViewModels {
+            entry.viewModel?.library.writeAllPendingRows()
+        }
+    }
+
     /// Reloads the library from the store (see `LibraryStore.loadExistingData()`).
     func loadExistingData() {
         library.loadExistingData()
@@ -115,7 +124,7 @@ final class PhotoLibraryViewModel {
                 addTagToSelection(name: tag.name, category: tag.category)
             }
         } else {
-            if photo.tags.contains(where: { $0.id == tag.id }) {
+            if library.tagIDs(of: photo).contains(tag.id) {
                 library.removeTag(tag, from: photo)
             } else {
                 library.addTag(name: tag.name, category: tag.category, to: photo)
@@ -170,7 +179,7 @@ final class PhotoLibraryViewModel {
         if tagEditorEditsSelection {
             addTagToSelection(name: tag.name, category: tag.category)
         } else if let photo {
-            if photo.tags.contains(where: { $0.id == tag.id }) {
+            if library.tagIDs(of: photo).contains(tag.id) {
                 library.removeTag(tag, from: photo)
             } else {
                 library.addTag(name: tag.name, category: tag.category, to: photo)
@@ -343,7 +352,10 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Detail View
 
+    /// Opens the detail view on `photo`. Its row gets any change still queued for it first: the detail view, its edit
+    /// session and exports read the model.
     func openDetail(for photo: PhotoAsset) {
+        library.writePendingRows(of: [photo])
         selectedDetailPhoto = photo
         showingDetail = true
     }
@@ -367,6 +379,7 @@ final class PhotoLibraryViewModel {
         editSession?.end(save: saveEdit)
         editSession = nil
         savedEditHandoff = nil
+        library.writePendingRows(of: [photo])
         selectedDetailPhoto = photo
         if let editingRAW {
             continueEditing(photo, isRAW: editingRAW)
@@ -406,6 +419,7 @@ final class PhotoLibraryViewModel {
             if let handoff = current.end(save: true) { savedEditHandoff = handoff }
             editSession = nil
         }
+        library.writePendingRows(of: [photo]) // the session reads and saves the model's edits
         selectedDetailPhoto = photo
         let session = EditSession(photo: photo, isRAW: isRAW, modelContext: library.modelContext)
         editSession = session
@@ -435,7 +449,7 @@ final class PhotoLibraryViewModel {
     /// selected photos that have edits when `photo` is part of a multi-selection, else `photo`.
     func requestRevertEdits(from photo: PhotoAsset) {
         photosToRevert = selection.isPartOfMultiSelection(photo)
-            ? selection.selectedPhotosList.filter(\.hasAnyEdits) : [photo]
+            ? selection.selectedPhotosList.filter { library.hasAnyEdits(of: $0) } : [photo]
     }
 
     func confirmRevertEdits() {
@@ -444,17 +458,20 @@ final class PhotoLibraryViewModel {
         revertEdits(of: photos)
     }
 
-    /// Clears the photos' saved JPG and RAW edits, in one save. The sidecar writes go through `MetadataWriter`.
+    /// Clears the photos' saved JPG and RAW edits (the rows through the library's write queue; the sidecars through
+    /// `MetadataWriter`). It asks first, and isn't undoable.
     private func revertEdits(of photos: [PhotoAsset]) {
         guard !photos.isEmpty else { return }
-        for photo in photos {
-            photo.jpgEditParametersData = nil
-            photo.hasRawEdits = false
-            if let rawPath = photo.rawPath {
-                RAWEditStore.shared.save(nil, forRAWAt: rawPath)
-            }
-        }
-        try? library.modelContext?.save()
+        library.setSavedEdits(photos.map { (photo: $0, edits: LibraryStore.SavedEdits(jpgEditParametersData: nil,
+                                                                                    hasRawEdits: false),
+                                            rawParameters: nil) })
+        settleDetailPhoto()
+    }
+
+    /// The photo on screen gets any change still queued for its row: the detail view and its edit session read the
+    /// model.
+    private func settleDetailPhoto() {
+        if showingDetail, let photo = selectedDetailPhoto { library.writePendingRows(of: [photo]) }
     }
 
     // MARK: - Export
@@ -571,23 +588,28 @@ final class PhotoLibraryViewModel {
     }
 
     /// Saves `preset`'s look as the edits of every selected photo, each keeping its own crop, rotation and flips: JPG
-    /// edits in the model, RAW edits in the sidecar (through `MetadataWriter`).
+    /// edits in the model (through the library's write queue), RAW edits in the sidecar (through `MetadataWriter`).
     func applyPresetToSelection(_ preset: EditPreset) {
-        let params = preset.parameters
-
+        let look = preset.parameters
+        var changes: [(photo: PhotoAsset, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
         for photo in selection.selectedPhotosList {
+            let saved = library.savedEdits(of: photo)
+            let rawPath = photo.rawPath
+            // The sidecar is read only for photos with RAW edits: only those can have a transform to keep.
+            let savedRAW = saved.hasRawEdits ? rawPath.flatMap { RAWEditStore.shared.parameters(forRAWAt: $0) } : nil
+            var edits = saved
             if photo.jpgPath != nil {
-                photo.jpgEditParameters = (photo.jpgEditParameters ?? EditParameters()).applyingLook(of: params)
+                let jpg = saved.jpgEditParametersData.flatMap { try? JSONDecoder().decode(EditParameters.self, from: $0) }
+                edits.jpgEditParametersData = try? JSONEncoder().encode((jpg ?? EditParameters()).applyingLook(of: look))
             }
-            if let rawPath = photo.rawPath {
-                // The sidecar is read only for photos with RAW edits: only those can have a transform to keep.
-                let saved = photo.hasRawEdits ? RAWEditStore.shared.parameters(forRAWAt: rawPath) : nil
-                RAWEditStore.shared.save((saved ?? EditParameters()).applyingLook(of: params), forRAWAt: rawPath)
-                photo.hasRawEdits = true
+            var raw: EditParameters?
+            if rawPath != nil {
+                raw = (savedRAW ?? EditParameters()).applyingLook(of: look)
+                edits.hasRawEdits = true
             }
+            changes.append((photo, edits, raw))
         }
-
-        try? library.modelContext?.save()
+        library.setSavedEdits(changes)
     }
 }
 

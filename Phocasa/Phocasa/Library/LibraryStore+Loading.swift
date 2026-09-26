@@ -63,9 +63,10 @@ extension LibraryStore {
     /// Everything else works on the in-memory state this builds.
     ///
     /// If the store can't be read, the library shown stays as it was and `libraryReadFailure` says why: a failed read
-    /// isn't an empty library.
+    /// isn't an empty library. Changes still queued for the rows are written first, in one save: the load reads them.
     func loadExistingData() {
         guard let context = modelContext else { return }
+        writeAllPendingRows()
 
         let tags: [Tag]
         let fetchedPhotos: [PhotoAsset]
@@ -260,7 +261,7 @@ extension LibraryStore {
         var facts: [PhotoFacts] = []
         facts.reserveCapacity(photos.count)
         for photo in photos {
-            facts.append(PhotoFacts(photo, tags: &tagFacts))
+            facts.append(self.facts(of: photo))
         }
         return facts
     }

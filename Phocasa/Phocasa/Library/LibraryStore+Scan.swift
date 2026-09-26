@@ -127,10 +127,6 @@ extension LibraryStore {
         var mainActorTime: Duration = .zero
     }
 
-    /// New photos inserted per main-actor turn. Between chunks the scan saves and yields, so a big import
-    /// never holds the main actor for more than a few tens of milliseconds at a time.
-    private static let scanInsertChunkSize = 256
-
     /// Starts a scan of `url`, or queues one if a scan (or the launch's background load) is running. `isScanning` is
     /// true when this returns (`DataPathBenchmarks.waitForScan` relies on that), and stays true until every queued
     /// scan is done.
@@ -180,6 +176,8 @@ extension LibraryStore {
     /// nothing and one that adds k photos costs O(k log n) (spec §B1, §B2).
     private func performScan(of url: URL) async {
         guard let context = modelContext else { return }
+        // The diff reads the rows (a row's bin flag among them): changes still being written in chunks go in first.
+        await waitForRowWrites()
         let clock = ContinuousClock()
         var report = ScanReport()
         var sectionStart = clock.now
@@ -259,24 +257,24 @@ extension LibraryStore {
             report.inserted += insertedInBackground.count
         }
 
+        // Changed rows, in chunks sized by time. The last chunk is saved with the rest of the scan, unless new photos
+        // are inserted after it (then that save would hold two chunks).
+        let updates = await applyScanUpdates(plan.updates, in: context, savingLast: !withKeywords.isEmpty)
+        report.updated = updates.updated
+        report.mainActorTime += updates.mainActorTime
         sectionStart = clock.now
-        let changed = applyScanUpdates(plan.updates, in: context)
-        report.updated = changed.count
 
+        // New photos with keywords, in chunks sized by time: each one's save costs more as the library in the context
+        // and the tags grow. Their facts and sort keys are read chunk by chunk, not all at the end.
         var insertedHere: [PhotoAsset] = []
+        var added = LibraryAdditions()
         var createdTags = false
         if !withKeywords.isEmpty {
             scanProgress = "Adding \(plan.newPhotos.count) new photos..."
+            var sizer = rowWrites.sizer
             var start = 0
             while start < withKeywords.count {
-                if start > 0 {
-                    // Save this chunk and let other main-actor work run before the next one.
-                    try? context.save()
-                    report.mainActorTime += clock.now - sectionStart
-                    await Task.yield()
-                    sectionStart = clock.now
-                }
-                let end = min(start + Self.scanInsertChunkSize, withKeywords.count)
+                let end = min(start + sizer.rows, withKeywords.count)
                 let inserted: (photos: [PhotoAsset], createdTags: Bool)
                 do {
                     inserted = try insertScannedPhotos(withKeywords[start..<end], into: context)
@@ -286,8 +284,18 @@ extension LibraryStore {
                     break
                 }
                 insertedHere += inserted.photos
+                added.append(inserted.photos, facts: makeFacts(for: inserted.photos))
                 createdTags = createdTags || inserted.createdTags
+                let rows = end - start
                 start = end
+                guard start < withKeywords.count else { break } // the last chunk is saved with the rest
+                // Save this chunk and let other main-actor work run before the next one.
+                try? context.save()
+                let elapsed = clock.now - sectionStart
+                report.mainActorTime += elapsed
+                sizer.record(rows: rows, took: elapsed)
+                try? await Task.sleep(for: WriteChunkSizer.pause(after: elapsed))
+                sectionStart = clock.now
             }
             report.inserted += insertedHere.count
         }
@@ -307,19 +315,19 @@ extension LibraryStore {
             }
         }
 
-        // Patch the in-memory library with what changed. An unchanged rescan changes nothing.
+        // Patch the in-memory library with what changed. An unchanged rescan changes nothing. The rows inserted in the
+        // background (and those found again) are fetched a chunk per turn, with their facts and sort keys, so the last
+        // turn only merges them in.
         let fetchIDs = insertedInBackground + plan.foundAgainIDs
-        var added = insertedHere
         var start = 0
         while start < fetchIDs.count, loading.generation == generation {
-            if start > 0 {
-                report.mainActorTime += clock.now - sectionStart
-                await Task.yield()
-                sectionStart = clock.now
-            }
+            report.mainActorTime += clock.now - sectionStart
+            await Task.yield()
+            sectionStart = clock.now
             let chunk = Array(fetchIDs[start..<min(start + Self.scanFetchChunkSize, fetchIDs.count)])
-            added += (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { chunk.contains($0.id) })))
+            let fetched = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { chunk.contains($0.id) })))
                 ?? []
+            if loading.generation == generation { added.append(fetched, facts: makeFacts(for: fetched)) }
             start += chunk.count
         }
         if loading.generation != generation || libraryReadFailure != nil {
@@ -332,11 +340,11 @@ extension LibraryStore {
                 setTagLists((try? context.fetch(FetchDescriptor<Tag>(sortBy: Self.tagSortOrder))) ?? allTags)
             }
             let leaving = plan.missingIDs.subtracting(previouslyMissing)
-            if added.isEmpty && leaving.isEmpty {
-                if !changed.isEmpty { photosDidChange(changed) }
+            if added.photos.isEmpty && leaving.isEmpty {
+                if !updates.factsChanged.isEmpty { photosDidChange(updates.factsChanged) }
             } else {
-                applyFactChanges(changed)
-                updateLibrary(adding: added, facts: makeFacts(for: added), removing: leaving)
+                applyFactChanges(updates.factsChanged)
+                updateLibrary(adding: added.photos, facts: added.facts, keys: added.keys, removing: leaving)
             }
         }
 
@@ -405,20 +413,48 @@ extension LibraryStore {
     /// SwiftData doesn't mark unchanged rows dirty. Rows deleted since the scan read the store are skipped. A row in
     /// the bin stays there (user decision, wave 2 #1); the store keeps its bin flag through this write, since the row
     /// is fetched just before it (`ScanTests.testBinnedPhotoWhoseFilesChangedStaysInTheBinWithNewPaths`).
-    private func applyScanUpdates(_ updates: [ScanPlan.Update], in context: ModelContext) -> [PhotoAsset] {
-        guard !updates.isEmpty else { return [] }
-        let ids = updates.map(\.id)
-        let rows = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { ids.contains($0.id) }))) ?? []
-        let rowsByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        var changed: [PhotoAsset] = []
-        for update in updates {
-            guard let photo = rowsByID[update.id] else { continue }
-            if photo.jpgPath != update.jpgPath { photo.jpgPath = update.jpgPath }
-            if photo.rawPath != update.rawPath { photo.rawPath = update.rawPath }
-            if photo.fileSize != update.fileSize { photo.fileSize = update.fileSize }
-            changed.append(photo)
+    ///
+    /// In chunks sized by time, each fetched and saved on its own (`writeInChunks`), except the last when not
+    /// `savingLast`. Returns how many rows it updated, the photos whose facts may have changed (a file came or went:
+    /// a size alone changes nothing the library shows), and its main-actor time.
+    private func applyScanUpdates(_ updates: [ScanPlan.Update], in context: ModelContext, savingLast: Bool) async
+        -> (updated: Int, factsChanged: [PhotoAsset], mainActorTime: Duration)
+    {
+        guard !updates.isEmpty else { return (0, [], .zero) }
+        var updated = 0
+        var factsChanged: [PhotoAsset] = []
+        let time = await writeInChunks(updates, in: context, savingLast: savingLast) { chunk in
+            let ids = chunk.map(\.id)
+            let rows = (try? context.fetch(FetchDescriptor<PhotoAsset>(predicate: #Predicate { ids.contains($0.id) })))
+                ?? []
+            let rowsByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for update in chunk {
+                guard let photo = rowsByID[update.id] else { continue }
+                let jpgPath = photo.jpgPath
+                let rawPath = photo.rawPath
+                if (jpgPath == nil) != (update.jpgPath == nil) || (rawPath == nil) != (update.rawPath == nil) {
+                    factsChanged.append(photo)
+                }
+                if jpgPath != update.jpgPath { photo.jpgPath = update.jpgPath }
+                if rawPath != update.rawPath { photo.rawPath = update.rawPath }
+                if photo.fileSize != update.fileSize { photo.fileSize = update.fileSize }
+                updated += 1
+            }
         }
-        return changed
+        return (updated, factsChanged, time)
+    }
+
+    /// Photos a scan brings into the in-memory library, with their facts and sort keys, read as they come.
+    struct LibraryAdditions {
+        var photos: [PhotoAsset] = []
+        var facts: [PhotoFacts] = []
+        var keys: [LibrarySort.Key] = []
+
+        mutating func append(_ newPhotos: [PhotoAsset], facts newFacts: [PhotoFacts]) {
+            photos += newPhotos
+            facts += newFacts
+            keys += newPhotos.map(LibrarySort.sortKey(of:))
+        }
     }
 
     private struct TagKey: Hashable {
@@ -429,10 +465,14 @@ extension LibraryStore {
     /// Inserts new photos with the rating and keywords read from their files. Tags are looked up in one
     /// dictionary built from a single fetch (no fetch per keyword; spec §B2), and created when missing. Returns the
     /// photos inserted, and whether any tag was created. Throws, inserting nothing, if the tags can't be read.
+    ///
+    /// A tag several of the photos get is linked on its side, once (`tag.photos`): linking each photo to it rewrites the
+    /// tag's whole list each time (3 s for 256 photos once a tag has 150,000). A photo's other tags are one assignment.
     private func insertScannedPhotos(_ newPhotos: ArraySlice<DiscoveredPhoto>, into context: ModelContext) throws
         -> (photos: [PhotoAsset], createdTags: Bool)
     {
         var inserted: [PhotoAsset] = []
+        var tagsOf: [[Tag]] = []
         var createdTags = false
         // Fetched per chunk: a tag may have been added between chunks (from the tag editor, say).
         var tagsByKey: [TagKey: Tag] = [:]
@@ -454,6 +494,7 @@ extension LibraryStore {
             asset.captureDate = found.metadata?.captureDate
             context.insert(asset)
             inserted.append(asset)
+            tagsOf.append([])
 
             guard let keywords = found.metadata?.keywords, !keywords.isEmpty else { continue }
             var tags: [Tag] = []
@@ -472,8 +513,19 @@ extension LibraryStore {
                     createdTags = true
                 }
             }
+            tagsOf[tagsOf.count - 1] = tags
+        }
+        var photosOfTag: [ObjectIdentifier: (tag: Tag, photos: [PhotoAsset])] = [:]
+        for (asset, tags) in zip(inserted, tagsOf) {
+            for tag in tags { photosOfTag[ObjectIdentifier(tag), default: (tag, [])].photos.append(asset) }
+        }
+        for (asset, tags) in zip(inserted, tagsOf) where !tags.isEmpty {
+            let own = tags.filter { photosOfTag[ObjectIdentifier($0)]?.photos.count == 1 }
             // One assignment after the insert: much cheaper than appending before it.
-            asset.tags = tags
+            if !own.isEmpty { asset.tags = own }
+        }
+        for (tag, photos) in photosOfTag.values where photos.count > 1 {
+            tag.photos.append(contentsOf: photos)
         }
         return (inserted, createdTags)
     }

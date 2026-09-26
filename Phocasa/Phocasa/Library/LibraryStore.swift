@@ -107,6 +107,11 @@ final class LibraryStore {
     @ObservationIgnored var scanning = ScanState()
     /// The capture-date backfill's state (`CaptureDateState`, declared in `CaptureDateBackfill`).
     @ObservationIgnored var captureDates = CaptureDateState()
+    /// Changes shown in memory whose rows aren't written yet (`RowWriteState`, declared in `LibraryStore+RowWrites`).
+    @ObservationIgnored var rowWrites = RowWriteState()
+    /// Bumped whenever `rowWrites` changes what `rating(of:)`, `tags(of:)` or `hasAnyEdits(of:)` return, so views
+    /// that read them redraw.
+    var pendingRowsVersion = 0
     /// What the last scan did. For tests and benchmarks.
     @ObservationIgnored var lastScanReport: ScanReport?
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted
@@ -288,9 +293,44 @@ final class LibraryStore {
     /// The ids of the photo's tags, from the in-memory facts: no model reads when the photo is in the grid.
     func tagIDs(of photo: PhotoAsset) -> Set<UUID> {
         if let position = position(of: photo.id, useIndex: true) {
-            return (position.inBin ? binFacts : allFacts)[position.index].tagIDs
+            return facts(at: position).tagIDs
         }
-        return Set(photo.tags.map(\.id))
+        return Set(tags(of: photo).map(\.id))
+    }
+
+    /// The facts of the loaded photo at `position`.
+    func facts(at position: ListPosition) -> PhotoFacts {
+        position.inBin ? binFacts[position.index] : allFacts[position.index]
+    }
+
+    /// The loaded photo at `position`.
+    func photo(at position: ListPosition) -> PhotoAsset {
+        position.inBin ? binPhotos[position.index] : allPhotos[position.index]
+    }
+
+    /// Where each of `ids` is in the library or the bin (nil: not loaded). O(1) each for photos the grid shows, and one
+    /// pass over both lists for the others, however many there are.
+    func positions(of ids: [UUID]) -> [ListPosition?] {
+        guard ids.count > 2 else { return ids.map { position(of: $0, useIndex: false) } }
+        var found: [ListPosition?] = []
+        found.reserveCapacity(ids.count)
+        if gridShowsCurrent(inBin: grid.showsBin) {
+            let index = photoIndex()
+            for id in ids {
+                found.append(index[id].map { ListPosition(inBin: grid.showsBin, index: grid.sourceIndices?[$0] ?? $0) })
+            }
+        } else {
+            found = Array(repeating: nil, count: ids.count)
+        }
+        guard found.contains(where: { $0 == nil }) else { return found }
+        var everywhere = [UUID: ListPosition](minimumCapacity: allFacts.count + binFacts.count)
+        for inBin in [false, true] {
+            for (index, facts) in (inBin ? binFacts : allFacts).enumerated() {
+                everywhere[facts.id] = ListPosition(inBin: inBin, index: index)
+            }
+        }
+        for i in found.indices where found[i] == nil { found[i] = everywhere[ids[i]] }
+        return found
     }
 
     /// A linear scan that reads only the `id` field of each element (no struct copies).
@@ -310,18 +350,26 @@ final class LibraryStore {
         sortTagCategories()
     }
 
-    /// Re-reads the facts of photos whose rating or tags changed (a few model reads each), and
-    /// applies them to the counts and the grid.
+    /// Re-reads the facts of photos whose rating or tags changed (a few model reads each, with the changes not
+    /// written to their rows yet), and applies them to the counts and the grid.
     func applyFactChanges(_ changed: [PhotoAsset]) {
         guard !changed.isEmpty else { return }
         // Locate everything first: patching the grid below invalidates the index.
         var located: [(facts: PhotoFacts, position: ListPosition)] = []
         for photo in changed {
-            let new = PhotoFacts(photo, tags: &tagFacts)
+            let new = facts(of: photo)
             if let position = position(of: new.id, useIndex: changed.count > 2) {
                 located.append((new, position))
             }
         }
+        applyFacts(located)
+    }
+
+    /// Puts new facts in place for photos already located (`positions(of:)`), keeping the counts current and patching
+    /// (or marking for re-filtering) the grid. Photos whose facts didn't change cost nothing.
+    func applyFacts(_ changes: [(facts: PhotoFacts, position: ListPosition)]) {
+        let located = changes.filter { $0.facts != facts(at: $0.position) }
+        guard !located.isEmpty else { return }
         let patching = located.count <= Self.patchLimit
         let recount = located.count > 1_000 // cheaper than that many incremental updates
         for (new, position) in located {

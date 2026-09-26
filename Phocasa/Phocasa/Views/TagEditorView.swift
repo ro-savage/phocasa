@@ -45,10 +45,10 @@ struct TagEditorView: View {
             .padding(.top, 12)
 
             // Current tags on this photo
-            if let photo, !photo.tags.isEmpty {
+            if let photo, !viewModel.library.tags(of: photo).isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(photo.tags, id: \.id) { tag in
+                        ForEach(viewModel.library.tags(of: photo), id: \.id) { tag in
                             HStack(spacing: 4) {
                                 Text(tag.fullName)
                                     .font(.caption)
@@ -95,7 +95,7 @@ struct TagEditorView: View {
 
                             Spacer()
 
-                            if let photo, photo.tags.contains(where: { $0.id == tag.id }) {
+                            if let photo, viewModel.library.tags(of: photo).contains(where: { $0.id == tag.id }) {
                                 Image(systemName: "checkmark")
                                     .foregroundStyle(.blue)
                             }

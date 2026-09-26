@@ -13,7 +13,11 @@
 // - Tests: testScaleLibrary (every size: first scan, rescans, relaunch, bulk operations, the grid in a window),
 //   testFirstScanPhases (the largest size's first scan, its main-thread blocks against its phases; override the size
 //   with PHOCASA_SCALE_PHASES_SIZE), testMetadataWriteThroughput (real JPEG rewrites on 190 writable clones),
-//   testThumbnailDiskCachePastItsCap (1.5 GB into a temp cache), testTagRelationshipCost (tagging patterns, temp store).
+//   testThumbnailDiskCachePastItsCap (1.5 GB into a temp cache), testTagRelationshipCost (tagging patterns, temp store),
+//   testTagCostAtLibraryScale (saves and tag changes with 150,000 photos loaded; PHOCASA_SCALE_TAG_N).
+// - Big changes (rating everything, tagging 5,000) show in memory at once and reach the store in chunks sized by time
+//   (`LibraryStore+RowWrites`): their `sync_ms` is the in-memory part, and the chunks' blocks show in the next steps'
+//   and in the drains' `longest_main_block_ms` (`row_writes_s` is how long the chunks took).
 //   The largest sizes take long: 100k + 150k ran about 18 minutes on a 10-core M-series machine.
 //
 // Each result is a line starting with "SCALE|": grep the xcodebuild log for them. "longest_main_block_ms" is the
@@ -181,7 +185,8 @@ final class ScaleChecks: XCTestCase {
         XCTAssertEqual(sel.selectedPhotos.count, n)
         await op(tag, "rate the whole selection 5 (setRatingForSelection)") { vm.setRatingForSelection(5) }
         XCTAssertEqual(lib.ratingCounts[5], n)
-        await drain(tag, "metadata writes for the rating (JPGs read-only: skipped; RAW sidecars written)", writes: 2 * n)
+        await drain(tag, "metadata writes for the rating (JPGs read-only: skipped; RAW sidecars written)", writes: 2 * n,
+                    library: lib)
         let sample = lib.allPhotos[n / 2]
         XCTAssertEqual(MetadataService.shared.readMetadata(from: sample.rawPath ?? "").rating, 5, "the sidecar got it")
         let one = lib.photos[n / 3]
@@ -216,7 +221,7 @@ final class ScaleChecks: XCTestCase {
         sel.selectedPhotos = Set(fiveK)
         await op(tag, "tag 5,000 photos with a new tag") { vm.addTagToSelection(name: "bulk", category: "scale") }
         XCTAssertEqual(lib.categoryCounts["scale"], fiveK.count)
-        await drain(tag, "metadata writes for the tag", writes: 2 * fiveK.count)
+        await drain(tag, "metadata writes for the tag", writes: 2 * fiveK.count, library: lib)
         let bulkTag = try XCTUnwrap(lib.allTags.first { $0.name == "bulk" && $0.category == "scale" })
         // Everyday tagging once a tag is on thousands of photos.
         let other = try XCTUnwrap(lib.photos.last { !fiveK.contains($0.id) })
@@ -224,10 +229,10 @@ final class ScaleChecks: XCTestCase {
             lib.addTag(name: "bulk", category: "scale", to: other)
         }
         await op(tag, "untag that one photo") { lib.removeTag(bulkTag, from: other) }
-        await drain(tag, "metadata writes for those two", writes: 4)
+        await drain(tag, "metadata writes for those two", writes: 4, library: lib)
         await op(tag, "untag the 5,000") { lib.removeTag(bulkTag, from: sel.selectedPhotosList) }
         XCTAssertNil(lib.categoryCounts["scale"])
-        await drain(tag, "metadata writes for the untag", writes: 2 * fiveK.count)
+        await drain(tag, "metadata writes for the untag", writes: 2 * fiveK.count, library: lib)
         await op(tag, "move 5,000 to the bin (Delete)") { vm.deleteSelected() }
         XCTAssertEqual(lib.binCount, fiveK.count)
         XCTAssertEqual(lib.allPhotos.count, n - fiveK.count)
@@ -243,6 +248,7 @@ final class ScaleChecks: XCTestCase {
 
         // 6. A rescan after every photo's file size changed, as after a bulk rating rewrote every JPEG (here the
         // stored sizes change instead, so no clone is un-shared).
+        await lib.waitForRowWrites() // the bin moves' last chunks, so the harness's save is its own
         let harness = clock.measure {
             for photo in lib.allPhotos { photo.fileSize = 1 }
             try? context.save()
@@ -279,6 +285,7 @@ final class ScaleChecks: XCTestCase {
         let deleteTask = vm.confirmPermanentDelete()
         let deleteSync = clock.now - start
         await deleteTask?.value
+        await lib.waitForRowWrites() // the rows go after the library has changed, in chunks
         wall = clock.now - start
         stats = await probe.stop()
         line(tag, "empty a bin of 1,000 (permanent delete)", [
@@ -684,6 +691,112 @@ final class ScaleChecks: XCTestCase {
         tempRoots.removeAll { $0 == base }
     }
 
+    /// The same patterns with the library and the tag at the owner's size: n photos (PHOCASA_SCALE_TAG_N, default
+    /// 150,000) registered in the main context of a temp store, and one tag grown to 50,000 and then to every photo.
+    /// Times each change and its save apart: a save pays for every photo the context holds, and a to-many relationship
+    /// is read whole on every access, so a tag-side change costs time in proportion to the tag's size. Not app code:
+    /// evidence for sizing the chunks the library writes in.
+    func testTagCostAtLibraryScale() async throws {
+        let n = ProcessInfo.processInfo.environment["PHOCASA_SCALE_TAG_N"].flatMap { Int($0) } ?? 150_000
+        let base = try makeTempRoot("tagscale")
+        let container = try makeContainer(base.appendingPathComponent("tagscale.store"))
+        var start = clock.now
+        try await Task.detached(priority: .userInitiated) {
+            let background = ModelContext(container)
+            for batch in stride(from: 0, to: n, by: 5_000) {
+                for i in batch..<min(batch + 5_000, n) {
+                    background.insert(PhotoAsset(fileName: "p\(i)", jpgPath: "/scale/p\(i).jpg", folderPath: "/scale",
+                                                 creationDate: Date(timeIntervalSince1970: Double(i)), fileSize: 1))
+                }
+                try background.save()
+            }
+        }.value
+        line("tagscale", "harness: insert rows (background context)", ["n": n, "s": sec(clock.now - start)])
+        let context = container.mainContext
+        start = clock.now
+        let photos = try context.fetch(FetchDescriptor<PhotoAsset>(sortBy: [SortDescriptor(\.creationDate)]))
+        line("tagscale", "harness: fetch every row into the main context", ["n": photos.count, "s": sec(clock.now - start)])
+        XCTAssertEqual(photos.count, n)
+
+        func timed(_ label: String, _ mutate: () -> Void) {
+            let mutateTime = clock.measure(mutate)
+            let saveTime = clock.measure { try? context.save() }
+            line("tagscale", label, ["n": n, "mutate_ms": ms(mutateTime), "save_ms": ms(saveTime),
+                                     "total_ms": ms(mutateTime) + ms(saveTime)])
+        }
+        timed("save, nothing changed") {}
+        timed("rating of 1 photo") { photos[0].rating = 1 }
+        timed("rating of 500 photos") { for photo in photos[1..<501] { photo.rating = 2 } }
+        timed("rating of 2,000 photos") { for photo in photos[501..<2_501] { photo.rating = 3 } }
+        let tag = Tag(name: "big", category: "scale")
+        let small = Tag(name: "small", category: "scale")
+        timed("insert two tags") { context.insert(tag); context.insert(small) }
+
+        timed("tag side: add 500 (tag has 0)") { tag.photos.append(contentsOf: photos[0..<500]) }
+        timed("tag side: add 49,500 (tag has 500)") { tag.photos.append(contentsOf: photos[500..<50_000]) }
+        timed("read the tag's photos (50,000)") { _ = tag.photos.count }
+        timed("tag side: add 500 (tag has 50,000)") { tag.photos.append(contentsOf: photos[50_000..<50_500]) }
+        timed("photo side: add 1 (tag has 50,500)") { photos[60_000].tags.append(tag) }
+        timed("tag side: add 1 (tag has 50,501)") { tag.photos.append(photos[60_001]) }
+        let doomed = Set(photos[0..<500].map(ObjectIdentifier.init))
+        timed("tag side: remove 500 (tag has 50,502)") { tag.photos.removeAll { doomed.contains(ObjectIdentifier($0)) } }
+        timed("photo side: remove 1 (tag has 50,002)") { photos[1_000].tags.removeAll { $0 === tag } }
+        let one = ObjectIdentifier(photos[1_001])
+        timed("tag side: remove 1 (tag has 50,001)") { tag.photos.removeAll { ObjectIdentifier($0) == one } }
+        timed("tag side: add the rest (tag has 50,000)") {
+            let has = Set(tag.photos.map(ObjectIdentifier.init))
+            tag.photos.append(contentsOf: photos.filter { !has.contains(ObjectIdentifier($0)) })
+        }
+        timed("read the tag's photos (every photo)") { _ = tag.photos.count }
+        timed("tag side: remove 500 (tag has every photo)") {
+            tag.photos.removeAll { doomed.contains(ObjectIdentifier($0)) }
+        }
+        timed("tag side: add 500 back (tag has all but 500)") { tag.photos.append(contentsOf: photos[0..<500]) }
+        timed("photo side: remove 1 (tag has every photo)") { photos[2_000].tags.removeAll { $0 === tag } }
+        timed("photo side: add 1 (tag has all but 1)") { photos[2_000].tags.append(tag) }
+        timed("small tag, tag side: add 500 (every photo has the big tag)") {
+            small.photos.append(contentsOf: photos[3_000..<3_500])
+        }
+        timed("small tag, photo side: add 500 one by one") {
+            for photo in photos[4_000..<4_500] { photo.tags.append(small) }
+        }
+
+        // New photos with keywords, as a scan inserts them: each with the big tag and the small one.
+        var inserted: [PhotoAsset] = []
+        timed("insert 256 photos, tags assigned on each photo (as scans do)") {
+            for i in 0..<256 {
+                let photo = PhotoAsset(fileName: "q\(i)", jpgPath: "/scale/q\(i).jpg", folderPath: "/scale", fileSize: 1)
+                context.insert(photo)
+                photo.tags = [tag, small]
+                inserted.append(photo)
+            }
+        }
+        timed("insert 256 photos, tags added on the tags' side") {
+            var batch: [PhotoAsset] = []
+            for i in 0..<256 {
+                let photo = PhotoAsset(fileName: "r\(i)", jpgPath: "/scale/r\(i).jpg", folderPath: "/scale", fileSize: 1)
+                context.insert(photo)
+                batch.append(photo)
+            }
+            tag.photos.append(contentsOf: batch)
+            small.photos.append(contentsOf: batch)
+            inserted += batch
+        }
+        timed("delete 500 tagged photos, untagged on the tags' side first") {
+            let doomedPhotos = Array(photos[10_000..<10_500])
+            let ids = Set(doomedPhotos.map(ObjectIdentifier.init))
+            tag.photos.removeAll { ids.contains(ObjectIdentifier($0)) }
+            for photo in doomedPhotos { context.delete(photo) }
+        }
+        let fresh = ModelContext(container)
+        let stored = try fresh.fetch(FetchDescriptor<Tag>(predicate: #Predicate { $0.name == "big" })).first?.photos.count
+        line("tagscale", "links stored", ["big": stored ?? -1, "expected": n + 512 - 500])
+        XCTAssertEqual(stored, n + 512 - 500)
+        withExtendedLifetime(photos) {}
+        Self.removeTree(base)
+        tempRoots.removeAll { $0 == base }
+    }
+
     // MARK: - Measuring
 
     private func rescan(_ vm: PhotoLibraryViewModel, _ tag: String, _ label: String) async throws
@@ -718,15 +831,18 @@ final class ScaleChecks: XCTestCase {
                           "peak_footprint_mb": mb(stats.peakFootprint)])
     }
 
-    /// Waits for `MetadataWriter.shared` to write everything queued.
-    private func drain(_ tag: String, _ label: String, writes: Int) async {
+    /// Waits for `library`'s rows to be written (a big change goes in chunks, and queues each photo's file writes as
+    /// its row is written), then for `MetadataWriter.shared` to write everything queued.
+    private func drain(_ tag: String, _ label: String, writes: Int, library: LibraryStore? = nil) async {
         let probe = MainThreadProbe.start()
         let start = clock.now
+        await library?.waitForRowWrites()
+        let rows = clock.now - start
         await MetadataWriter.shared.flush()
         let wall = clock.now - start
         let stats = await probe.stop()
-        line(tag, label, ["drain_s": sec(wall), "file_writes": writes, "ms_per_write": ms(wall) / Double(max(writes, 1)),
-                          "longest_main_block_ms": stats.longest])
+        line(tag, label, ["row_writes_s": sec(rows), "drain_s": sec(wall), "file_writes": writes,
+                          "ms_per_write": ms(wall) / Double(max(writes, 1)), "longest_main_block_ms": stats.longest])
     }
 
     private func waitUntil(timeout: Double, _ condition: () -> Bool) async -> Bool {
