@@ -125,8 +125,7 @@ struct PhotoDetailView: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("Its pixels are replaced with the edited ones; its metadata is kept. A copy of the original goes "
-                         + "to the Trash first.")
+                    Text(exportConfirmationMessage(session))
                 }
 
             if let session, session.showJPGComparison && session.isRAW {
@@ -248,6 +247,14 @@ struct PhotoDetailView: View {
             return newFile + " Apply Edits overwrites the JPG's pixels with the edited ones."
         }
         return newFile + " \(session.fileKind) files aren't changed in place."
+    }
+
+    private func exportConfirmationMessage(_ session: EditSession?) -> String {
+        let kept = "Its pixels are replaced with the edited ones; its metadata is kept"
+        // Replacing the camera JPG clears its saved JPG edit (`EditSession.exportReplacingCameraJPG`).
+        let clearsEdit = session?.pendingExportConfirmation == .replaceCameraJPG && photo.jpgEditParametersData != nil
+        return kept + (clearsEdit ? ", and its saved JPG edit is removed" : "")
+            + ". A copy of the original goes to the Trash first."
     }
 
     private func exportConfirmationTitle(_ session: EditSession?) -> String {

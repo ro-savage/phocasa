@@ -204,16 +204,27 @@ final class ExportMetadataTests: XCTestCase {
         let raw = try writeFakeRAW("DSC0001.tif")
         let viewModel = makeViewModel()
         let photo = try insertPhoto(jpg: jpg, raw: raw)
+        var jpgEdit = EditParameters()
+        jpgEdit.exposure = -1
+        photo.jpgEditParameters = jpgEdit
+        try context.save()
         try await startEditing(viewModel, photo, isRAW: true)
         let session = try XCTUnwrap(viewModel.editSession)
         session.presentExportOptions()
         XCTAssertEqual(session.exportOptions.replaceableCameraJPG, "DSC0001.jpg", "its bytes are a JPEG")
+        // Cancelled at the second step: nothing changes.
+        session.pendingExportConfirmation = .replaceCameraJPG
+        session.pendingExportConfirmation = nil
+        XCTAssertEqual(photo.jpgEditParameters, jpgEdit)
         let version = viewModel.editedFilesVersion
 
         viewModel.exportReplacingCameraJPG()
 
         try await waitForExport(viewModel, from: version)
         XCTAssertEqual(photo.jpgPath, jpg.path)
+        XCTAssertNil(photo.jpgEditParametersData, "the JPG edit was for the pixels the RAW render replaced")
+        let stored = try ModelContext(container).fetch(FetchDescriptor<PhotoAsset>()).first { $0.id == photo.id }
+        XCTAssertNil(stored?.jpgEditParametersData, "and that's saved")
         let output = try Data(contentsOf: jpg)
         KeptMetadata.assertKeeps(original: rich.data, output: output, pixelSize: CGSize(width: 160, height: 240),
                                  rating: 4, keywords: Self.keywords, readBack: readBack(jpg))
@@ -237,7 +248,12 @@ final class ExportMetadataTests: XCTestCase {
         let viewModel = makeViewModel()
         let photo = try insertPhoto(jpg: folder.appendingPathComponent("DSC0002.jpg"),
                                     raw: folder.appendingPathComponent("DSC0002.tif"))
+        var jpgEdit = EditParameters()
+        jpgEdit.exposure = -1
+        photo.jpgEditParameters = jpgEdit
+        try context.save()
         try await startEditing(viewModel, photo, isRAW: true)
+        defer { XCTAssertEqual(photo.jpgEditParameters, jpgEdit, "a new file leaves the camera JPG's edit alone") }
 
         var exports: [URL] = []
         for round in 1...2 {
@@ -379,6 +395,8 @@ final class ExportMetadataTests: XCTestCase {
         let raw = try writeFakeRAW("IMG_0001.tif")
         let viewModel = makeViewModel()
         let photo = try insertPhoto(jpg: heif, raw: raw)
+        photo.jpgEditParameters = EditParameters(exposure: -1)
+        try context.save()
         try await startEditing(viewModel, photo, isRAW: true)
         let session = try XCTUnwrap(viewModel.editSession)
         session.presentExportOptions()
@@ -388,6 +406,7 @@ final class ExportMetadataTests: XCTestCase {
 
         XCTAssertEqual(result, .notAJPEG)
         XCTAssertEqual(try Data(contentsOf: heif), original)
+        XCTAssertEqual(photo.jpgEditParameters?.exposure, -1, "a refused replace keeps the saved edit")
         XCTAssertTrue(try trashed().isEmpty)
     }
 

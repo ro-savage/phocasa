@@ -294,7 +294,8 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - **What an export may overwrite:** only a JPEG by its bytes (`ImageEditingService.isJPEGFile`; a HEIC, PNG or TIFF,
   whatever its name, is never replaced: `ExportDestination.replacing` refuses with `.notAJPEG`), and only once a copy
   of it is in the Trash (put there with the library's `fileTrasher`; if that fails, `.originalNotTrashed` and nothing
-  is written). The dialog offers "Replace…" / "Apply Edits…" only for such files, and asks again. "Save as New JPG"
+  is written). The dialog offers "Replace…" / "Apply Edits…" only for such files, and asks again. Replacing the camera
+  JPG with the RAW render clears the photo's saved JPG edit (made for the old pixels). "Save as New JPG"
   (`.newFile`) never overwrites: it takes the first free `<stem>-raw-edit[-n].jpg` (`-edit` from a non-RAW file) that
   no file in the folder and no library row has, leaves the photo's own paths alone, and adds the export to the library
   as a photo of its own (`LibraryStore.addExportedPhoto`, the key a scan would give it) with the photo's rating, tags

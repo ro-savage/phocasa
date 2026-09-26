@@ -503,13 +503,19 @@ final class EditSession {
 
     /// Renders the RAW with the current parameters over the pair's camera JPG, once a copy of it is in the Trash (put
     /// there with `trasher`). The JPG keeps its own metadata (read before it's replaced), then gets the photo's rating
-    /// and keywords. Refused unless it is a JPEG by its bytes. The photo's paths don't change.
+    /// and keywords. Its saved JPG edit is cleared: it was made for the pixels the render replaced, and would otherwise
+    /// apply on top of it. Refused, the edit kept, unless it is a JPEG by its bytes. The photo's paths don't change.
     func exportReplacingCameraJPG(originalTo trasher: FileTrasher) async -> ExportResult {
         guard isRAW, let rawPath = photo.rawPath, let jpgPath = photo.jpgPath else { return .failed }
         let jpg = URL(fileURLWithPath: jpgPath)
         let result = await service.exportRAWToJPEG(rawURL: URL(fileURLWithPath: rawPath), parameters: parameters,
                                                    to: .replacing(jpg, originalTo: trasher), metadataSources: [jpg])
-        if result == .written { writeRatingAndKeywords(to: jpg) }
+        guard result == .written else { return result }
+        writeRatingAndKeywords(to: jpg)
+        if photo.jpgEditParametersData != nil {
+            photo.jpgEditParametersData = nil
+            try? modelContext?.save()
+        }
         return result
     }
 
