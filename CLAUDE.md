@@ -63,7 +63,8 @@ Phocasa/
 ├── Phocasa.xcodeproj/              — objectVersion 77, synchronized folders (see Build Settings)
 ├── Phocasa/
 │   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host), menu commands
-│   ├── AppDelegate.swift           — quit waits for pending metadata writes (at most 5 s)
+│   ├── AppDelegate.swift           — quit waits for pending metadata writes (at most 5 s, then journals the rest);
+│   │                                 launch replays the journal
 │   ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary, EditPreset)
 │   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
 │   │                                 store lives, and the one-time move of a legacy `default.store`);
@@ -112,12 +113,14 @@ Phocasa/
 │       ├── CaptureDate             — parses and reads EXIF DateTimeOriginal (subseconds, offset) by hand
 │       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through (re-keys cached
 │       │                             thumbnails after JPEG metadata rewrites)
+│       ├── MetadataWriteJournal    — the writes not made yet, on disk next to the store; MetadataWriteProgress
+│       ├── VolumeCheck             — a missing file: gone, or on a drive that isn't connected (`/Volumes/<name>`)
 │       ├── ImageLoader             — grid thumbnails: size buckets, memory cache, disk cache, invalidation
 │       ├── ThumbnailScheduler      — bounded, newest-first, cancellable work scheduler
 │       ├── ThumbnailDiskCache      — thumbnails on disk across launches (one JPEG per photo and bucket, LRU)
 │       ├── FullImageLoader         — detail-view decodes: subsampled fit, full resolution, prefetch, LRU
 │       ├── ImageEditingService     — the edit render pipeline (preview and full lanes)
-│       └── FileTrasher             — moves files to the Trash off the main thread
+│       └── FileTrasher             — moves files to the Trash off the main thread, and says what happened to each
 ├── PhocasaTests/                   — XCTest; PerformanceBenchmarks.swift holds the gated DataPathBenchmarks
 Tools/
 ├── imagebench/                     — standalone image-path benchmark (see Build & Run)
@@ -168,10 +171,24 @@ Tools/
   rows and a walk started at launch. Smaller stores load synchronously; `loadExistingData()` stays synchronous; a full
   load since `open` drops the background load.
 - **Bin:** a scan never takes a photo out of the bin (user decision); it still updates a binned photo's paths and size.
+- **Deletes change only what reached the Trash:** `FileTrasher` reports each file (trashed, already gone, volume not
+  mounted, failed with a reason). A photo whose file couldn't be moved, or whose drive isn't connected, stays (in the
+  bin, less the files that went); `deleteProblem` says how many and why (an alert).
 - **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
   rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
   photos, so an unchanged rescan writes nothing and changes nothing in memory. One that adds k photos costs
   O(k log n) on the main actor, or one merge for many.
+- **What a scan walks:** not hidden files, not package insides (`.skipsPackageDescendants`), not other apps'
+  libraries by extension (`.photoslibrary`, `.lrdata`, …) nor NAS/Windows thumbnail, recycle and snapshot folders by
+  name (`FolderScanner.skippedFolderExtensions` / `skippedFolderNames`, each with its reason). The chosen folder itself
+  is scanned whatever its name. Rows imported from inside such folders by older builds are hidden by the plan.
+- **A store read that fails is never an empty library:** `StoredPhoto.fetchAll`, `LibrarySort.fetch` and
+  `LibrarySnapshot.read` throw (`fetchCount` answers `NSNotFound` for an unreadable store). A scan that can't read the
+  rows stops before inserting (`scanIssue`, in the status bar); a load that fails keeps what's shown and sets
+  `libraryReadFailure` (the grid says so). Don't reintroduce `(try? fetch) ?? []` on a path that feeds a diff or a load.
+- **A library folder that isn't there** (drive unplugged, folder moved) isn't walked or diffed: nothing is added,
+  changed or found missing. Its photos are hidden (by stored path, no stat) until a Rescan finds it, and the grid says
+  "“Photos” isn't connected" or "can't be found" with the path. There's no volume-mount watcher: Rescan brings it back.
 - **Thumbnail disk cache** (`Services/ThumbnailDiskCache.swift`): one JPEG per photo and size bucket under
   `Caches/<bundle id>/Thumbnails/v1/<h0h1>/<sha256(path)>/<bucket>-<size>-<mtime>.jpg`, LRU by mtime, 1 GB. The test
   host has none unless `PHOCASA_THUMBNAIL_CACHE_DIR` is set.
@@ -226,7 +243,10 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   synchronise with locks (`NSLock`); `ThumbnailDiskCache` writes on its own utility queue
 - **Metadata writes go only through `MetadataWriter`:** serial, coalescing per file (a newer payload replaces a
   waiting one), with a synchronous `enqueue` / `enqueueEditParameters` that never blocks and an async `flush()`. A
-  pair's item writes the JPG and the RAW's sidecar.
+  pair's item writes the JPG and the RAW's sidecar. What it hasn't written is in its journal
+  (`Application Support/Phocasa/PendingMetadataWrites.jsonl`, or the development library's folder; none in the test
+  host), saved on take-in and about once a second, and replayed first at launch (`resumeJournaledWrites()`). A write
+  for a file on an unmounted volume waits in the journal (`retryWaitingWrites()` after a scan) instead of failing.
 - One-off background reads use `withCheckedContinuation` + `DispatchQueue.global()` (the scan's `StoredPhoto` read,
   `FolderScanner`, `FullImageLoader`)
 - Don't use `FileManager.enumerator` `for-in` loops in async contexts — use `nextObject()` in a sync wrapper
@@ -333,6 +353,10 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   action's environment). Development-library tests pass temp folders to `LibraryLocation.resolve`.
 - Tests use temp directories and in-memory or temp-file stores. Tests that delete files give `LibraryStore` a
   `FileTrasher` that moves them into a temp folder, never the user's Trash.
+- A drive that isn't connected is a temp folder passed as `VolumeCheck(volumesDirectory:)` (to `LibraryStore.volumes`,
+  `FileTrasher`, `MetadataWriter`) with the "drive" folder removed. A store that can't be read is a temp store whose
+  files are moved aside under an open container (`ScanTests.breakStore`); SQLite won't reopen them for a new container
+  while that one lives.
 - Gated benchmarks need `PHOCASA_BENCH=1` (see Build & Run); tests on a real camera RAW are skipped unless
   `PHOCASA_TEST_RAW` names a *copy* of one. Never search the disk for photos.
 - Hosted-window tests (grid clicks, the detail view, the grid under the detail view) flash a window; that's expected.
