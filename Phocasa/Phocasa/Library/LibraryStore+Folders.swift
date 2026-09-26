@@ -17,9 +17,9 @@ struct FolderRemoval: Identifiable {
     var message: String {
         let photos = photoCount.map { $0 == 1 ? "Its photo leaves" : "Its \($0.formatted()) photos leave" }
             ?? "Its photos leave"
-        return "\(photos) Phocasa’s library. No file is moved, changed or deleted: ratings and keywords written into "
-            + "the files stay there, but the JPG edits and the bin, which only Phocasa keeps, are forgotten. Open the "
-            + "folder again to add it back.\n\(path)"
+        return "\(photos) Phocasa’s library. No file is moved, changed or deleted: ratings and keywords written to the "
+            + "files stay there, but Phocasa forgets what only it keeps: JPG edits, and which photos were in the bin. "
+            + "Open the folder again to add it back.\n\(path)"
     }
 
     /// Whether `photo`'s files are in the folder.
