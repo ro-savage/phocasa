@@ -98,13 +98,16 @@ private struct ViewMenuItems: View {
 struct PhotoMenuItems: View {
     let viewModel: PhotoLibraryViewModel?
 
+    /// "No Rating", "1 Star" … "5 Stars" (this body follows the selection, so they're worked out once).
+    private static let rateTitles = (0...5).map { $0 == 0 ? "No Rating" : $0.counted("Star") }
+
     var body: some View {
         let target = viewModel.flatMap { $0.isTypingInContent ? nil : $0 }
         let hasTarget = target?.hasCommandTarget == true
         Menu("Rate") {
             // The digit keys rate too, in the grid and the detail view.
             ForEach(0...5, id: \.self) { stars in
-                Button(stars == 0 ? "No Rating" : stars.counted("Star")) {
+                Button(Self.rateTitles[stars]) {
                     target?.setRatingForSelectionOrCurrent(stars)
                 }
             }

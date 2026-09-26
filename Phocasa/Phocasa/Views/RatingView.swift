@@ -20,7 +20,7 @@ struct RatingView: View {
     }
 
     var body: some View {
-        HStack(spacing: compact ? 1 : 4) {
+        let stars = HStack(spacing: compact ? 1 : 4) {
             ForEach(1...5, id: \.self) { star in
                 Image(systemName: star <= rating ? "star.fill" : "star")
                     .font(compact ? .caption2 : .body)
@@ -28,19 +28,28 @@ struct RatingView: View {
                     .onTapGesture { tapped(star) }
             }
         }
-        // One element for VoiceOver, a slider: "Rating, 3 stars", adjusted a star at a time when it can be changed.
-        .accessibilityRepresentation {
-            Slider(value: Binding(get: { Double(rating) }, set: { onRate?(Int($0.rounded())) }), in: 0...5, step: 1) {
-                Text("Rating")
+        // One element for VoiceOver: a slider, "Rating, 3 stars", adjusted a star at a time; read-only without onRate.
+        if let onRate {
+            stars.accessibilityRepresentation {
+                Slider(value: Binding(get: { Double(rating) }, set: { onRate(Int($0.rounded())) }), in: 0...5, step: 1) {
+                    Text("Rating")
+                }
+                .accessibilityValue(Self.accessibilityValue(rating))
             }
-            .accessibilityValue(Self.accessibilityValue(rating))
-            .disabled(onRate == nil)
+        } else {
+            stars
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Rating")
+                .accessibilityValue(Self.accessibilityValue(rating))
         }
     }
 
+    /// "No rating", "1 star" … "5 stars", worked out once: every grid cell has a rating.
+    private static let spokenValues = (0...5).map { $0 == 0 ? "No rating" : $0.counted("star") }
+
     /// "No rating", "1 star", "3 stars".
     static func accessibilityValue(_ rating: Int) -> String {
-        rating == 0 ? "No rating" : rating.counted("star")
+        spokenValues[min(max(rating, 0), 5)]
     }
 
     /// There is no double-click gesture to wait for, so a click on another star rates at once.

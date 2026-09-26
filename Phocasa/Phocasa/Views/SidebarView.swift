@@ -41,7 +41,7 @@ struct SidebarView: View {
                             Spacer()
                         }
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(stars.counted("star"))
+                        .accessibilityLabel(RatingView.accessibilityValue(stars))
                     }
                 }
             }
