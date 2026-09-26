@@ -22,7 +22,8 @@ open Phocasa/Phocasa.xcodeproj
 
 # Gated benchmarks (skipped unless PHOCASA_BENCH=1): DataPathBenchmarks, ThumbnailSchedulerBenchmarks,
 # DetailNavigationBenchmarks, ImageEditingServiceBenchmarks, EditViewModelBenchmarks, ThumbnailDiskCacheBenchmarks,
-# MetadataSidecarBenchmarks. Each prints `BENCH|…` lines.
+# MetadataSidecarBenchmarks; with PHOCASA_TEST_RAW (a copy of a camera RAW, its JPG beside it) also
+# EditRenderSizeBenchmarks, MetadataWriteBenchmarks and FitLookBenchmarks. Each prints `BENCH|…` lines.
 TEST_RUNNER_PHOCASA_BENCH=1 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project Phocasa.xcodeproj \
   -scheme Phocasa -destination 'platform=macOS' test -only-testing:PhocasaTests/DataPathBenchmarks
 ```
@@ -49,6 +50,10 @@ keep it in step. See `Tools/imagebench/README.md`.
   → `EditSession.requestNativeResolution()` / `SavedEditState.needsMorePixels`). An `EditSession` without
   `viewportPixelSize` renders its passes natively. Exports are always native. Don't render edits at native size for
   display.
+- **Filter radii are in native pixels.** Sharpness (1.5 px), clarity (20 px) and clarity's blur use radius × the
+  render's scale against native (`EditPipeline`, 1 for native renders and exports), so a fitted pass or a preview
+  looks like the native render drawn at its size (post-wave-3 task C, `FitLookBenchmarks`). Noise reduction has no
+  radius and isn't scaled; `CIRAWFilter`'s own sharpening and noise reduction are its own.
 - **No third-party dependencies** — all Apple frameworks
 
 ### Project Structure
