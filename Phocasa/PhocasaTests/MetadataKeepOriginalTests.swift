@@ -154,17 +154,32 @@ final class MetadataKeepOriginalTests: XCTestCase {
         XCTAssertEqual(service.readMetadata(from: jpg.path).keywords, [])
     }
 
-    func testAJPEGWhoseRatingIsInASidecarKeepsItThere() throws {
+    /// Task D: a file in sidecar mode moves into the file on its next write (it used to stay in the sidecar).
+    func testAJPEGWhoseRatingIsInASidecarGetsItInTheFileOnTheNextWrite() throws {
         let original = T.cameraStyleJPEG()
         let jpg = try write(original, "sticky.jpg")
-        // A sidecar a refused write left (say, before the file's layout was fixed elsewhere).
+        // A sidecar a refused write left (say, before the file's layout could be written in place).
         XCTAssertEqual(service.updateSidecar(of: jpg, MetadataService.SidecarUpdate(rating: 2, keywords: ["x"],
                                                                                    overridesEmbedded: true)), .written)
 
         service.writeMetadata(rating: 5, keywords: ["y"], toImageAt: jpg.path)
 
-        XCTAssertEqual(try Data(contentsOf: jpg), original, "the file isn't written while its sidecar holds the values")
+        let after = try Data(contentsOf: jpg)
+        let inFile = try XCTUnwrap(CGImageSourceCreateWithData(after as CFData, nil)
+            .flatMap { CGImageSourceCopyMetadataAtIndex($0, 0, nil) })
+        XCTAssertEqual(CGImageMetadataCopyStringValueWithPath(inFile, nil, "xmp:Rating" as CFString) as String?, "5",
+                       "the rating is in the file, where other apps read it")
+        XCTAssertEqual(CGImageMetadataCopyTagWithPath(inFile, nil, "dc:subject" as CFString)
+            .flatMap { CGImageMetadataTagCopyValue($0) as? [CGImageMetadataTag] }?
+            .compactMap { CGImageMetadataTagCopyValue($0) as? String }, ["y"])
+        // Everything outside the XMP and APP13 segments is the original's.
+        let untouched = { (d: Data) in T.header(d).segments.filter { $0.marker != 0xED && $0.id != JPEGTestSegments.xmpID } }
+        XCTAssertEqual(untouched(after), untouched(original))
+        XCTAssertEqual(Data(after[T.header(after).sos...]), Data(original[T.header(original).sos...]))
+        // The sidecar stays, in step with the file: same values, no longer overriding it.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: jpg.xmpSidecarURL.path), "a user's sidecar is never deleted")
         XCTAssertEqual(sidecarValue(jpg, "xmp:Rating"), "5")
+        XCTAssertNil(sidecarValue(jpg, "phocasa:OverridesEmbedded"))
         XCTAssertEqual(service.readMetadata(from: jpg.path).rating, 5)
         XCTAssertEqual(service.readMetadata(from: jpg.path).keywords, ["y"])
     }

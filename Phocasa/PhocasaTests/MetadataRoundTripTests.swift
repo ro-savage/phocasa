@@ -195,11 +195,13 @@ final class MetadataRoundTripTests: XCTestCase {
 
     func testSidecarRatingStillTakesPrecedenceOverEmbeddedRating() throws {
         // Today's precedence, kept on purpose: x.jpg also reads x.xmp (the paired RAW's sidecar),
-        // and a non-zero sidecar rating wins.
+        // and a non-zero sidecar rating wins. (Task D: only for a pair. The RAW is there now; a JPG on its own that
+        // holds a rating is read from the file, MetadataSidecarMigrationTests.)
         let jpg = try makeJPEG("pair.jpg")
         service.writeMetadata(rating: 2, keywords: [], toImageAt: jpg.path)
         XCTAssertEqual(service.readMetadata(from: jpg.path).rating, 2)
 
+        _ = try makeFakeRAW("pair.cr3")
         service.writeSidecar(rating: 4, keywords: [], for: dir.appendingPathComponent("pair.cr3"), editParameters: nil)
         XCTAssertEqual(service.readMetadata(from: jpg.path).rating, 4)
 

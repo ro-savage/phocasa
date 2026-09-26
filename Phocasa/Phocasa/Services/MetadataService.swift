@@ -59,23 +59,33 @@ final class MetadataService: Sendable {
     /// Reads the rating and keywords embedded in the file, then lets its `.xmp` sidecar override them.
     ///
     /// The sidecar is `<stem>.xmp`, so for a JPG+RAW pair `x.jpg` also reads `x.xmp`, the RAW's sidecar.
-    /// A sidecar rating wins only when it is non-zero, and sidecar keywords only when there are some, unless the
-    /// sidecar says it overrides the file (`phocasa:OverridesEmbedded`, written when the values couldn't go into the
-    /// file itself): then its rating and keywords win as they are, 0 and none included.
-    /// The capture date comes from the image file only (see `CaptureDate`).
+    /// - A sidecar that says it overrides the file (`phocasa:OverridesEmbedded`, written when the values couldn't go
+    ///   into the file itself) wins as it is: its rating and keywords, 0 and none included.
+    /// - A non-RAW file on its own (no RAW beside it) that holds an `xmp:Rating` is read from the file: its values are
+    ///   the newest. Phocasa keeps such a file's sidecar in step with it, so a difference means another app changed the
+    ///   file since, or the sidecar is left over (task D).
+    /// - Otherwise (a RAW, a pair's JPG, a file without a rating of its own) a sidecar rating wins when it is non-zero,
+    ///   and sidecar keywords when there are some.
+    ///
+    /// `pairedWithRAW` says whether `path` is a pair's JPG (the scanner knows); nil looks for a RAW beside it, only when
+    /// that matters. The capture date comes from the image file only (see `CaptureDate`).
     /// Stateless and thread-safe.
-    func readMetadata(from path: String) -> PhotoMetadata {
+    func readMetadata(from path: String, pairedWithRAW: Bool? = nil) -> PhotoMetadata {
         let url = URL(fileURLWithPath: path)
         var rating = 0
         var keywords: [String] = []
         var editParameters: EditParameters?
         var captureDate: Date?
+        var fileHasRating = false
 
         // Try reading from image file directly
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
             if let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
                 // The rating lives in XMP (xmp:Rating), which is where writeToImageFile puts it.
-                if let r = Self.xmpRating(in: meta) { rating = r }
+                if let r = Self.xmpRating(in: meta) {
+                    rating = r
+                    fileHasRating = true
+                }
                 // ImageIO merges XMP and IPTC-IIM here, so dc:subject holds exactly the keywords the
                 // IPTC properties dictionary reports (XMP wins when they disagree, in both views).
                 // Reading only this is cheaper than also copying the properties dictionary.
@@ -97,6 +107,9 @@ final class MetadataService: Sendable {
             if overrides {
                 rating = parsed.rating
                 keywords = parsed.keywords
+            } else if fileHasRating, !FolderScanner.rawExtensions.contains(url.pathExtension.lowercased()),
+                      !(pairedWithRAW ?? Self.hasRAWBeside(url)) {
+                // A file on its own that holds its own values: they stand.
             } else {
                 if parsed.rating > 0 { rating = parsed.rating }
                 if !parsed.keywords.isEmpty { keywords = parsed.keywords }
@@ -106,6 +119,17 @@ final class MetadataService: Sendable {
 
         return PhotoMetadata(rating: rating, keywords: keywords, editParameters: editParameters,
                              captureDate: captureDate)
+    }
+
+    /// Whether a RAW file with `url`'s stem is in its folder (so `url` is a pair's JPG, and its sidecar the RAW's).
+    /// Up to two lookups per RAW extension; only asked when a file on its own and a sidecar disagree.
+    static func hasRAWBeside(_ url: URL) -> Bool {
+        let stem = url.deletingPathExtension()
+        let fm = FileManager.default
+        return FolderScanner.rawExtensions.contains { ext in
+            fm.fileExists(atPath: stem.appendingPathExtension(ext).path)
+                || fm.fileExists(atPath: stem.appendingPathExtension(ext.uppercased()).path)
+        }
     }
 
     /// `xmp:Rating` as a star count. Values outside 0...5 (Adobe's -1 means "rejected") read as unrated.
@@ -150,15 +174,19 @@ final class MetadataService: Sendable {
         }
     }
 
-    /// Writes new XMP rating and keywords into a JPEG without re-encoding it or losing any of its metadata, or, when
-    /// that can't be done, into its sidecar (the user's rule: never lose a photo's original metadata).
+    /// Writes the rating and keywords into the file itself, adding them without re-encoding it or losing any of its
+    /// metadata, or, when that can't be done, into its sidecar (the user's rules: never lose a photo's original
+    /// metadata; ratings inside every non-RAW file, so other apps can read them).
     ///
-    /// - A JPEG gets `jpegWritingRatingAndKeywords`' bytes, which keep everything but the XMP and the IPTC keywords.
-    ///   The new file is built in memory and only replaces the original once it is complete. Symlinks are written
-    ///   through (the link stays a link). Permissions, extended attributes and file dates are kept.
-    /// - Anything else (PNG, TIFF, HEIC, whose only writer is ImageIO's rewrite, which drops what it doesn't model), a
-    ///   JPEG the splice refuses, and a file whose sidecar already overrides it keep their bytes. The rating and
-    ///   keywords go to the sidecar, marked `phocasa:OverridesEmbedded` so they win on reading.
+    /// - The new file is `fileWritingRatingAndKeywords`' bytes, built in memory; it only replaces the original once it
+    ///   is complete. Symlinks are written through (the link stays a link). Permissions, extended attributes and file
+    ///   dates are kept.
+    /// - A file that already has a sidecar keeps it, in step: the same rating and keywords, and no
+    ///   `phocasa:OverridesEmbedded` (task D: files leave sidecar mode on their next write). A file leaving sidecar
+    ///   mode gets its sidecar's values updated before the file is written and the flag cleared after, so a reader
+    ///   never sees an older value win; if its sidecar can't be updated, neither is written.
+    /// - The last resort, a file that can't take the values without losing something, keeps its bytes, and they go to
+    ///   its sidecar, marked `phocasa:OverridesEmbedded` so they win on reading.
     /// - Read-only files, and files ImageIO doesn't read as an image, are left alone.
     private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
         let fm = FileManager.default
@@ -168,22 +196,47 @@ final class MetadataService: Sendable {
         guard let original = try? Data(contentsOf: target, options: .mappedIfSafe),
               let source = CGImageSourceCreateWithData(original as CFData, nil),
               CGImageSourceGetType(source) != nil, CGImageSourceGetCount(source) > 0 else { return }
-        guard !sidecarOverridesEmbedded(url),
-              let bytes = Self.jpegWritingRatingAndKeywords(original, rating: rating, keywords: keywords) else {
+        let values = SidecarUpdate(rating: rating, keywords: keywords)
+        guard let bytes = Self.fileWritingRatingAndKeywords(original, rating: rating, keywords: keywords) else {
             updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: true))
             return
         }
 
+        let sidecar = sidecarState(url)
+        if sidecar == .overridesFile {
+            // Leaving sidecar mode: the sidecar takes the new values first, still overriding the file, so they win
+            // whether or not the file write below succeeds.
+            guard [.written, .unchanged].contains(updateSidecar(of: url, values)) else { return }
+        }
         let originalDates = Phocasa.captureFileDates(target)
         guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
         else { return }
         Phocasa.restoreFileDates(target, dates: originalDates)
+        if sidecar != .none {
+            // In step with the file: the same values, no longer overriding it.
+            updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: false))
+        }
+    }
+
+    /// `original` with this rating and these keywords inside it, keeping every other byte of metadata, by its format
+    /// (detected from its bytes, not its name); nil when it can't take them that way (the last resort, a sidecar).
+    static func fileWritingRatingAndKeywords(_ original: Data, rating: Int, keywords: [String]) -> Data? {
+        if JPEGStructure.isJPEG(original) {
+            return jpegWritingRatingAndKeywords(original, rating: rating, keywords: keywords)
+        }
+        return nil
+    }
+
+    private enum SidecarState { case none, inStep, overridesFile }
+
+    private func sidecarState(_ imageURL: URL) -> SidecarState {
+        guard let data = try? Data(contentsOf: imageURL.xmpSidecarURL) else { return .none }
+        return Self.sidecarFields(data).overridesEmbedded ? .overridesFile : .inStep
     }
 
     /// Whether `imageURL`'s sidecar holds its rating and keywords in place of the file (`phocasa:OverridesEmbedded`).
     func sidecarOverridesEmbedded(_ imageURL: URL) -> Bool {
-        guard let data = try? Data(contentsOf: imageURL.xmpSidecarURL) else { return false }
-        return Self.sidecarFields(data).overridesEmbedded
+        sidecarState(imageURL) == .overridesFile
     }
 
     /// `original`, a JPEG, with this rating and these keywords, keeping every other byte of metadata; nil when that
