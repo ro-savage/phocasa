@@ -10,8 +10,13 @@ import SwiftData
 final class PhotoLibraryViewModel {
     let library: LibraryStore
     let selection: SelectionModel
+    /// The sort order and the zoom, remembered across launches.
+    let preferences: ViewPreferences
 
-    var gridColumns: Int = 6
+    /// The grid's zoom, within `ViewPreferences.columnRange`, remembered across launches.
+    var gridColumns: Int {
+        didSet { if gridColumns != oldValue { preferences.gridColumns = gridColumns } }
+    }
     var selectedDetailPhoto: PhotoAsset?
     var showingDetail: Bool = false
     var showFolderPicker: Bool = false
@@ -41,19 +46,25 @@ final class PhotoLibraryViewModel {
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
 
-    init() {
+    /// `preferences` are this launch's (`ViewPreferences.forLaunch()`): in memory, fresh for each view model, in the
+    /// test host.
+    init(preferences: ViewPreferences = .forLaunch()) {
         let library = LibraryStore()
         self.library = library
         self.selection = SelectionModel(library: library)
+        self.preferences = preferences
+        self.gridColumns = preferences.gridColumns
     }
 
     /// Launch. `library.open` shows the stored library and starts the launch rescan; work that should start after
-    /// launch goes after it here (`await library.waitForScans()` waits for that rescan).
+    /// launch goes after it here (`await library.waitForScans()` waits for that rescan). The library opens in the sort
+    /// order the owner last chose.
     ///
     /// A no-op for the context the library already has: the app owns this view model, so a window that closes and
     /// opens again appears with it, and must not load and rescan the library a second time.
     func setModelContext(_ context: ModelContext) {
         guard library.modelContext !== context else { return }
+        if library.modelContext == nil { library.sort.newestFirst = preferences.sortNewestFirst }
         library.open(context)
         library.backfillCaptureDatesAfterScans()
         loadPresets()
@@ -385,18 +396,24 @@ final class PhotoLibraryViewModel {
         selectedDetailPhoto = nil
     }
 
-    // MARK: - Zoom
+    // MARK: - Zoom and Sort
 
     func zoomIn() {
-        if gridColumns > 2 {
+        if gridColumns > ViewPreferences.columnRange.lowerBound {
             gridColumns -= 1
         }
     }
 
     func zoomOut() {
-        if gridColumns < 20 {
+        if gridColumns < ViewPreferences.columnRange.upperBound {
             gridColumns += 1
         }
+    }
+
+    /// Newest first or oldest first (`LibraryStore.toggleSortOrder()`), remembered for the next launch.
+    func toggleSortOrder() {
+        library.toggleSortOrder()
+        preferences.sortNewestFirst = library.sortNewestFirst
     }
 
     // MARK: - Metadata Write Problems

@@ -19,7 +19,7 @@ struct LibraryToolbar: ToolbarContent {
         }
 
         ToolbarItemGroup(placement: .automatic) {
-            Button(action: { viewModel.library.toggleSortOrder() }) {
+            Button(action: { viewModel.toggleSortOrder() }) {
                 Label(
                     viewModel.library.sortNewestFirst ? "Newest First" : "Oldest First",
                     systemImage: viewModel.library.sortNewestFirst ? "arrow.down" : "arrow.up"
