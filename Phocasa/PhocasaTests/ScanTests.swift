@@ -979,6 +979,84 @@ final class ScanTests: XCTestCase {
         assertMatchesFreshLoad(vm, "a load during the scan")
     }
 
+    // MARK: - Writes in chunks
+
+    /// A bin move still being written in chunks when a scan starts reaches the store before the scan reads it: the
+    /// scan sees those photos in the bin, so a binned photo whose file is gone stays in the bin (only library photos
+    /// are tracked as missing) instead of being dropped as a missing library photo.
+    func testBinMovesStillBeingWrittenReachTheStoreBeforeAScanReadsIt() async throws {
+        let photos = try makeTempDir("photos")
+        for i in 0..<30 { try makeJPEG("b\(i).jpg", in: photos) }
+        let (vm, _, container) = try await openLibrary(at: photos)
+        // Small chunks with their pauses: the write takes long enough that a scan that didn't wait would read the store
+        // half-written.
+        vm.library.rowWrites.sizer.maximumRows = 4
+        vm.library.rowWrites.immediateLimit = 2
+        vm.selection.selectAll()
+        vm.deleteSelected()
+        XCTAssertEqual(vm.library.binCount, 30)
+        XCTAssertTrue(vm.library.hasPendingRowWrites, "precondition: the move is still being written")
+        try FileManager.default.removeItem(at: photos.appendingPathComponent("b7.jpg"))
+
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.binCount, 30, "a binned photo whose file is gone stays in the bin")
+        XCTAssertEqual(try storedBinNames(container).count, 30)
+        assertMatchesFreshLoad(vm, "after the rescan")
+    }
+
+    /// A rescan that finds many changed files writes the rows in chunks, and every row gets its new size.
+    func testRescanWritesChangedRowsInChunks() async throws {
+        let photos = try makeTempDir("photos")
+        for i in 0..<24 { try makeJPEG("s\(i).jpg", in: photos) }
+        let (vm, context, container) = try await openLibrary(at: photos)
+        vm.library.rowWrites.sizer.maximumRows = 5
+        vm.library.rowWrites.immediateLimit = 5
+        for i in 0..<24 {
+            try Data(repeating: UInt8(i), count: 50 + i).write(to: photos.appendingPathComponent("s\(i).jpg"))
+        }
+        final class Saves: @unchecked Sendable { var count = 0 } // posted on the main thread, by the saves
+        let saves = Saves()
+        let observer = NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: context,
+                                                              queue: nil) { _ in saves.count += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.lastScanReport?.updated, 24)
+        XCTAssertGreaterThanOrEqual(saves.count, 5, "the rows went in several saves")
+        let sizes = Dictionary(uniqueKeysWithValues: try storedPhotos(container).map { ($0.fileName, $0.fileSize) })
+        for i in 0..<24 { XCTAssertEqual(sizes["s\(i)"], Int64(50 + i)) }
+        try await rescan(vm)
+        XCTAssertEqual(vm.library.lastScanReport?.updated, 0, "every new size was saved")
+        assertMatchesFreshLoad(vm, "after the rescans")
+    }
+
+    /// New photos with keywords go in in chunks sized by time, each tag linked once per chunk on its side: every
+    /// photo has its tags, as stored and in memory.
+    func testKeywordedPhotosInsertedInChunksHaveEveryTag() async throws {
+        let photos = try makeTempDir("photos")
+        let (vm, _, container) = try await openLibrary(at: photos)
+        vm.library.rowWrites.sizer.maximumRows = 3
+        vm.library.rowWrites.immediateLimit = 3
+        for i in 0..<20 {
+            try makeJPEG("k\(i).jpg", in: photos, rating: i % 5,
+                         keywords: ["people:p\(i % 3)", "all", "own \(i)"])
+        }
+
+        try await rescan(vm)
+
+        XCTAssertEqual(vm.library.lastScanReport?.inserted, 20)
+        let stored = Dictionary(uniqueKeysWithValues: try storedPhotos(container).map {
+            ($0.fileName, Set($0.tags.map(\.fullName)))
+        })
+        for i in 0..<20 { XCTAssertEqual(stored["k\(i)"], ["people:p\(i % 3)", "all", "own \(i)"], "k\(i)") }
+        let all = try XCTUnwrap(vm.library.allTags.first { $0.name == "all" })
+        XCTAssertEqual(vm.library.tagCounts[all.id], 20)
+        XCTAssertEqual(vm.library.categoryCounts["people"], 20)
+        assertMatchesFreshLoad(vm, "after the insert")
+    }
+
     // MARK: - Deletes update the library in memory
 
     /// Files a delete trashes go into a temp folder, never the user's Trash.

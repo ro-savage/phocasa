@@ -4,7 +4,12 @@ import SwiftUI
 /// (`LibraryStore.index(of:)`, O(1)), so nothing here scans the library.
 @Observable @MainActor
 final class SelectionModel {
-    var selectedPhotos: Set<UUID> = []
+    var selectedPhotos: Set<UUID> = [] {
+        didSet { version &+= 1 }
+    }
+    /// Bumped on every change of `selectedPhotos`, so what is worked out from the selection is worked out once per
+    /// change (the context menu's checked tags).
+    @ObservationIgnored private(set) var version = 0
     /// The photo clicked or moved to last: the anchor of range selections and keyboard navigation.
     var lastSelectedId: UUID?
 
@@ -16,8 +21,13 @@ final class SelectionModel {
 
     /// The selected photos that the grid shows, in grid order. O(k log k) for k selected photos.
     var selectedPhotosList: [PhotoAsset] {
-        let photos = library.photos
-        return selectedPhotos.compactMap { library.index(of: $0) }.sorted().map { photos[$0] }
+        selectedTargets.photos
+    }
+
+    /// `selectedPhotosList` with the photos' ids and places, read from the grid (no model reads): what the view model
+    /// hands the library's changes to the selection.
+    var selectedTargets: LibraryStore.Targets {
+        library.shownTargets(withIDs: selectedPhotos)
     }
 
     func isPartOfMultiSelection(_ photo: PhotoAsset) -> Bool {

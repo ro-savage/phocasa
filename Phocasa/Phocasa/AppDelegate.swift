@@ -18,8 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // An edit session still open is saved first, so its writes are among those the flush waits for.
+        // An edit session still open is saved first, and the changes still queued for the store are written, so their
+        // files' writes are among those the flush waits for.
         PhotoLibraryViewModel.saveEditsBeforeQuit()
+        PhotoLibraryViewModel.writePendingChangesBeforeQuit()
         Self.replyAfterFlushing(timeout: Self.quitFlushTimeout) {
             sender.reply(toApplicationShouldTerminate: true)
         }

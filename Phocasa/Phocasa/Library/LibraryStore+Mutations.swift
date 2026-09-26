@@ -1,32 +1,65 @@
 import SwiftData
 import Foundation
 
-// Changes to photos: each saves the store, writes the photo's file metadata back in the background where it changed,
-// and patches the in-memory library instead of reloading it. None of them touches the selection; the view model
+// Changes to photos. Each patches the in-memory library at once (the facts, the counts, the grid) instead of reloading
+// it, and queues the rows' new values (`LibraryStore+RowWrites`: written in the same turn for a few photos, in chunks
+// sized by time for many), whose writes send the photos' rating and keywords to their files. Rating and tag changes
+// register their undo here; the view model registers the bin's. None of them touches the selection; the view model
 // does that for the flows that act on it.
 extension LibraryStore {
     // MARK: - Rating
 
     func setRating(_ rating: Int, for photo: PhotoAsset) {
-        photo.rating = rating
-        try? modelContext?.save()
-
-        writeMetadataInBackground([metadataWriteItem(for: photo)])
-        applyFactChanges([photo])
-        refreshVisiblePhotos()
+        setRating(rating, for: [photo])
     }
 
-    /// Rates `photos` (in grid order, as `SelectionModel.selectedPhotosList` gives them) in one save.
+    /// Rates `photos` (in grid order, as `SelectionModel.selectedPhotosList` gives them). Every photo's files get the
+    /// rating, even those that had it already. Undo gives each photo the rating it had.
     func setRating(_ rating: Int, for photos: [PhotoAsset]) {
-        guard let context = modelContext else { return }
-        for photo in photos {
-            photo.rating = rating
-        }
-        try? context.save()
+        setRating(rating, for: targets(of: photos))
+    }
 
-        writeMetadataInBackground(photos.map { metadataWriteItem(for: $0) })
-        applyFactChanges(photos)
+    /// `setRating(_:for:)` for photos read from the grid (`SelectionModel.selectedTargets`): no model reads, so all
+    /// 150,000 photos of a library are rated in memory in a fraction of a second.
+    func setRating(_ rating: Int, for targets: Targets) {
+        setRatings(targets, Array(repeating: rating, count: targets.photos.count), actionName: "Rating")
+    }
+
+    /// Gives each target the rating at its index (an undo gives each photo its own), and registers the undo, which
+    /// gives back the ratings the photos had. The facts change in memory without reading the models.
+    private func setRatings(_ targets: Targets, _ ratings: [Int], actionName: String) {
+        guard modelContext != nil, !targets.photos.isEmpty else { return }
+        var before: [Int] = []
+        var located: [(facts: PhotoFacts, position: ListPosition)] = []
+        var rows: [(photo: PhotoAsset, change: RowChange)] = []
+        var changes = false
+        before.reserveCapacity(ratings.count)
+        located.reserveCapacity(ratings.count)
+        rows.reserveCapacity(ratings.count)
+        for i in targets.photos.indices {
+            rows.append((targets.photos[i], RowChange(rating: ratings[i], writesMetadata: true)))
+            guard let position = targets.positions[i] else {
+                let rating = rating(of: targets.photos[i])
+                before.append(rating)
+                changes = changes || rating != ratings[i]
+                continue
+            }
+            var facts = facts(at: position)
+            before.append(facts.rating)
+            changes = changes || facts.rating != ratings[i]
+            facts.rating = ratings[i]
+            located.append((facts, position))
+        }
+        enqueueRowChanges(rows)
+        applyFacts(located, onlyRatings: true)
         refreshVisiblePhotos()
+        writeQueuedRows(changedNow: targets.photos)
+        guard changes else { return } // nothing to undo
+        let ids = targets.ids
+        registerUndo(actionName) { library in
+            let (targets, kept) = library.loadedTargets(withIDs: ids)
+            library.setRatings(targets, kept.map { before[$0] }, actionName: actionName)
+        }
     }
 
     // MARK: - Tags
@@ -46,92 +79,184 @@ extension LibraryStore {
     }
 
     func addTag(name: String, category: String, to photo: PhotoAsset) {
-        guard let context = modelContext else { return }
-        let tag = findOrCreateTag(name: name, category: category, in: context)
-        var changed: [PhotoAsset] = []
-        if !photo.tags.contains(where: { $0.id == tag.id }) {
-            photo.tags.append(tag)
-            try? context.save()
-
-            writeMetadataInBackground([metadataWriteItem(for: photo)])
-            changed.append(photo)
-        }
-        refreshTagLists(newTag: tag)
-        applyFactChanges(changed)
-        refreshVisiblePhotos()
-        sortTagCategories()
+        addTag(name: name, category: category, to: [photo])
     }
 
-    /// Adds the tag to each of `photos` that doesn't have it yet, in one save.
+    /// Adds the tag to each of `photos` that doesn't have it yet. Undo takes it off those photos again.
     func addTag(name: String, category: String, to photos: [PhotoAsset]) {
+        addTag(name: name, category: category, to: targets(of: photos))
+    }
+
+    /// `addTag(name:category:to:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    func addTag(name: String, category: String, to targets: Targets) {
         guard let context = modelContext else { return }
         let tag = findOrCreateTag(name: name, category: category, in: context)
-
-        var changed: [PhotoAsset] = []
-        for photo in photos {
-            if !photo.tags.contains(where: { $0.id == tag.id }) {
-                photo.tags.append(tag)
-                changed.append(photo)
-            }
-        }
-        try? context.save()
         refreshTagLists(newTag: tag)
-        applyFactChanges(changed)
-        refreshVisiblePhotos()
-        sortTagCategories()
-
-        writeMetadataInBackground(changed.map { metadataWriteItem(for: $0) })
+        // A new tag that no photo got (they all had it) isn't left unsaved; otherwise its photos' save writes it.
+        if setTag(tag, on: targets, to: true) == 0 && context.hasChanges { try? context.save() }
     }
 
     func removeTag(_ tag: Tag, from photo: PhotoAsset) {
-        photo.tags.removeAll { $0.id == tag.id }
-        try? modelContext?.save()
-
-        writeMetadataInBackground([metadataWriteItem(for: photo)])
-        applyFactChanges([photo])
-        refreshVisiblePhotos()
-        sortTagCategories()
+        removeTag(tag, from: [photo])
     }
 
-    /// Removes the tag from every one of `photos`, in one save.
+    /// Removes the tag from every one of `photos` that has it. Undo gives it back to those photos.
     func removeTag(_ tag: Tag, from photos: [PhotoAsset]) {
-        guard let context = modelContext else { return }
-        for photo in photos {
-            photo.tags.removeAll { $0.id == tag.id }
+        removeTag(tag, from: targets(of: photos))
+    }
+
+    /// `removeTag(_:from:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    func removeTag(_ tag: Tag, from targets: Targets) {
+        guard modelContext != nil else { return }
+        setTag(tag, on: targets, to: false)
+    }
+
+    /// Gives `tag` to (`has`), or takes it from, each target that has it the other way. The facts change in memory
+    /// without reading the models (the counts, the grid and the search keys with them), and each changed photo's row
+    /// gains or loses the link. Only the photos that changed have their files written, and the undo acts on them.
+    /// Returns how many changed.
+    @discardableResult
+    private func setTag(_ tag: Tag, on targets: Targets, to has: Bool) -> Int {
+        let photos = targets.photos
+        guard !photos.isEmpty else { return 0 }
+        let tagFact = tagFacts.facts(for: tag)
+        var tagsByID: [UUID: TagFacts]?
+        var changed: [(photo: PhotoAsset, id: UUID)] = []
+        var located: [(facts: PhotoFacts, position: ListPosition)] = []
+        var rebuild: [PhotoAsset] = []
+        for i in photos.indices {
+            guard let position = targets.positions[i] else {
+                // Not loaded (not a photo on screen): its model and queued changes say whether it has the tag.
+                if tags(of: photos[i]).contains(where: { $0 === tag }) != has {
+                    changed.append((photos[i], targets.ids[i]))
+                }
+                continue
+            }
+            var facts = facts(at: position)
+            guard facts.tagIDs.contains(tagFact.id) != has else { continue }
+            changed.append((photos[i], targets.ids[i]))
+            if has {
+                facts.add(tagFact)
+            } else {
+                if tagsByID == nil { tagsByID = tagFactsByID(including: tag) }
+                guard facts.remove(tagFact, tagsByID: tagsByID ?? [:]) else {
+                    rebuild.append(photos[i]) // a tag the lists don't know: its facts are read again below
+                    continue
+                }
+            }
+            located.append((facts, position))
         }
-        try? context.save()
-        writeMetadataInBackground(photos.map { metadataWriteItem(for: $0) })
-        applyFactChanges(photos)
+        let change = has ? RowChange(addedTags: [tag], writesMetadata: true)
+            : RowChange(removedTags: [tag], writesMetadata: true)
+        enqueueRowChanges(changed.map { ($0.photo, change) })
+        applyFacts(located)
+        applyFactChanges(rebuild)
         refreshVisiblePhotos()
         sortTagCategories()
+        writeQueuedRows(changedNow: changed.map(\.photo))
+        guard !changed.isEmpty else { return 0 }
+        let changedIDs = changed.map(\.id)
+        let tagID = tagFact.id
+        registerUndo(has ? "Add Tag “\(tag.name)”" : "Remove Tag “\(tag.name)”") { library in
+            library.setTag(withID: tagID, onPhotosWith: changedIDs, to: !has)
+        }
+        return changed.count
+    }
+
+    /// `setTag` by the tag's id and the loaded photos' ids (undo and redo). Photos no longer loaded are skipped.
+    private func setTag(withID tagID: UUID, onPhotosWith ids: [UUID], to has: Bool) {
+        guard let tag = allTags.first(where: { tagFacts.facts(for: $0).id == tagID }) else { return }
+        setTag(tag, on: loadedTargets(withIDs: ids).targets, to: has)
+    }
+
+    /// Every tag's facts by id (and `tag`'s, if the lists don't have it yet), for taking a tag out of photos' facts.
+    private func tagFactsByID(including tag: Tag) -> [UUID: TagFacts] {
+        var byID: [UUID: TagFacts] = [:]
+        for known in allTags + [tag] {
+            let facts = tagFacts.facts(for: known)
+            byID[facts.id] = facts
+        }
+        return byID
     }
 
     // MARK: - Bin
 
-    /// Moves photos to the bin. Returns their ids.
+    /// Moves photos to the bin. Returns their ids. (The view model registers the undo: it also moves the detail view
+    /// off the photos.)
     @discardableResult
     func moveToBin(_ photosToMove: [PhotoAsset]) -> [UUID] {
-        var ids: [UUID] = []
-        for photo in photosToMove {
-            photo.isInBin = true
-            ids.append(photo.id)
-        }
-        try? modelContext?.save()
-        relocate(photosToMove, ids: ids, toBin: true)
-        return ids
+        setInBin(targets(of: photosToMove), true)
+    }
+
+    /// `moveToBin(_:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    @discardableResult
+    func moveToBin(_ targets: Targets) -> [UUID] {
+        setInBin(targets, true)
     }
 
     /// Takes photos out of the bin. Returns their ids.
     @discardableResult
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) -> [UUID] {
-        var ids: [UUID] = []
-        for photo in photosToRestore {
-            photo.isInBin = false
-            ids.append(photo.id)
+        setInBin(targets(of: photosToRestore), false)
+    }
+
+    /// `restoreFromBin(_:)` for photos read from the grid (`SelectionModel.selectedTargets`).
+    @discardableResult
+    func restoreFromBin(_ targets: Targets) -> [UUID] {
+        setInBin(targets, false)
+    }
+
+    private func setInBin(_ targets: Targets, _ inBin: Bool) -> [UUID] {
+        enqueueRowChanges(targets.photos.map { ($0, RowChange(isInBin: inBin)) })
+        relocate(targets.photos, ids: targets.ids, toBin: inBin)
+        writeQueuedRows(changedNow: targets.photos)
+        return targets.ids
+    }
+
+    /// The loaded photos with `ids` (only those in the bin when `inBin`, in the library when it's false) as targets, in
+    /// `ids` order, with the index in `ids` of each (`kept`). Photos elsewhere or gone are skipped: undo and redo.
+    func loadedTargets(withIDs ids: [UUID], inBin: Bool? = nil) -> (targets: Targets, kept: [Int]) {
+        var targets = Targets()
+        var kept: [Int] = []
+        let library = allPhotos // once each: reads of observed properties go through the observation registrar
+        let bin = binPhotos
+        for (i, position) in positions(of: ids).enumerated() {
+            guard let position, inBin == nil || position.inBin == inBin else { continue }
+            targets.photos.append(position.inBin ? bin[position.index] : library[position.index])
+            targets.ids.append(ids[i])
+            targets.positions.append(position)
+            kept.append(i)
         }
-        try? modelContext?.save()
-        relocate(photosToRestore, ids: ids, toBin: false)
-        return ids
+        return (targets, kept)
+    }
+
+    // MARK: - Saved Edits
+
+    /// Gives each photo its saved edits (presets, their undo, "Revert All Edits"): the rows through the write queue,
+    /// and for a photo with a RAW its sidecar's edit parameters (`rawParameters`; nil clears them) through
+    /// `RAWEditStore`, whose reads see them at once.
+    func setSavedEdits(_ changes: [(photo: PhotoAsset, edits: SavedEdits, rawParameters: EditParameters?)]) {
+        guard modelContext != nil, !changes.isEmpty else { return }
+        for change in changes {
+            if let rawPath = change.photo.rawPath {
+                RAWEditStore.shared.save(change.rawParameters, forRAWAt: rawPath)
+            }
+        }
+        queueRowChanges(changes.map { ($0.photo, RowChange(edits: $0.edits)) })
+    }
+
+    // MARK: - Undo
+
+    /// Registers `undo` on the window's undo manager as one step, named for Edit › Undo ("Undo Rating"). Undoing runs
+    /// the opposite change through the same methods, which register the redo. Nothing without an undo manager.
+    func registerUndo(_ actionName: String, _ undo: @escaping @MainActor (LibraryStore) -> Void) {
+        guard let undoManager else { return }
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { library in
+            MainActor.assumeIsolated { undo(library) }
+        }
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
     }
 
     // MARK: - Deleting Files
@@ -139,6 +264,7 @@ extension LibraryStore {
     // are there, and only for the files that went (or were gone already): a file that couldn't be moved (locked,
     // read-only, a share without a Trash) or whose drive isn't connected keeps its photo as it was, and
     // `deleteProblem` says how many and why. A photo whose delete is still running can't be deleted again meanwhile.
+    // Neither kind of delete can be undone (both ask first): the files are in the Trash.
 
     /// Deletes one file type of each photo (with the RAW or JPG filter active): a pair loses that file, moved to the
     /// Trash; a photo with only one file, or both filters active, goes to the bin instead. A pair whose file can't be
@@ -147,6 +273,8 @@ extension LibraryStore {
     /// A RAW goes with its `.xmp` sidecar (its rating, keywords and edits, and what other apps wrote about it), except
     /// when the pair's JPG keeps its own rating and keywords there (`phocasa:OverridesEmbedded`, for a JPG that can't
     /// take them): then the sidecar stays with the JPG.
+    ///
+    /// The rows change in chunks sized by time (`writeInChunks`), then the in-memory library once.
     func deleteFileType(of photosToRemove: [PhotoAsset], raw deleteRAW: Bool, jpg deleteJPG: Bool) async {
         enum Change { case toBin, dropRAW, dropJPG }
         var changes: [(photo: PhotoAsset, change: Change)] = []
@@ -191,19 +319,26 @@ extension LibraryStore {
                 problems.append((path, outcome)) // the file is still there: the pair keeps it
                 continue
             }
-            switch change {
-            case .toBin:
-                photo.isInBin = true
-            case .dropRAW:
-                photo.rawPath = nil
-                photo.hasRawEdits = false
-            case .dropJPG:
-                photo.jpgPath = nil
-                photo.jpgEditParametersData = nil
-            }
             applied.append((photo, change))
         }
-        try? modelContext?.save()
+        // Their queued changes first, so none of them is written over these afterwards.
+        writePendingRows(of: applied.map(\.photo))
+        if let context = modelContext {
+            await writeInChunks(applied, in: context) { chunk in
+                for (photo, change) in chunk where photo.modelContext != nil {
+                    switch change {
+                    case .toBin:
+                        photo.isInBin = true
+                    case .dropRAW:
+                        photo.rawPath = nil
+                        photo.hasRawEdits = false
+                    case .dropJPG:
+                        photo.jpgPath = nil
+                        photo.jpgEditParametersData = nil
+                    }
+                }
+            }
+        }
         fileTypeDeleteDidFinish(binned: applied.filter { $0.change == .toBin }.map(\.photo),
                                 changed: applied.filter { $0.change != .toBin }.map(\.photo))
         if !problems.isEmpty {
@@ -214,7 +349,8 @@ extension LibraryStore {
 
     /// Moves the photos' files (and RAW sidecars) to the Trash, then deletes from the store the photos whose files
     /// went (or were gone already). A photo with a file that couldn't be moved stays in the bin, less the files that
-    /// did go; a sidecar left behind doesn't keep its photo.
+    /// did go; a sidecar left behind doesn't keep its photo. The library changes in memory at once; the rows go through
+    /// the write queue (a few now, many in chunks), each untagged on its tags' side first.
     func deletePermanently(_ photosToDelete: [PhotoAsset]) async {
         guard let context = modelContext else { return }
         let photos = photosToDelete.filter { photosBeingDeleted.insert($0.id).inserted }
@@ -247,10 +383,8 @@ extension LibraryStore {
         }
 
         updateLibrary(adding: [], facts: [], removing: Set(deleted.map(\.id))) // in memory, before the models go
-        for photo in deleted {
-            context.delete(photo)
-        }
-        try? context.save()
+        if !kept.isEmpty { try? context.save() }
+        queueRowChanges(deleted.map { ($0, RowChange(deletes: true)) })
         if !kept.isEmpty {
             photosDidChange(kept)
             deleteProblem = DeleteProblem(photoCount: kept.count, attemptedCount: photos.count, fileType: nil,
@@ -324,10 +458,10 @@ extension LibraryStore {
         let photo = PhotoAsset(fileName: url.deletingPathExtension().lastPathComponent, jpgPath: url.path,
                                folderPath: url.deletingLastPathComponent().path, creationDate: values?.creationDate,
                                fileSize: Int64(values?.fileSize ?? 0))
-        photo.rating = source.rating
+        photo.rating = rating(of: source)
         photo.captureDate = source.captureDate
         context.insert(photo)
-        photo.tags = source.tags
+        photo.tags = tags(of: source)
         try? context.save()
         updateLibrary(adding: [photo], facts: makeFacts(for: [photo]), removing: [])
         return photo
@@ -335,8 +469,8 @@ extension LibraryStore {
 
     // MARK: - Background Metadata Write-back
 
-    /// The photo's rating and keywords, for its file. A JPG+RAW pair writes both: the JPG and the RAW's
-    /// sidecar (user decision, task 23).
+    /// The photo's rating and keywords, for its file, as its row holds them. A JPG+RAW pair writes both: the JPG and
+    /// the RAW's sidecar (user decision, task 23).
     func metadataWriteItem(for photo: PhotoAsset) -> MetadataWriteItem {
         // Each path is read once (model property reads aren't free on the main thread); this is `displayPath`
         // and `hasRawPair` spelled out.
@@ -347,12 +481,34 @@ extension LibraryStore {
                                  pairedRAWPath: jpgPath == nil ? nil : rawPath)
     }
 
-    /// Hands the writes to the serial `MetadataWriter`, which writes them off the main thread,
-    /// in call order, keeping only the latest per file (a pair's JPG and sidecar count as two files).
-    /// Returns immediately.
-    private func writeMetadataInBackground(_ items: [MetadataWriteItem]) {
-        guard !items.isEmpty else { return }
-        MetadataWriter.shared.enqueue(items)
+    // MARK: - Big Writes Outside the Queue
+
+    /// Changes rows with `write`, over `items` in chunks sized by time, saving each chunk and leaving the run loop a
+    /// pause between them: for big writes that are done before the in-memory library changes (file-type deletes,
+    /// scans). A write of at most `rowWrites.immediateLimit` items is one chunk. Without `savingLast`, the last chunk
+    /// is left for the caller's own save. Returns the time spent writing.
+    @discardableResult
+    func writeInChunks<Item>(_ items: [Item], in context: ModelContext, savingLast: Bool = true,
+                             _ write: (ArraySlice<Item>) -> Void) async -> Duration {
+        // The first chunk (all of a small write) is the sizer's probe.
+        var sizer = WriteChunkSizer(maximumRows: rowWrites.sizer.maximumRows)
+        let clock = ContinuousClock()
+        var spent: Duration = .zero
+        var start = items.startIndex
+        var rows = min(rowWrites.immediateLimit, rowWrites.sizer.maximumRows)
+        while start < items.endIndex {
+            let chunkStart = clock.now
+            let end = min(start + rows, items.endIndex)
+            write(items[start..<end])
+            if savingLast || end < items.endIndex { try? context.save() }
+            let elapsed = clock.now - chunkStart
+            spent += elapsed
+            sizer.record(rows: end - start, took: elapsed)
+            rows = sizer.rows
+            start = end
+            if start < items.endIndex { try? await Task.sleep(for: WriteChunkSizer.pause(after: elapsed)) }
+        }
+        return spent
     }
 }
 

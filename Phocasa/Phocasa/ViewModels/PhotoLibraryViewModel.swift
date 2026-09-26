@@ -51,6 +51,26 @@ final class PhotoLibraryViewModel {
     /// (⌘⌫ above all) are off meanwhile, so they don't act on photos instead of the text.
     var isTypingInContent = false
 
+    /// The window's undo manager, from `ContentView`'s environment (so Edit › Undo and Redo, ⌘Z and ⇧⌘Z, act on it).
+    /// Rating, tag, bin and preset changes register their undo there; the library gets it too, for the ratings and
+    /// tags. Permanent deletes, file-type deletes and exports can't be undone: they ask first, and their files are in
+    /// the Trash or rewritten.
+    @ObservationIgnored weak var undoManager: UndoManager? {
+        didSet { library.undoManager = undoManager }
+    }
+    /// The context menu's checked tags for the selection (`contextMenuTagIDs`), and what they were worked out for.
+    @ObservationIgnored private var selectionTags: (key: SelectionTagsKey, ids: Set<UUID>)?
+    /// How often the selection's common tags were worked out, and how often a context menu asked for its checked tags.
+    /// For tests: every visible cell's menu asks on each redraw; the tags are worked out once per change.
+    @MainActor static var selectionTagComputations = 0
+    @MainActor static var contextMenuTagLookups = 0
+
+    private struct SelectionTagsKey: Equatable {
+        let selection: Int
+        let facts: Int
+        let grid: Int
+    }
+
     /// `preferences` are this launch's (`ViewPreferences.forLaunch()`): in memory, fresh for each view model, in the
     /// test host.
     init(preferences: ViewPreferences = .forLaunch()) {
@@ -89,6 +109,15 @@ final class PhotoLibraryViewModel {
     static func saveEditsBeforeQuit() {
         for entry in openViewModels {
             entry.viewModel?.stopEditing(save: true)
+        }
+    }
+
+    /// Quitting, after `saveEditsBeforeQuit()`: the changes still queued for the store (a big action's later chunks)
+    /// are written at once, in one save, so the store holds them and their files' writes are queued before quit waits
+    /// for those.
+    static func writePendingChangesBeforeQuit() {
+        for entry in openViewModels {
+            entry.viewModel?.library.writeAllPendingRows()
         }
     }
 
@@ -132,7 +161,7 @@ final class PhotoLibraryViewModel {
     // MARK: - Rating and Tagging the Selection
 
     func setRatingForSelection(_ rating: Int) {
-        library.setRating(rating, for: selection.selectedPhotosList)
+        library.setRating(rating, for: selection.selectedTargets)
     }
 
     /// Keyboard rating: the photo in the detail view, or else the selection.
@@ -145,21 +174,20 @@ final class PhotoLibraryViewModel {
     }
 
     func addTagToSelection(name: String, category: String) {
-        library.addTag(name: name, category: category, to: selection.selectedPhotosList)
+        library.addTag(name: name, category: category, to: selection.selectedTargets)
     }
 
     /// The context menu's tag toggle: on the whole selection when `photo` is part of a multi-selection (removes the
     /// tag if every selected photo has it, else adds it), otherwise on `photo`.
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
         if selection.isPartOfMultiSelection(photo) {
-            let selected = selection.selectedPhotosList
-            if Self.tagIDsAllHave(selected, in: library).contains(tag.id) {
-                library.removeTag(tag, from: selected)
+            if selectionTagIDs().contains(tag.id) {
+                library.removeTag(tag, from: selection.selectedTargets)
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
             }
         } else {
-            if photo.tags.contains(where: { $0.id == tag.id }) {
+            if library.tagIDs(of: photo).contains(tag.id) {
                 library.removeTag(tag, from: photo)
             } else {
                 library.addTag(name: tag.name, category: tag.category, to: photo)
@@ -173,23 +201,26 @@ final class PhotoLibraryViewModel {
     }
 
     /// The tags the context menu on `photo` shows as checked: those every photo `toggleTag` would act on has (the
-    /// selection when `photo` is part of a multi-selection). Computed once per menu from the in-memory facts, not by
-    /// reading every selected photo's tags for each tag in the menu.
+    /// selection when `photo` is part of a multi-selection). Every visible cell's menu asks on every redraw, so the
+    /// selection's are worked out once per change of the selection, the facts or the grid (`selectionTagIDs()`), not
+    /// once per cell: with everything selected that walked 150,000 photos per cell, 22 s after ⌘A.
     func contextMenuTagIDs(for photo: PhotoAsset) -> Set<UUID> {
+        Self.contextMenuTagLookups += 1
         if selection.isPartOfMultiSelection(photo) {
-            return Self.tagIDsAllHave(selection.selectedPhotosList, in: library)
+            return selectionTagIDs()
         }
         return library.tagIDs(of: photo)
     }
 
-    /// The tags every one of `photos` has. With no photos, every tag (as `allSatisfy` over nothing is true).
-    private static func tagIDsAllHave(_ photos: [PhotoAsset], in library: LibraryStore) -> Set<UUID> {
-        guard let first = photos.first else { return Set(library.allTags.map(\.id)) }
-        var common = library.tagIDs(of: first)
-        for photo in photos.dropFirst() where !common.isEmpty {
-            common.formIntersection(library.tagIDs(of: photo))
-        }
-        return common
+    /// The tags every selected photo the grid shows has, from the in-memory facts; every tag when the grid shows none
+    /// of them (as `allSatisfy` over nothing is true). Cached until the selection, a photo's facts or the grid change.
+    private func selectionTagIDs() -> Set<UUID> {
+        let key = SelectionTagsKey(selection: selection.version, facts: library.factsVersion, grid: library.gridVersion)
+        if let cached = selectionTags, cached.key == key { return cached.ids }
+        Self.selectionTagComputations += 1
+        let ids = library.commonTagIDs(ofShown: selection.selectedPhotos) ?? Set(library.allTags.map(\.id))
+        selectionTags = (key, ids)
+        return ids
     }
 
     func openTagEditorForContextMenu(photo: PhotoAsset) {
@@ -214,7 +245,7 @@ final class PhotoLibraryViewModel {
         if tagEditorEditsSelection {
             addTagToSelection(name: tag.name, category: tag.category)
         } else if let photo {
-            if photo.tags.contains(where: { $0.id == tag.id }) {
+            if library.tagIDs(of: photo).contains(tag.id) {
                 library.removeTag(tag, from: photo)
             } else {
                 library.addTag(name: tag.name, category: tag.category, to: photo)
@@ -254,14 +285,14 @@ final class PhotoLibraryViewModel {
 
     @discardableResult
     func deleteSelected() -> Task<Void, Never>? {
-        let toDelete = selection.selectedPhotosList
-        guard !toDelete.isEmpty else { return nil }
+        let toDelete = selection.selectedTargets
+        guard !toDelete.photos.isEmpty else { return nil }
 
         if library.viewingBin {
-            photosToDelete = toDelete
+            photosToDelete = toDelete.photos
             showPermanentDeleteConfirmation = true
         } else if let fileType = fileTypeToDelete {
-            pendingFileTypeDelete = FileTypeDelete(toDelete, fileType: fileType)
+            pendingFileTypeDelete = FileTypeDelete(toDelete.photos, fileType: fileType)
         } else {
             moveToBin(toDelete)
         }
@@ -283,7 +314,7 @@ final class PhotoLibraryViewModel {
         } else if let fileType = fileTypeToDelete {
             pendingFileTypeDelete = FileTypeDelete(photos, fileType: fileType)
         } else {
-            moveToBin(photos)
+            moveToBin(library.targets(of: photos))
         }
         return nil
     }
@@ -324,18 +355,46 @@ final class PhotoLibraryViewModel {
         return Task { await library.deleteFileType(of: photosToRemove, raw: raw, jpg: jpg) }
     }
 
-    private func moveToBin(_ photosToMove: [PhotoAsset]) {
-        moveDetailOff(Set(photosToMove.map(\.id)), saveEdit: true)
-        selection.deselect(library.moveToBin(photosToMove))
+    /// Undo restores the photos (those still in the bin).
+    private func moveToBin(_ targets: LibraryStore.Targets) {
+        guard !targets.photos.isEmpty else { return }
+        moveDetailOff(Set(targets.ids), saveEdit: true)
+        let ids = library.moveToBin(targets)
+        selection.deselect(ids)
+        registerUndo("Move to Bin") { viewModel in
+            viewModel.restoreFromBin(viewModel.library.loadedTargets(withIDs: ids, inBin: true).targets)
+        }
     }
 
     func restoreFromBin(_ photosToRestore: [PhotoAsset]) {
-        moveDetailOff(Set(photosToRestore.map(\.id)), saveEdit: true)
-        selection.deselect(library.restoreFromBin(photosToRestore))
+        restoreFromBin(library.targets(of: photosToRestore))
+    }
+
+    /// Undo moves the photos back to the bin (those still in the library).
+    private func restoreFromBin(_ targets: LibraryStore.Targets) {
+        guard !targets.photos.isEmpty else { return }
+        moveDetailOff(Set(targets.ids), saveEdit: true)
+        let ids = library.restoreFromBin(targets)
+        selection.deselect(ids)
+        registerUndo("Restore from Bin") { viewModel in
+            viewModel.moveToBin(viewModel.library.loadedTargets(withIDs: ids, inBin: false).targets)
+        }
+    }
+
+    /// Registers `undo` as one step named `actionName` on the window's undo manager (see `undoManager`); undoing runs
+    /// the opposite change, which registers the redo.
+    private func registerUndo(_ actionName: String, _ undo: @escaping @MainActor (PhotoLibraryViewModel) -> Void) {
+        guard let undoManager else { return }
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { viewModel in
+            MainActor.assumeIsolated { undo(viewModel) }
+        }
+        undoManager.setActionName(actionName)
+        undoManager.endUndoGrouping()
     }
 
     func restoreSelected() {
-        restoreFromBin(selection.selectedPhotosList)
+        restoreFromBin(selection.selectedTargets)
     }
 
     @discardableResult
@@ -387,7 +446,10 @@ final class PhotoLibraryViewModel {
 
     // MARK: - Detail View
 
+    /// Opens the detail view on `photo`. Its row gets any change still queued for it first: the detail view, its edit
+    /// session and exports read the model.
     func openDetail(for photo: PhotoAsset) {
+        library.writePendingRows(of: [photo])
         selectedDetailPhoto = photo
         showingDetail = true
     }
@@ -420,6 +482,7 @@ final class PhotoLibraryViewModel {
         editSession?.end(save: saveEdit)
         editSession = nil
         savedEditHandoff = nil
+        library.writePendingRows(of: [photo])
         selectedDetailPhoto = photo
         if let editingRAW {
             continueEditing(photo, isRAW: editingRAW)
@@ -545,6 +608,7 @@ final class PhotoLibraryViewModel {
             if let handoff = current.end(save: true) { savedEditHandoff = handoff }
             editSession = nil
         }
+        library.writePendingRows(of: [photo]) // the session reads and saves the model's edits
         selectedDetailPhoto = photo
         let session = EditSession(photo: photo, isRAW: isRAW, modelContext: library.modelContext)
         editSession = session
@@ -574,7 +638,7 @@ final class PhotoLibraryViewModel {
     /// selected photos that have edits when `photo` is part of a multi-selection, else `photo`.
     func requestRevertEdits(from photo: PhotoAsset) {
         photosToRevert = selection.isPartOfMultiSelection(photo)
-            ? selection.selectedPhotosList.filter(\.hasAnyEdits) : [photo]
+            ? selection.selectedPhotosList.filter { library.hasAnyEdits(of: $0) } : [photo]
     }
 
     func confirmRevertEdits() {
@@ -583,17 +647,20 @@ final class PhotoLibraryViewModel {
         revertEdits(of: photos)
     }
 
-    /// Clears the photos' saved JPG and RAW edits, in one save. The sidecar writes go through `MetadataWriter`.
+    /// Clears the photos' saved JPG and RAW edits (the rows through the library's write queue; the sidecars through
+    /// `MetadataWriter`). It asks first, and isn't undoable.
     private func revertEdits(of photos: [PhotoAsset]) {
         guard !photos.isEmpty else { return }
-        for photo in photos {
-            photo.jpgEditParametersData = nil
-            photo.hasRawEdits = false
-            if let rawPath = photo.rawPath {
-                RAWEditStore.shared.save(nil, forRAWAt: rawPath)
-            }
-        }
-        try? library.modelContext?.save()
+        library.setSavedEdits(photos.map { (photo: $0, edits: LibraryStore.SavedEdits(jpgEditParametersData: nil,
+                                                                                    hasRawEdits: false),
+                                            rawParameters: nil) })
+        settleDetailPhoto()
+    }
+
+    /// The photo on screen gets any change still queued for its row: the detail view and its edit session read the
+    /// model.
+    private func settleDetailPhoto() {
+        if showingDetail, let photo = selectedDetailPhoto { library.writePendingRows(of: [photo]) }
     }
 
     // MARK: - Export
@@ -710,23 +777,57 @@ final class PhotoLibraryViewModel {
     }
 
     /// Saves `preset`'s look as the edits of every selected photo, each keeping its own crop, rotation and flips: JPG
-    /// edits in the model, RAW edits in the sidecar (through `MetadataWriter`).
+    /// edits in the model (through the library's write queue), RAW edits in the sidecar (through `MetadataWriter`).
+    /// Undo gives each photo back the edits it had, its sidecar's included.
     func applyPresetToSelection(_ preset: EditPreset) {
-        let params = preset.parameters
-
+        let look = preset.parameters
+        var changes: [(photo: PhotoAsset, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
+        var before: [(id: UUID, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
         for photo in selection.selectedPhotosList {
+            let saved = library.savedEdits(of: photo)
+            let rawPath = photo.rawPath
+            // The sidecar is read only for photos with RAW edits: only those can have a transform to keep.
+            let savedRAW = saved.hasRawEdits ? rawPath.flatMap { RAWEditStore.shared.parameters(forRAWAt: $0) } : nil
+            var edits = saved
             if photo.jpgPath != nil {
-                photo.jpgEditParameters = (photo.jpgEditParameters ?? EditParameters()).applyingLook(of: params)
+                let jpg = saved.jpgEditParametersData.flatMap { try? JSONDecoder().decode(EditParameters.self, from: $0) }
+                edits.jpgEditParametersData = try? JSONEncoder().encode((jpg ?? EditParameters()).applyingLook(of: look))
             }
-            if let rawPath = photo.rawPath {
-                // The sidecar is read only for photos with RAW edits: only those can have a transform to keep.
-                let saved = photo.hasRawEdits ? RAWEditStore.shared.parameters(forRAWAt: rawPath) : nil
-                RAWEditStore.shared.save((saved ?? EditParameters()).applyingLook(of: params), forRAWAt: rawPath)
-                photo.hasRawEdits = true
+            var raw: EditParameters?
+            if rawPath != nil {
+                raw = (savedRAW ?? EditParameters()).applyingLook(of: look)
+                edits.hasRawEdits = true
             }
+            changes.append((photo, edits, raw))
+            before.append((photo.id, saved, savedRAW))
         }
+        guard !changes.isEmpty else { return }
+        library.setSavedEdits(changes)
+        let actionName = "Apply Preset “\(preset.name)”"
+        registerUndo(actionName) { viewModel in viewModel.restoreSavedEdits(before, actionName: actionName) }
+    }
 
-        try? library.modelContext?.save()
+    /// Undo and redo of a preset: each loaded photo gets `edits` back (photos no longer loaded are skipped), and the
+    /// step that undoes this is registered. The edit session of one of them ends first, saved, as navigating away
+    /// would end it: the values put back then replace what it saved.
+    private func restoreSavedEdits(_ edits: [(id: UUID, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)],
+                                   actionName: String) {
+        let ids = Set(edits.map(\.id))
+        if let session = editSession, ids.contains(session.photo.id) { stopEditing(save: true) }
+        var changes: [(photo: PhotoAsset, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
+        var before: [(id: UUID, edits: LibraryStore.SavedEdits, rawParameters: EditParameters?)] = []
+        let positions = library.positions(of: edits.map(\.id))
+        for (position, value) in zip(positions, edits) {
+            guard let position else { continue }
+            let photo = library.photo(at: position)
+            let saved = library.savedEdits(of: photo)
+            let savedRAW = saved.hasRawEdits ? photo.rawPath.flatMap { RAWEditStore.shared.parameters(forRAWAt: $0) } : nil
+            changes.append((photo, value.edits, value.rawParameters))
+            before.append((value.id, saved, savedRAW))
+        }
+        library.setSavedEdits(changes)
+        settleDetailPhoto()
+        registerUndo(actionName) { viewModel in viewModel.restoreSavedEdits(before, actionName: actionName) }
     }
 }
 

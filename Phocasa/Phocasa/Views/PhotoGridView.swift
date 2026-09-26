@@ -48,7 +48,8 @@ struct PhotoGridView: View {
                                 onOpen: {
                                     viewModel.openDetail(for: photo)
                                 },
-                                thumbnailsPaused: thumbnailsPaused
+                                thumbnailsPaused: thumbnailsPaused,
+                                library: viewModel.library
                             )
                         .id(photo.id)
                         .contextMenu {
@@ -199,7 +200,7 @@ struct PhotoGridView: View {
 
             Divider()
 
-            if photo.hasAnyEdits || isMulti {
+            if viewModel.library.hasAnyEdits(of: photo) || isMulti {
                 Button(isMulti ? "Revert All Edits of Selection…" : "Revert All Edits…") {
                     viewModel.requestRevertEdits(from: photo)
                 }

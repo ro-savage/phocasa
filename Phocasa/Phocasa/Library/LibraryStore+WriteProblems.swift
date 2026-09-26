@@ -20,8 +20,10 @@ extension LibraryStore {
     }
 
     /// Writes the photos' current rating and keywords to their files again, as a rating change would (a pair: the JPG
-    /// and the RAW's sidecar). Returns immediately.
+    /// and the RAW's sidecar). Returns immediately. A change of theirs still in the write queue is written first, so
+    /// the files get the values the library shows.
     func rewriteMetadata(of photos: [PhotoAsset]) {
+        writePendingRows(of: photos)
         var seen = Set<UUID>()
         let items = photos.filter { seen.insert($0.id).inserted }.map(metadataWriteItem(for:))
         guard !items.isEmpty else { return }

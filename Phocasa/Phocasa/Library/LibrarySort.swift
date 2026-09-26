@@ -183,13 +183,14 @@ struct LibrarySort: Equatable, Sendable {
 
     /// Merges `incoming` into `photos` (in this order) in one pass, keeping each photo's facts next to it. Each
     /// incoming photo goes where `insertionIndex(for:in:)` puts it; incoming photos at the same place keep this order,
-    /// then their order in `incoming`.
+    /// then their order in `incoming`. `keys[i]`, when given, is `sortKey(of:)` of `incoming[i]`'s photo, read
+    /// beforehand.
     func merge(
-        _ incoming: [(photo: PhotoAsset, facts: PhotoFacts)],
+        _ incoming: [(photo: PhotoAsset, facts: PhotoFacts)], keys givenKeys: [Key]? = nil,
         into photos: [PhotoAsset], _ facts: [PhotoFacts]
     ) -> ([PhotoAsset], [PhotoFacts]) {
         guard !incoming.isEmpty else { return (photos, facts) }
-        let keys = incoming.map { Self.sortKey(of: $0.photo) }
+        let keys = givenKeys ?? incoming.map { Self.sortKey(of: $0.photo) }
         let positions = keys.map { insertionIndex(forKey: $0, in: photos) }
         let order = incoming.indices.sorted { a, b in
             if positions[a] != positions[b] { return positions[a] < positions[b] }

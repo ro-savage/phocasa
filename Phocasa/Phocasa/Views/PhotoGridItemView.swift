@@ -10,10 +10,16 @@ struct PhotoGridItemView: View {
     var onOpen: () -> Void = {}
     /// While the grid is hidden under the detail view: start no thumbnail load, and cancel the one in flight.
     var thumbnailsPaused = false
+    /// The grid's library: the rating and the edits badge come from it, so a change still being written to the store
+    /// in chunks shows at once (`LibraryStore.rating(of:)`). Without it, the model's.
+    var library: LibraryStore?
 
     @State private var thumbnail: NSImage?
     /// The path whose thumbnail couldn't be made (the file can't be decoded): the cell says so.
     @State private var unreadablePath: String?
+
+    private var rating: Int { library?.rating(of: photo) ?? photo.rating }
+    private var hasAnyEdits: Bool { library?.hasAnyEdits(of: photo) ?? photo.hasAnyEdits }
 
     /// Identity of the thumbnail load. A window resize that stays within one bucket keeps the same identity,
     /// so it never restarts the load. Pausing cancels the load, and resuming starts it again.
@@ -56,7 +62,7 @@ struct PhotoGridItemView: View {
         // cell would fire for a double-click anywhere inside it). So a click on a star rates at once and doesn't
         // select, and a double-click on the stars rates instead of opening the photo (user decision, task 23).
         .overlay(alignment: .bottom) {
-            RatingView(rating: photo.rating, compact: true, onRate: onRate)
+            RatingView(rating: rating, compact: true, onRate: onRate)
                 .padding(.bottom, 6)
         }
         .task(id: ThumbnailTaskID(path: path, bucket: thumbnailBucket, paused: thumbnailsPaused)) {
@@ -105,7 +111,7 @@ struct PhotoGridItemView: View {
                     .padding(.vertical, 1)
                     .background(.blue.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
             }
-            if photo.hasAnyEdits {
+            if hasAnyEdits {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(.white)

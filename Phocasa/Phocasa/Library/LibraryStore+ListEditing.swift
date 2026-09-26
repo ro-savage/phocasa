@@ -30,7 +30,7 @@ extension LibraryStore {
         }
         for item in found {
             if !toBin && missingPhotoIDs.contains(item.id) { continue }
-            let facts = removed[item.id] ?? PhotoFacts(item.photo, tags: &tagFacts)
+            let facts = removed[item.id] ?? self.facts(of: item.photo)
             insertIntoList(item.photo, facts: facts, inBin: toBin)
         }
     }
@@ -89,7 +89,7 @@ extension LibraryStore {
         var incoming: [(photo: PhotoAsset, facts: PhotoFacts)] = []
         for item in moving {
             if !toBin && missingPhotoIDs.contains(item.id) { continue }
-            incoming.append((item.photo, removed[item.id] ?? PhotoFacts(item.photo, tags: &tagFacts)))
+            incoming.append((item.photo, removed[item.id] ?? facts(of: item.photo)))
         }
         if toBin {
             (binPhotos, binFacts) = sort.merge(incoming, into: binPhotos, binFacts)
@@ -108,8 +108,10 @@ extension LibraryStore {
     /// each where a reload would put it; `facts[i]` are `adding[i]`'s. Photos with ids in `removing` leave the library
     /// and the bin (their files went missing). Few photos patch the lists, the grid and the counts; many are merged
     /// and recounted. O(k log n) for k photos in the patch case, one pass in the merge case: no fetch, no reload.
-    func updateLibrary(adding photos: [PhotoAsset], facts: [PhotoFacts], removing ids: Set<UUID>) {
-        precondition(photos.count == facts.count)
+    /// `keys[i]`, when given, is `LibrarySort.sortKey(of: adding[i])`, read beforehand (a scan reads them chunk by chunk).
+    func updateLibrary(adding photos: [PhotoAsset], facts: [PhotoFacts], keys: [LibrarySort.Key]? = nil,
+                       removing ids: Set<UUID>) {
+        precondition(photos.count == facts.count && (keys == nil || keys?.count == photos.count))
         if ids.count <= Self.patchLimit {
             let found = ids.compactMap { position(of: $0, useIndex: ids.count > 2) }
             // From the end of each list first, so the positions found stay valid.
@@ -132,7 +134,8 @@ extension LibraryStore {
                 insertIntoList(photo, facts: photoFacts, inBin: false)
             }
         } else {
-            (allPhotos, allFacts) = sort.merge(zip(photos, facts).map { (photo: $0, facts: $1) }, into: allPhotos, allFacts)
+            (allPhotos, allFacts) = sort.merge(zip(photos, facts).map { (photo: $0, facts: $1) }, keys: keys,
+                                               into: allPhotos, allFacts)
             libraryVersion += 1
         }
         if ids.count > Self.patchLimit || photos.count > Self.patchLimit {

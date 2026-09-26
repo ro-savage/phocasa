@@ -80,24 +80,61 @@ struct PhotoFacts: Equatable, Sendable {
 
     /// Builds facts reading each tag model at most once across calls that share `tags`.
     @MainActor init(_ photo: PhotoAsset, tags: inout TagFactsCache) {
+        self.init(photo, rating: photo.rating, tags: photo.tags, tagFacts: &tags)
+    }
+
+    /// Facts of `photo` with the given rating and tags (its row's may not hold them yet: `LibraryStore.facts(of:)`).
+    @MainActor init(_ photo: PhotoAsset, rating: Int, tags: [Tag], tagFacts: inout TagFactsCache) {
         var tagIDs = Set<UUID>()
         var tagCategories = Set<String>()
         var searchKey = photo.fileName.lowercased()
-        for tag in photo.tags {
-            let facts = tags.facts(for: tag)
+        for tag in tags {
+            let facts = tagFacts.facts(for: tag)
             tagIDs.insert(facts.id)
             if !facts.category.isEmpty { tagCategories.insert(facts.category) }
             searchKey += facts.searchKeySuffix
         }
         self.init(
             id: photo.id,
-            rating: photo.rating,
+            rating: rating,
             hasJPG: photo.jpgPath != nil,
             hasRAW: photo.rawPath != nil,
             tagIDs: tagIDs,
             tagCategories: tagCategories,
             searchKey: searchKey
         )
+    }
+
+    /// These facts with `tag` added (not already there), without reading any model.
+    mutating func add(_ tag: TagFacts) {
+        guard tagIDs.insert(tag.id).inserted else { return }
+        if !tag.category.isEmpty { tagCategories.insert(tag.category) }
+        searchKey += tag.searchKeySuffix
+    }
+
+    /// These facts with `tag` taken out, without reading any model. `tagsByID` must hold every one of the photo's
+    /// tags: the search key is the lowercased file name followed by each tag's suffix, so the file name is what's left
+    /// once every suffix's length is taken off. Returns false (the facts unchanged) when a tag is missing from it.
+    mutating func remove(_ tag: TagFacts, tagsByID: [UUID: TagFacts]) -> Bool {
+        guard tagIDs.contains(tag.id) else { return true }
+        var suffixBytes = 0
+        for id in tagIDs {
+            guard let facts = tagsByID[id] else { return false }
+            suffixBytes += facts.searchKeySuffix.utf8.count
+        }
+        let nameBytes = searchKey.utf8.count - suffixBytes
+        guard nameBytes >= 0 else { return false }
+        tagIDs.remove(tag.id)
+        var key = String(decoding: searchKey.utf8.prefix(nameBytes), as: UTF8.self)
+        var categories = Set<String>()
+        for id in tagIDs {
+            guard let facts = tagsByID[id] else { continue }
+            key += facts.searchKeySuffix
+            if !facts.category.isEmpty { categories.insert(facts.category) }
+        }
+        searchKey = key
+        tagCategories = categories
+        return true
     }
 }
 
