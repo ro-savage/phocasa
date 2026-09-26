@@ -218,7 +218,7 @@ final class HEIFMetadataTests: XCTestCase {
                 if [.appended, .newItem].contains(written.change) { growths += 1 }
                 XCTAssertLessThanOrEqual(growths, 1, "step \(step): \(written.change)")
                 let after = try XCTUnwrap(TestHEIF(written.data))
-                let packet = try XCTUnwrap(after.data(of: after.primaryXMP[0].id)).count
+                let packet = try XCTUnwrap(after.data(of: try XCTUnwrap(after.primaryXMP.first).id)).count
                 largestPacket = max(largestPacket, packet)
                 let metaGrowth = after.meta.end - (TestHEIF(original)?.meta.end ?? 0)
                 XCTAssertLessThanOrEqual(written.data.count, original.count + metaGrowth + 8 + largestPacket,
