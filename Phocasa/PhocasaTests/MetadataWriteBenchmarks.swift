@@ -4,6 +4,7 @@
 // the same file runs on code before task A: `sed -e '/NEW-API/d' -e 's#// BASE-API ##'`.
 
 import XCTest
+import ImageIO
 @testable import Phocasa
 
 final class MetadataWriteBenchmarks: XCTestCase {
@@ -47,6 +48,20 @@ final class MetadataWriteBenchmarks: XCTestCase {
         report("raw sidecar rating write", (0..<20).map { i in
             time { service.writeMetadata(rating: i % 5 + 1, keywords: ["k\(i)", "people:ann"], toImageAt: raw.path) }
         })
+
+        // PNG and TIFF made from the camera JPG by ImageIO, with its metadata (task D writes into them; before, the
+        // values went to their sidecars).
+        for (name, type) in [("png", "public.png"), ("tiff", "public.tiff")] {
+            let file = dir.appendingPathComponent("converted.\(name)")
+            let jpgSource = try XCTUnwrap(CGImageSourceCreateWithURL(sourceJPG as CFURL, nil))
+            let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(file as CFURL, type as CFString, 1, nil))
+            CGImageDestinationAddImageFromSource(destination, jpgSource, 0, nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+            service.writeMetadata(rating: 1, keywords: ["warm"], toImageAt: file.path)
+            report("\(name) rating write (16 MP, from the camera JPG)", (0..<20).map { i in
+                time { service.writeMetadata(rating: i % 5 + 1, keywords: ["k\(i)", "people:ann"], toImageAt: file.path) }
+            })
+        }
 
         // Exports, native, on the full lane.
         let editing = ImageEditingService()
