@@ -77,6 +77,20 @@ struct LibraryLocation: Equatable, Sendable {
         }
     }
 
+    /// The library's own folder, which holds its store, its lock (`LibraryLock`) and its backups (`StoreBackup`):
+    /// `Application Support/Phocasa/` for the user's library (even while a legacy `default.store` is still opened
+    /// where it is), the development library's folder, or nil for an in-memory store. Pure: it touches no file.
+    var libraryFolder: URL? {
+        switch store {
+        case .inMemory:
+            return nil
+        case .user(let applicationSupport):
+            return applicationSupport.appendingPathComponent(StoreLocation.folderName, isDirectory: true)
+        case .development(let url):
+            return url.deletingLastPathComponent()
+        }
+    }
+
     private static func configuredCacheDirectory(_ environment: [String: String]) -> URL? {
         guard let configured = environment[thumbnailCacheDirectoryKey], !configured.isEmpty else { return nil }
         return URL(fileURLWithPath: configured, isDirectory: true)
