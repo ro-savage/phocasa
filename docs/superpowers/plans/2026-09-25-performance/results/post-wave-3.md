@@ -9,6 +9,7 @@ work, each merged into `main` with `--no-ff` and then checked in the real app.
 | `2f2fe1b` | `fix/keep-original-metadata` | **A.** Exports, baked edits and rating writes never lose a photo's original metadata |
 | `0a4a526` | `perf/fit-look-scaling` | **C.** Sharpening and clarity radii scale with the render, so an edit at fit looks as it does zoomed in |
 | `6878e42` | `fix/release-build` | The Release build compiles again (found by B; outside A–C, a build fix) |
+| `8b30d03` | `fix/export-arot` | Exports drop the source's Apple restart-offset table (found in the real-app check) |
 
 - B ran in a worktree subagent beside A (it touches none of A's files) and merged first.
 - A was done by the coordinator.
@@ -23,6 +24,7 @@ work, each merged into `main` with `--no-ff` and then checked in the real app.
 | A (`2f2fe1b`, clean DerivedData) | **666 / 44 / 0**, 0 source warnings |
 | C (`0a4a526`, clean DerivedData) | **667 / 45 / 0**, 0 source warnings |
 | Release fix (`6878e42`) | **667 / 45 / 0**; the Release build succeeds, with no warnings |
+| AROT fix (`8b30d03`, final `main`) | **668 / 45 / 0**, 0 source warnings |
 
 The skips are the gated benchmarks and the gated real-file tests. The only `warning:` lines are the two AppIntents
 tooling notices. `~/Library/Caches/com.phocasa.app` never existed.
@@ -336,9 +338,100 @@ The scaling clearly reduces the difference, and the pass isn't slower (within ±
 
 ## Real-app check
 
-**Pending:** the screen was locked when the app was built for it (12:07). The check runs when it's unlocked, and
-its results replace this paragraph.
+Done on 2026-09-26, 12:25–13:20, with the screen unlocked, on a Debug build of `6878e42`, in **task B's development
+mode**. It was the first check to use it.
 
+**Setup:**
+- `rm -rf "$HOME/Library/Application Support/Phocasa-Development"`, then launch with `PHOCASA_DEVELOPMENT_LIBRARY=1`.
+- On every one of the seven launches, `lsof` showed only `Phocasa-Development/Phocasa.store` (and its `-wal`/`-shm`),
+  with no other store and nothing under `Application Support/Phocasa/`.
+
+**Photos, temp copies from `~/PhocasaBenchRAW`:**
+- **The small folder:** 19 pairs, copied in reverse capture order, including rotated `DSC08650` (orientation 8),
+  `DSC08663` (8) and `DSC08753` (6). `DSC08640` was made RAW-only, `DSC08641` got a Lightroom-style sidecar and
+  `DSC08642` a garbage one.
+- **The big folder:** 570 photos, APFS clones (`cp -c`) of all 190 pairs in three prefixes, with creation dates set
+  in the opposite order to capture.
+- Two small scripts compared the files: `exifcmp.py` (MakerNote bytes, `DateTimeOriginal`, orientation, IFD1,
+  segments) and `propcmp` (every ImageIO dictionary key).
+
+### A: every export path
+
+| Path | Photo | Result |
+|---|---|---|
+| Apply edits permanently | `DSC08650` (orientation 8), 3 stars, +2.1 EV | Exif segment the same size (45,712 B), MakerNote byte-identical, `DateTimeOriginal` kept. Orientation 1, 3264×4912 upright; IFD1 unlinked; MPF gone; XMP added with the rating. `propcmp`: every key kept but the pixel ones (`{PictureStyle}` from the MakerNote too). Baked upright; the grid thumbnail refreshed; no alert. |
+| Create new file (-raw-edit), pair | `DSC08649`, 4 stars, +0.8 EV, clarity 64 | Every ImageIO key kept (34/34 Exif, 9/9 TIFF, `{PictureStyle}` 4/4), MakerNote identical, `DateTimeOriginal` kept, 4 stars inside. The camera JPG changed only by the rating's XMP (its Exif byte-identical). |
+| Replace existing JPG | `DSC08648`, 5 stars, +1.3 EV | Every key kept, MakerNote identical, 5 stars inside; the grid thumbnail refreshed to the RAW render. |
+| RAW-only export | `DSC08640`, 2 stars | Carries what the gated test recorded: Exif 33/35 (not `CFAPattern`, `CompressedBitsPerPixel`), TIFF 5/7, `{ExifAux}` 4/5, `{PictureStyle}` 0/4 (MakerNote-derived); `DateTimeOriginal`, 2 stars. |
+| Cropped export of a rotated RAW | `DSC08753` (orientation 6), crop, +1.3 EV | Upright and native after the crop (2604×3997), orientation 1, every key kept but the pixel ones, MakerNote identical, 3 stars inside. The crop overlay and the JPG comparison were upright. |
+
+- **Capture date and sort.** After the next launch rescan the two `-raw-edit` exports became photos of their own (the
+  known pairing-by-stem follow-up). They now sort **at their capture dates**, beside their originals, not as the
+  newest photos. Their ratings (4 and 2 stars) were read back from the files.
+- **Found:** a RAW-only export carries ImageIO's APP10 `AROT` segment, Apple's restart-offset table.
+  - Probes: ImageIO decodes identically with bytes inserted before the scan (so the rating splice is safe) and with a
+    stale table from another file.
+  - Still, the transplant kept a source's table beside new image data. Fixed and merged: `8b30d03`, with a test that
+    failed first.
+
+### B: the three relaunch checks
+
+- **Move to Bin survives a relaunch.** `DSC08652` went to the Bin with ⌫, then Cmd-Q and relaunch: the library came
+  back without reopening the folder, and the Bin still held it. Four more relaunches too.
+- **A 500+ library loads in the background at launch.**
+  - With 590 photos, a burst of status-bar screenshots after launch shows the window up with "Loading library..."
+    and a spinner, then "590 photos" in the next frame. Whole, in capture order, Bin 1.
+  - The thumbnail cache after a relaunch: 0 files created, 24 read (their modification dates touched). No decode.
+- **The capture-date backfill of an existing library.**
+  - With the app quit, `sqlite3` on `Phocasa-Development/Phocasa.store` (only) set `ZCAPTUREDATE` to NULL on all
+    591 rows.
+  - On relaunch the grid first showed creation order: the exports, then ascending names.
+  - A few seconds later it showed capture order: `a/b/c_DSC08826` first.
+  - After quitting, 591 rows were dated and 0 missing. Twice.
+
+### C: clarity at fit against zoomed in
+
+- **The edit:** RAW `DSC08649` with clarity 64. I put the same region side by side: from the fit view (enlarged) and
+  zoomed to 438% (the native render).
+- **Result:** the clarity halos (the lighter band along the pillar edges, and how far it reaches into the sky) have
+  the same width relative to the structures, and the same tone.
+- Before C, a fitted render's 20 px radius was about 1.7× wider in image terms at this scale (the table in C).
+
+### Wave-3 items re-checked
+
+- **Capture-date order:** newest first, and oldest first after the toggle. Equal capture times order by creation
+  date (c_, b_, a_, then the original).
+- **Bin across rescans:** the launch rescans kept `DSC08652` in the Bin.
+- **Grid scroll:** open a photo and close it, and the grid is at the same scroll offset. The only pixel differences
+  are the new selection's highlight, the delete button and "1 selected".
+- **Permanent delete:** of an extra pair added for it (`x_DSC08654`, via "Delete Forever" on the selection). The
+  confirmation named 1 photo; both files left the folder; the Bin went back to 1.
+- **Quit:** 2 stars then Cmd-Q at once. The app quit in about 200 ms, and the JPG and the sidecar both had rating 2.
+  No `.phocasa-tmp` files.
+- **Relaunch thumbnails:** see B.
+- **Saved edits:** `DSC08649`'s saved RAW edit showed 0.6 s after opening, and 0.15 s after navigating away and
+  back, looking the same.
+- **Edits at screen size:** sharp at fit; zoomed in, the native render.
+- **Write-backs:**
+  - The Lightroom sidecar (`DSC08641`, rated 4) kept every value; ImageIO compared 24 before and after, and only
+    `xmp:Rating` changed.
+  - The garbage sidecar (`DSC08642`, rated 1) stayed byte-identical (same md5), while its JPG got the rating with its
+    Exif segment unchanged (`segs`).
+  - Pairs wrote the JPG and the sidecar.
+  - The RAW-only photo wrote only its sidecar.
+- **Revert** (on `DSC08753`) removed the edit from the sidecar and kept the rating.
+- **Not re-checked this time:** the double-click on stars under the Unrated filter (unchanged code, covered by the
+  click tests).
+
+### Safety
+
+- After the check:
+  - no `.phocasa-tmp` files;
+  - no `~/Library/Caches/com.phocasa.app`;
+  - `~/PhocasaBenchRAW` unchanged (`find -newermt` from the check's start: 0 files);
+  - only `Phocasa-Development/` written under Application Support.
+- **Your Trash:** the permanent delete put the extra copy `x_DSC08654.JPG` and `x_DSC08654.ARW` (about 20 MB, copies
+  of `DSC08654`) there. The terminal can't list or empty it.
 
 ## Follow-ups
 
@@ -351,6 +444,8 @@ its results replace this paragraph.
     rotation too. The user's rule keeps the MakerNote byte for byte, and some cameras' MakerNotes hold a preview of
     the original framing (decision 4).
   - A recovery for earlier exports: see A, "Photos exported or baked in earlier builds" (decision 1).
+  - The real-app check used only `DSC086xx`/`DSC087xx` copies, all Sony. Other cameras' MakerNotes and phone JPEGs
+    (motion photos, Ultra HDR) are covered by the synthetic tests only.
 - **Exports** (from the wave-3 check, still open):
   - a `-raw-edit` export becomes a separate photo on the next rescan (pairing is by stem); it now sorts at its
     capture date;
