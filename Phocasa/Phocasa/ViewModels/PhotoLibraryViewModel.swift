@@ -41,6 +41,19 @@ final class PhotoLibraryViewModel {
     var editPresets: [EditPreset] = []
     var presetNameInput: String = ""
 
+    /// The context menu's checked tags for the selection (`contextMenuTagIDs`), and what they were worked out for.
+    @ObservationIgnored private var selectionTags: (key: SelectionTagsKey, ids: Set<UUID>)?
+    /// How often the selection's common tags were worked out, and how often a context menu asked for its checked tags.
+    /// For tests: every visible cell's menu asks on each redraw; the tags are worked out once per change.
+    @MainActor static var selectionTagComputations = 0
+    @MainActor static var contextMenuTagLookups = 0
+
+    private struct SelectionTagsKey: Equatable {
+        let selection: Int
+        let facts: Int
+        let grid: Int
+    }
+
     init() {
         let library = LibraryStore()
         self.library = library
@@ -118,7 +131,7 @@ final class PhotoLibraryViewModel {
     func toggleTag(_ tag: Tag, for photo: PhotoAsset) {
         if selection.isPartOfMultiSelection(photo) {
             let selected = selection.selectedPhotosList
-            if Self.tagIDsAllHave(selected, in: library).contains(tag.id) {
+            if selectionTagIDs().contains(tag.id) {
                 library.removeTag(tag, from: selected)
             } else {
                 addTagToSelection(name: tag.name, category: tag.category)
@@ -138,23 +151,34 @@ final class PhotoLibraryViewModel {
     }
 
     /// The tags the context menu on `photo` shows as checked: those every photo `toggleTag` would act on has (the
-    /// selection when `photo` is part of a multi-selection). Computed once per menu from the in-memory facts, not by
-    /// reading every selected photo's tags for each tag in the menu.
+    /// selection when `photo` is part of a multi-selection). Every visible cell's menu asks on every redraw, so the
+    /// selection's are worked out once per change of the selection, the facts or the grid (`selectionTagIDs()`), not
+    /// once per cell: with everything selected that walked 150,000 photos per cell, 22 s after ⌘A.
     func contextMenuTagIDs(for photo: PhotoAsset) -> Set<UUID> {
+        Self.contextMenuTagLookups += 1
         if selection.isPartOfMultiSelection(photo) {
-            return Self.tagIDsAllHave(selection.selectedPhotosList, in: library)
+            return selectionTagIDs()
         }
         return library.tagIDs(of: photo)
     }
 
-    /// The tags every one of `photos` has. With no photos, every tag (as `allSatisfy` over nothing is true).
-    private static func tagIDsAllHave(_ photos: [PhotoAsset], in library: LibraryStore) -> Set<UUID> {
-        guard let first = photos.first else { return Set(library.allTags.map(\.id)) }
-        var common = library.tagIDs(of: first)
-        for photo in photos.dropFirst() where !common.isEmpty {
-            common.formIntersection(library.tagIDs(of: photo))
+    /// The tags every selected photo the grid shows has, from the in-memory facts; every tag when the grid shows none
+    /// of them (as `allSatisfy` over nothing is true). Cached until the selection, a photo's facts or the grid change.
+    private func selectionTagIDs() -> Set<UUID> {
+        let key = SelectionTagsKey(selection: selection.version, facts: library.factsVersion, grid: library.gridVersion)
+        if let cached = selectionTags, cached.key == key { return cached.ids }
+        Self.selectionTagComputations += 1
+        let shown = selection.selectedPhotos.filter { library.index(of: $0) != nil }
+        var common: Set<UUID>?
+        for position in library.positions(of: Array(shown)) {
+            guard let position else { continue }
+            let tags = library.facts(at: position).tagIDs
+            common = common?.intersection(tags) ?? tags
+            if common?.isEmpty == true { break }
         }
-        return common
+        let ids = common ?? Set(library.allTags.map(\.id))
+        selectionTags = (key, ids)
+        return ids
     }
 
     func openTagEditorForContextMenu(photo: PhotoAsset) {

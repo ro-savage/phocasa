@@ -23,7 +23,11 @@ import SwiftData
 final class LibraryStore {
     /// The photos the grid shows. Only this file writes it: it keeps `index(of:)` and the grid bookkeeping in step,
     /// so an outside assignment would silently desync them.
-    private(set) var photos: [PhotoAsset] = []
+    private(set) var photos: [PhotoAsset] = [] {
+        didSet { gridVersion &+= 1 }
+    }
+    /// Bumped whenever `photos` changes.
+    @ObservationIgnored private(set) var gridVersion = 0
     /// The library (every photo not in the bin whose files were found), in `sort` order.
     var allPhotos: [PhotoAsset] = []
     var searchText: String = ""
@@ -112,6 +116,9 @@ final class LibraryStore {
     /// Bumped whenever `rowWrites` changes what `rating(of:)`, `tags(of:)` or `hasAnyEdits(of:)` return, so views
     /// that read them redraw.
     var pendingRowsVersion = 0
+    /// Bumped whenever photos' facts change in place (`applyFacts`); with `gridVersion`, what values derived from the
+    /// facts of the photos shown are cached against.
+    @ObservationIgnored var factsVersion = 0
     /// What the last scan did. For tests and benchmarks.
     @ObservationIgnored var lastScanReport: ScanReport?
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted
@@ -370,6 +377,7 @@ final class LibraryStore {
     func applyFacts(_ changes: [(facts: PhotoFacts, position: ListPosition)]) {
         let located = changes.filter { $0.facts != facts(at: $0.position) }
         guard !located.isEmpty else { return }
+        factsVersion &+= 1
         let patching = located.count <= Self.patchLimit
         let recount = located.count > 1_000 // cheaper than that many incremental updates
         for (new, position) in located {

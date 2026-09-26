@@ -4,7 +4,12 @@ import SwiftUI
 /// (`LibraryStore.index(of:)`, O(1)), so nothing here scans the library.
 @Observable @MainActor
 final class SelectionModel {
-    var selectedPhotos: Set<UUID> = []
+    var selectedPhotos: Set<UUID> = [] {
+        didSet { version &+= 1 }
+    }
+    /// Bumped on every change of `selectedPhotos`, so what is worked out from the selection is worked out once per
+    /// change (the context menu's checked tags).
+    @ObservationIgnored private(set) var version = 0
     /// The photo clicked or moved to last: the anchor of range selections and keyboard navigation.
     var lastSelectedId: UUID?
 
