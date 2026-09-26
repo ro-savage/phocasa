@@ -78,7 +78,8 @@ Launch a **Debug** build of the binary in one of two ways instead (`LibraryLocat
    get a RAW-only photo:
    `mkdir -p "$TMPDIR/phocasa-smoke/photos"; cp ~/PhocasaBenchRAW/DSC086{37..50}.* "$TMPDIR/phocasa-smoke/photos/"`.
 2. **Build** with `xcodebuild … -configuration Debug -derivedDataPath "$TMPDIR/phocasa-dd-coord-app" build`, and check
-   for 0 source warnings.
+   for 0 source warnings. Build Release once too (`-configuration Release`, its own DerivedData): its whole-module
+   concurrency check catches errors a Debug build doesn't (task 32's launch code broke it unnoticed until task B).
 3. **Reset the development folder**, so each check starts from an empty library (quote the path, it has a space):
    `rm -rf "$HOME/Library/Application Support/Phocasa-Development"`. It's the only folder under Application Support a
    check may write or delete.

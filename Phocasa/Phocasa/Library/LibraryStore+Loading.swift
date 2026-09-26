@@ -101,11 +101,14 @@ extension LibraryStore {
             report.longestTurn = max(report.longestTurn, turn)
             report.turns += 1
         }
+        // By identity, so the async turn doesn't capture the (non-Sendable) context itself: a Release build's
+        // whole-module check rejects that ("sending 'context' risks causing data races").
+        let contextID = ObjectIdentifier(context)
         func nextTurn() async -> Bool {
             endTurn()
             await Task.yield()
             turnStart = clock.now
-            return loading.generation == generation && modelContext === context
+            return loading.generation == generation && modelContext.map(ObjectIdentifier.init) == contextID
         }
 
         scanProgress = "Loading library..."
