@@ -64,8 +64,9 @@ Phocasa/
 ├── Phocasa/
 │   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host), menu commands
 │   ├── AppDelegate.swift           — quit saves open edit sessions (`PhotoLibraryViewModel.saveEditsBeforeQuit`),
-│   │                                 then waits for pending metadata writes (at most 5 s, then journals the rest);
-│   │                                 launch replays the journal
+│   │                                 writes the rows still queued (`writePendingChangesBeforeQuit`), then waits for
+│   │                                 pending metadata writes (at most 5 s, then journals the rest); launch replays
+│   │                                 the journal
 │   ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary, EditPreset)
 │   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
 │   │                                 store lives, and the one-time move of a legacy `default.store`);
@@ -81,9 +82,13 @@ Phocasa/
 │   │   │   +Loading                  launch (`open`, a big library loads in the background), loadExistingData,
 │   │   │                             file availability
 │   │   │   +Scan                     folder opening, serialised scans, waitForScans
-│   │   │   +Mutations                rating, tags, bin, deletes (files trashed via FileTrasher), metadata write-back
+│   │   │   +Mutations                rating, tags, bin, saved edits, deletes (files trashed via FileTrasher), undo
+│   │   │                             registration, `writeInChunks`
+│   │   │   +RowWrites                the write queue: changes shown in memory, written to rows in chunks sized by
+│   │   │                             time (then to the files); `rating(of:)`, `tags(of:)`, `hasAnyEdits(of:)`
 │   │   │   +ListEditing              in-memory list edits: bin moves, scan inserts/removals, deletes
 │   │   │   +Filtering                filters, search, sort toggle, tag lists
+│   │   ├── WriteChunkSizer         — how many rows a main-context write chunk takes (probe, estimate, target)
 │   │   ├── LibrarySort             — THE definition of photo order: capture date, then creation date (fetch,
 │   │   │                             key, insertion index, merge, toggle, re-order)
 │   │   ├── LibrarySnapshot         — the library as plain values, read in background contexts (launch of a big
@@ -180,6 +185,22 @@ Tools/
   `relocate` in `+ListEditing`) instead of reloading; a scan that finds a full load ran meanwhile
   (`loading.generation`) reloads instead. Code that changes a photo's rating, tags, file paths or file name outside
   `LibraryStore` calls `photosDidChange(_:)`.
+- **The write queue** (`LibraryStore+RowWrites`): a rating, tag, bin, saved-edit change or permanent delete patches
+  memory at once (the facts change in place, no model reads) and queues the rows' new values. An action on at most
+  `rowWrites.immediateLimit` photos (≥ 256) is written in its own turn, in one save; a bigger one by `rowWrites.task`,
+  in chunks sized by time (`WriteChunkSizer`) with a pause for the run loop between them. A photo's changes merge
+  (latest value per field wins); its rating and keywords go to its files (`MetadataWriter`) when its row is written,
+  read from the row. Until then the models hold the old values: views read `rating(of:)`, `tags(of:)`,
+  `hasAnyEdits(of:)`, facts come from `facts(of:)`. Anything that reads the store waits (`waitForRowWrites()`: scans)
+  or writes the queue first (`writeAllPendingRows()`: `loadExistingData()`, quitting); code that reads or writes those
+  fields on a model directly writes that photo's queue first (`writePendingRows(of:)`: the detail view, edit sessions,
+  file-type deletes). A crash mid-queue leaves each written row whole and the rest (and their files) as they were.
+- **Undo:** Edit › Undo / Redo (⌘Z, ⇧⌘Z) for rating, adding and removing a tag, moving to and restoring from the bin,
+  and applying a preset to a selection. `ContentView` hands `@Environment(\.undoManager)` (the window's) to the view
+  model, which gives it to the library. Each action registers one named step ("Undo Rating", "Undo Add Tag “x”") that
+  gives each photo its previous value by id (photos gone since are skipped) through the same methods, so an undo is
+  queued, chunked and written to the files like any change, and registers the redo. Permanent deletes, file-type
+  deletes, exports and Revert All Edits aren't undoable: they ask first.
 - **Photo order:** `LibrarySort` is the only definition of photo order: capture date (`PhotoAsset.captureDate`,
   EXIF `DateTimeOriginal`) falling back to the file creation date, newest first by default, ties broken by creation
   date (`LibrarySort.Key`). The store sorts by `(captureDate, creationDate)` and `fetch(where:in:)` merges the dated and
@@ -187,8 +208,9 @@ Tools/
   sort photos anywhere else, and don't compare `key(of:)` dates yourself (use `sortKey(of:)`/`precedes`).
 - **Capture dates:** scans store `found.metadata?.captureDate` at both insert sites. After launch (2 s after the launch
   scans) `CaptureDateBackfill` reads the dates of rows that have none, off the main actor, writes them on the main
-  context in chunks of about 12 ms, and re-orders the in-memory library once (no reload). Rows without a date are
-  re-read on each launch, in the background; empty files (`fileSize == 0`) are skipped.
+  context in chunks sized by time (about 15 ms at 10k loaded, ~210 ms at 150k, where a save alone costs 140 ms), and
+  re-orders the in-memory library once (no reload). Rows without a date are re-read on each launch, in the
+  background; empty files (`fileSize == 0`) are skipped.
 - **Launch:** `LibraryStore.open` loads a store of more than 500 photos in the background, as the first job of the scan
   queue (`isScanning` is true, and `waitForScans()` waits for it). `LibrarySnapshot` is read off the main actor while
   the main actor fetches the rows as models, 400 per turn (the grid needs filled-in models; each turn stays under a
@@ -205,10 +227,11 @@ Tools/
   of the filter) keeps its place (`LibraryStore.gridPlace(of:)`), which ←/→ and the grid's arrows move on from.
 - **Deletes that trash files ask first:** with the RAW or JPG filter on, a delete takes that file off each pair
   (`FileTypeDelete`, confirmed; a RAW's `.xmp` goes with it unless the JPG's values live there, `OverridesEmbedded`).
-- **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
-  rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
-  photos, so an unchanged rescan writes nothing and changes nothing in memory. One that adds k photos costs
-  O(k log n) on the main actor, or one merge for many.
+- **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins), each after the write queue is
+  written. The walk, the read of the stored rows, the diff and the metadata reads run off the main actor; the main
+  actor only writes changed fields and inserts photos with keywords, both in chunks sized by time (each chunk's
+  facts and sort keys read with it), so an unchanged rescan writes nothing and changes nothing in memory. One that
+  adds k photos costs O(k log n) on the main actor, or one merge for many.
 - **What a scan walks:** not hidden files, not package insides (`.skipsPackageDescendants`), not other apps'
   libraries by extension (`.photoslibrary`, `.lrdata`, …) nor NAS/Windows thumbnail, recycle and snapshot folders by
   name (`FolderScanner.skippedFolderExtensions` / `skippedFolderNames`, each with its reason). The chosen folder itself
@@ -225,6 +248,10 @@ Tools/
   host has none unless `PHOCASA_THUMBNAIL_CACHE_DIR` is set.
 - **Grid under the detail view:** `MainContentView` keeps the grid in the hierarchy, hidden, while the detail view is
   open, so it keeps its scroll position; its cells start no thumbnail loads meanwhile.
+- **Per-cell work stays O(1):** every visible cell (and its context menu, built with it) is evaluated on each redraw.
+  What depends on the whole selection (the menu's checked tags, `selectionTagIDs()`) is cached per selection, facts
+  and grid version (`SelectionModel.version`, `LibraryStore.factsVersion`, `gridVersion`): computed per cell, ⌘A
+  on 150,000 photos froze the window for 22 s.
 - **Edit parameters:** stored as JSON-encoded `EditParameters` — in SwiftData for JPGs, in the XMP sidecar
   (`phocasa:EditParameters`, base64) for RAW files. Editing state lives in an `EditSession` that exists only while
   editing; RAW edit parameters are written only through `RAWEditStore` → `MetadataWriter`.
@@ -274,7 +301,8 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   synchronise with locks (`NSLock`); `ThumbnailDiskCache` writes on its own utility queue
 - **Metadata writes go only through `MetadataWriter`:** serial, coalescing per file (a newer payload replaces a
   waiting one), with a synchronous `enqueue` / `enqueueEditParameters` that never blocks and an async `flush()`. A
-  pair's item writes the JPG and the RAW's sidecar. What it hasn't written is in its journal
+  pair's item writes the JPG and the RAW's sidecar. The library enqueues a photo's rating and keywords when the write
+  queue writes its row, from the row. What it hasn't written is in its journal
   (`Application Support/Phocasa/PendingMetadataWrites.jsonl`, or the development library's folder; none in the test
   host), saved on take-in and about once a second, and replayed first at launch (`resumeJournaledWrites()`). A write
   for a file on an unmounted volume waits in the journal (`retryWaitingWrites()` after a scan) instead of failing.
@@ -304,8 +332,15 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - **A `ModelContext` doesn't keep its container alive,** and reading `context.container` once the container is gone
   traps. The app's container lives as long as the app. Work that runs later against a stored context (a delayed task)
   holds the container weakly and gives up if it's gone (see `backfillCaptureDatesAfterScans`).
-- A main-context save costs about 7 ms at 10k loaded photos however few rows it writes, plus about 0.13 ms per row.
-  Bulk writes on the main context go in chunks sized by time, with a pause between them (see `CaptureDateBackfill`).
+- A main-context save costs about 1 µs per loaded photo however few rows it writes (7 ms at 10k, 140 ms at 150k),
+  plus 0.1–0.15 ms per row or relationship link (`ScaleChecks.testTagCostAtLibraryScale`). Bulk writes on the main
+  context go in chunks sized by time with a pause between them: the write queue, `writeInChunks`, scans
+  (`WriteChunkSizer`), `CaptureDateBackfill`. Never one save for thousands of rows.
+- **Tag links change on the tag's side** (`tag.photos.append(contentsOf:)` / `removeAll`), once per tag and chunk. A
+  photo-side change (`photo.tags.append`) makes SwiftData rewrite the tag's whole inverse list, so k photo-side changes
+  cost O(k × tag size) (18 s to untag 5,000). Any save that changes a tag's links also costs ~4 µs per photo the tag
+  has (0.7 s for a tag on 150,000 photos): only a schema change (tags not as a to-many relationship) would remove that.
+  Delete tagged rows after unlinking them on the tag's side (the write queue does).
 - `StoreLocation` reads a store's metadata with Core Data's `NSPersistentStoreCoordinator.metadataForPersistentStore`
   (SwiftData has no API to read a store without opening, and so migrating, it). That's the only Core Data use.
 - A store's SQLite files change whenever SQLite checkpoints, which SwiftData does when it likes, even after its
@@ -418,9 +453,12 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - `MigrationTests` and `BinFlagTests` use temp store files they delete; never point a test at the real store.
 - `library.loading.backgroundLoadThreshold` (and `pageSize`) put small test stores on the background launch path.
 - Test hooks stored on a `LibraryStore` (`scanWillSave`, `loading.backgroundLoadDidApply`,
-  `captureDates.didApplyChunk`) capture their view model or library `[unowned]`/`[weak]`: a strong capture is a retain
-  cycle that keeps the library alive after the test, and its after-launch work then runs against a released
-  container.
+  `captureDates.didApplyChunk`, `rowWrites.didWriteRows`) capture their view model or library `[unowned]`/`[weak]`: a
+  strong capture is a retain cycle that keeps the library alive after the test, and its after-launch work then runs
+  against a released container.
+- A test that changes more than 256 photos at once, or sets `rowWrites.immediateMinimum` / `rowWrites.sizer.maximumRows`
+  small to have a small library written in chunks, awaits `library.waitForRowWrites()` before it reads the store (or
+  compares with a fresh load of the same context). `UndoTests` use an `UndoManager` with `groupsByEvent = false`.
 - Hosted-window tests (`GridKeepAliveTests`) need the display awake: run `xcodebuild test` under `caffeinate -d -u`.
 - The test host (`XCTestConfigurationFilePath` set) uses an in-memory SwiftData store, and `ImageLoader.shared` has no
   disk cache unless `PHOCASA_THUMBNAIL_CACHE_DIR` names a folder (pass `TEST_RUNNER_PHOCASA_THUMBNAIL_CACHE_DIR`).
