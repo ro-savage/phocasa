@@ -167,7 +167,9 @@ struct PhotoGridView: View {
                 Divider()
             }
 
-            Button("Move to Bin", role: .destructive) {
+            // "Move to Bin", or with the RAW or JPG filter on "Delete RAW Files…" (asked first: files go to the Trash).
+            Button(viewModel.deleteActionTitle(count: isMulti ? viewModel.selection.selectedPhotos.count : 1),
+                   role: .destructive) {
                 if isMulti { viewModel.deleteSelected() }
                 else { viewModel.deletePhoto(photo) }
             }

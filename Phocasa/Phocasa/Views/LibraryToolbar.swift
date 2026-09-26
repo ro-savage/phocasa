@@ -52,7 +52,8 @@ struct LibraryToolbar: ToolbarContent {
 
             if hasTarget {
                 Button(role: .destructive, action: { viewModel.deleteSelectionOrCurrent() }) {
-                    Label(viewModel.library.viewingBin ? "Delete Forever" : "Delete", systemImage: "trash")
+                    Label(viewModel.deleteActionTitle(count: viewModel.showingDetail ? 1 : viewModel.selection.selectedPhotos.count),
+                          systemImage: "trash")
                 }
             }
 

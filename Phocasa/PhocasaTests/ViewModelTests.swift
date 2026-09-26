@@ -218,6 +218,81 @@ final class ViewModelTests: XCTestCase {
 
     // MARK: - Smart Delete (File Type)
 
+    /// ⌫ with the RAW or JPG filter on asks first (files go to the Trash); this confirms what it asked.
+    private func deleteConfirmingFileTypeDelete(file: StaticString = #filePath, line: UInt = #line) async {
+        viewModel.deleteSelected()
+        guard let request = viewModel.pendingFileTypeDelete else {
+            return XCTFail("the file-type delete asks first", file: file, line: line)
+        }
+        await viewModel.confirmFileTypeDelete(request)?.value
+    }
+
+    /// Bug test (REL-1 #5): with the RAW filter on, ⌫ (and "Move to Bin") put every selected pair's RAW in the Trash
+    /// at once, with no confirmation (⌘A ⌫ trashed every RAW in the library). It asks first, naming the count and the
+    /// file type, and nothing happens until it's confirmed.
+    func testFileTypeDeleteAsksFirstNamingTheCountAndTheFileType() async {
+        let pairs = (0..<3).map { i -> PhotoAsset in
+            let photo = PhotoAsset(fileName: "p\(i)", jpgPath: "/fake/p\(i).jpg", rawPath: "/fake/p\(i).cr3",
+                                   folderPath: "/fake", creationDate: date(Double(10 - i)), fileSize: 2000)
+            context.insert(photo)
+            return photo
+        }
+        let rawOnly = PhotoAsset(fileName: "solo", rawPath: "/fake/solo.cr3", folderPath: "/fake", creationDate: date(1))
+        context.insert(rawOnly)
+        try? context.save()
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.rawOnly)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 4), "Delete RAW Files…")
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 1), "Delete RAW File…")
+        viewModel.selection.selectAll()
+
+        XCTAssertNil(viewModel.deleteSelected(), "nothing starts before the confirmation")
+
+        let request = try? XCTUnwrap(viewModel.pendingFileTypeDelete)
+        XCTAssertEqual(request?.title, "Move 3 RAW files to the Trash?")
+        XCTAssertEqual(request?.message, "The JPGs stay in the library. 1 photo has only a RAW file and goes to the Bin instead.")
+        XCTAssertEqual(request?.confirmTitle, "Move to Trash")
+        XCTAssertTrue(pairs.allSatisfy { $0.rawPath != nil }, "nothing deleted yet")
+        guard let request else { return }
+
+        await viewModel.confirmFileTypeDelete(request)?.value
+        XCTAssertNil(viewModel.pendingFileTypeDelete)
+        XCTAssertTrue(pairs.allSatisfy { $0.rawPath == nil && $0.jpgPath != nil })
+        XCTAssertTrue(rawOnly.isInBin)
+
+        viewModel.library.applyFilter(.jpgOnly)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 2), "Delete JPG Files…")
+        viewModel.library.applyFilter(.all)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 2), "Move to Bin")
+        viewModel.library.applyFilter(.bin)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 2), "Delete Forever…")
+    }
+
+    /// In the detail view, the RAW filter's ⌫ asks about the photo on screen, then moves on.
+    func testFileTypeDeleteInTheDetailViewAsksAboutThePhotoOnScreen() async throws {
+        let photos = (0..<2).map { i -> PhotoAsset in
+            let photo = PhotoAsset(fileName: "p\(i)", jpgPath: "/fake/p\(i).jpg", rawPath: "/fake/p\(i).cr3",
+                                   folderPath: "/fake", creationDate: date(Double(10 - i)), fileSize: 2000)
+            context.insert(photo)
+            return photo
+        }
+        try context.save()
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.rawOnly)
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: photos[0])
+
+        viewModel.deleteSelectionOrCurrent()
+        let request = try XCTUnwrap(viewModel.pendingFileTypeDelete)
+        XCTAssertEqual(ids(request.photos), [photos[0].id])
+        XCTAssertEqual(request.title, "Move 1 RAW file to the Trash?")
+        await viewModel.confirmFileTypeDelete(request)?.value
+
+        XCTAssertNil(photos[0].rawPath)
+        XCTAssertNotNil(photos[1].rawPath)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[1].id)
+    }
+
     func testDeleteInRAWOnlyModeRemovesOnlyRAW() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
                                 folderPath: "/fake", creationDate: Date(), fileSize: 2000)
@@ -228,7 +303,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         // RAW path should be cleared, JPG should remain
         XCTAssertNil(paired.rawPath)
@@ -247,7 +322,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.jpgOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         // JPG path should be cleared, RAW should remain
         XCTAssertNil(paired.jpgPath)
@@ -265,7 +340,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [rawOnly.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         // Non-paired RAW should go to bin — check via binCount since the photo
         // gets refetched by loadExistingData after delete
@@ -283,7 +358,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         XCTAssertTrue(viewModel.selection.selectedPhotos.isEmpty)
     }
@@ -725,7 +800,7 @@ final class ViewModelTests: XCTestCase {
 
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [viewModel.library.photos[0].id]
-        await viewModel.deleteSelected()?.value; check("deleteFileTypeOnly", #line)
+        await deleteConfirmingFileTypeDelete(); check("deleteFileTypeOnly", #line)
     }
 
     /// Random sequences of every interaction, checked against a fresh load after each step.

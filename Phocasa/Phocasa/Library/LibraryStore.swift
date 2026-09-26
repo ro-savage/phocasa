@@ -97,8 +97,16 @@ final class LibraryStore {
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted
     /// its new ones, just before it sets `lastScanDate` and saves.
     @ObservationIgnored var scanWillSave: ((ModelContext) -> Void)?
-    /// Where deletes move files to the Trash, off the main actor. Tests put in one that never touches the real Trash.
-    @ObservationIgnored var fileTrasher = FileTrasher.shared
+    /// Where deletes (and exports that replace a file, for a copy of the original) move files to the Trash, off the
+    /// main actor. Tests put in one that never touches the real Trash.
+    @ObservationIgnored var fileTrasher = LibraryStore.defaultFileTrasher
+
+    /// `FileTrasher.shared`, except in the test host (its in-memory store), where it trashes nothing: a test that
+    /// forgets to put in its own trasher can't reach the user's Trash. (Such a test's files stay where they are, and
+    /// an export that must trash a copy of the original first is refused.)
+    static let defaultFileTrasher: FileTrasher = LibraryLocation.current.store == .inMemory
+        ? FileTrasher { _ in throw CocoaError(.featureUnsupported) }
+        : .shared
     /// Every file of the deletes still running, and how many are in the Trash already.
     @ObservationIgnored var trashPending = TrashProgress(done: 0, total: 0)
     /// Photos with a delete still running. Another delete of them does nothing (it would delete them twice).

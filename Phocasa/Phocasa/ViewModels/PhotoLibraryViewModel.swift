@@ -17,6 +17,8 @@ final class PhotoLibraryViewModel {
     var showFolderPicker: Bool = false
     var showPermanentDeleteConfirmation: Bool = false
     var photosToDelete: [PhotoAsset] = []
+    /// A delete with the RAW or JPG filter on, waiting for its confirmation: it moves files to the Trash.
+    var pendingFileTypeDelete: FileTypeDelete?
     var showGridTagEditor: Bool = false
     var tagEditorTarget: PhotoAsset?
 
@@ -188,8 +190,8 @@ final class PhotoLibraryViewModel {
         if library.viewingBin {
             photosToDelete = toDelete
             showPermanentDeleteConfirmation = true
-        } else if library.hasFileTypeFilter {
-            return deleteFileTypeOnly(toDelete)
+        } else if let fileType = fileTypeToDelete {
+            pendingFileTypeDelete = FileTypeDelete(toDelete, fileType: fileType)
         } else {
             moveToBin(toDelete)
         }
@@ -198,24 +200,56 @@ final class PhotoLibraryViewModel {
 
     @discardableResult
     func deletePhoto(_ photo: PhotoAsset) -> Task<Void, Never>? {
+        deletePhotos([photo])
+    }
+
+    /// The context menu's delete: `photos`, as `deleteSelected()` treats the selection.
+    @discardableResult
+    func deletePhotos(_ photos: [PhotoAsset]) -> Task<Void, Never>? {
+        guard !photos.isEmpty else { return nil }
         if library.viewingBin {
-            photosToDelete = [photo]
+            photosToDelete = photos
             showPermanentDeleteConfirmation = true
-        } else if library.hasFileTypeFilter && photo.hasRawPair {
-            return deleteFileTypeOnly([photo])
+        } else if let fileType = fileTypeToDelete {
+            pendingFileTypeDelete = FileTypeDelete(photos, fileType: fileType)
         } else {
-            moveToBin([photo])
+            moveToBin(photos)
         }
         return nil
     }
 
-    private func deleteFileTypeOnly(_ photosToRemove: [PhotoAsset]) -> Task<Void, Never> {
-        selection.deselect(photosToRemove.map(\.id))
+    /// The file a delete takes off each photo: the RAW or JPG sidebar filter's, when exactly one of them is on. (With
+    /// both on, a delete moves the photos to the bin, as with neither.)
+    var fileTypeToDelete: FileTypeDelete.FileType? {
         let raw = library.activeFilters.contains(.rawOnly)
         let jpg = library.activeFilters.contains(.jpgOnly)
+        guard raw != jpg, !library.viewingBin else { return nil }
+        return raw ? .raw : .jpg
+    }
+
+    /// The delete buttons' title for `count` photos: what they do here. With the RAW or JPG filter on they delete that
+    /// file of each photo, after a confirmation; in the bin, the photos themselves, after one too.
+    func deleteActionTitle(count: Int) -> String {
+        if library.viewingBin { return "Delete Forever…" }
+        guard let fileType = fileTypeToDelete else { return "Move to Bin" }
+        return "Delete \(fileType.name) File\(count == 1 ? "" : "s")…"
+    }
+
+    /// Confirms `pendingFileTypeDelete` (the request the dialog showed): each pair's file of that type goes to the
+    /// Trash, and a photo with only that file goes to the bin.
+    @discardableResult
+    func confirmFileTypeDelete(_ request: FileTypeDelete) -> Task<Void, Never>? {
+        pendingFileTypeDelete = nil
+        return deleteFileTypeOnly(request.photos, raw: request.fileType == .raw)
+    }
+
+    private func deleteFileTypeOnly(_ photosToRemove: [PhotoAsset], raw deletingRAW: Bool) -> Task<Void, Never> {
+        selection.deselect(photosToRemove.map(\.id))
+        let raw = deletingRAW
+        let jpg = !deletingRAW
         // Each photo leaves the filtered grid: a pair loses the filtered file, a photo with only one goes to the bin.
         // The session isn't saved when the file it edits is going to the Trash (its sidecar with it).
-        let trashesEditedFile = raw != jpg && editSession.map { $0.photo.hasRawPair && $0.isRAW == raw } == true
+        let trashesEditedFile = editSession.map { $0.photo.hasRawPair && $0.isRAW == raw } == true
         moveDetailOff(Set(photosToRemove.map(\.id)), saveEdit: !trashesEditedFile)
         return Task { await library.deleteFileType(of: photosToRemove, raw: raw, jpg: jpg) }
     }
@@ -485,4 +519,46 @@ final class PhotoLibraryViewModel {
 
         try? library.modelContext?.save()
     }
+}
+
+/// A delete with the RAW or JPG sidebar filter on, as its confirmation shows it: each pair's file of that type (a RAW
+/// with its sidecar) goes to the Trash and the photo stays with its other file; a photo with only that file goes to
+/// the bin.
+struct FileTypeDelete {
+    enum FileType {
+        case raw, jpg
+        var name: String { self == .raw ? "RAW" : "JPG" }
+        var other: String { self == .raw ? "JPG" : "RAW" }
+    }
+
+    let photos: [PhotoAsset]
+    let fileType: FileType
+    /// Pairs: they lose their file of this type, which goes to the Trash.
+    let fileCount: Int
+    /// Photos with only a file of this type: they go to the bin.
+    let binCount: Int
+
+    @MainActor init(_ photos: [PhotoAsset], fileType: FileType) {
+        self.photos = photos
+        self.fileType = fileType
+        fileCount = photos.filter(\.hasRawPair).count
+        binCount = photos.count - fileCount
+    }
+
+    var title: String {
+        if fileCount > 0 {
+            return "Move \(fileCount.formatted()) \(fileType.name) file\(fileCount == 1 ? "" : "s") to the Trash?"
+        }
+        return "Move \(binCount.formatted()) photo\(binCount == 1 ? "" : "s") to the Bin?"
+    }
+
+    var message: String {
+        let alone = "\(binCount.formatted()) photo\(binCount == 1 ? " has" : "s have") only a \(fileType.name) file"
+        guard fileCount > 0 else { return "\(binCount == 1 ? "It has" : "They have") only a \(fileType.name) file, so " +
+            "\(binCount == 1 ? "it goes" : "they go") to the Bin. No file is deleted." }
+        let kept = "The \(fileType.other)s stay in the library."
+        return binCount == 0 ? kept : "\(kept) \(alone) and \(binCount == 1 ? "goes" : "go") to the Bin instead."
+    }
+
+    var confirmTitle: String { fileCount > 0 ? "Move to Trash" : "Move to Bin" }
 }

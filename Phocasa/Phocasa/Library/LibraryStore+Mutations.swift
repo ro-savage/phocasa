@@ -140,16 +140,23 @@ extension LibraryStore {
 
     /// Deletes one file type of each photo (with the RAW or JPG filter active): a pair loses that file, moved to the
     /// Trash; a photo with only one file, or both filters active, goes to the bin instead.
+    ///
+    /// A RAW goes with its `.xmp` sidecar (its rating, keywords and edits, and what other apps wrote about it), except
+    /// when the pair's JPG keeps its own rating and keywords there (`phocasa:OverridesEmbedded`, for a JPG that can't
+    /// take them): then the sidecar stays with the JPG.
     func deleteFileType(of photosToRemove: [PhotoAsset], raw deleteRAW: Bool, jpg deleteJPG: Bool) async {
         enum Change { case toBin, dropRAW, dropJPG }
         var changes: [(photo: PhotoAsset, change: Change)] = []
         var files: [URL] = []
+        var sidecars: [(sidecar: URL, jpg: URL)] = []
         for photo in photosToRemove where photosBeingDeleted.insert(photo.id).inserted {
             if deleteRAW && deleteJPG {
                 // Both file type filters active — normal soft delete
                 changes.append((photo, .toBin))
-            } else if deleteRAW && photo.hasRawPair {
-                files += Self.files(of: photo, jpg: false, raw: true)
+            } else if deleteRAW && photo.hasRawPair, let rawPath = photo.rawPath, let jpgPath = photo.jpgPath {
+                let raw = URL(fileURLWithPath: rawPath)
+                files.append(raw)
+                sidecars.append((raw.xmpSidecarURL, URL(fileURLWithPath: jpgPath)))
                 changes.append((photo, .dropRAW))
             } else if deleteJPG && photo.hasRawPair {
                 files += Self.files(of: photo, jpg: true, raw: false)
@@ -161,6 +168,12 @@ extension LibraryStore {
         }
         guard !changes.isEmpty else { return }
 
+        if !sidecars.isEmpty {
+            // Off the main actor: it reads each sidecar there is.
+            files += await Task.detached(priority: .userInitiated) {
+                sidecars.filter { !MetadataService.shared.sidecarOverridesEmbedded($0.jpg) }.map(\.sidecar)
+            }.value
+        }
         await moveToTrash(files)
 
         for (photo, change) in changes {

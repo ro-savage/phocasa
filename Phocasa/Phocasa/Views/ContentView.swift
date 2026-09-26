@@ -58,6 +58,19 @@ struct ContentView: View {
                     Text("Permanently delete \(photos.count.formatted()) photos? Their files will be moved to the system Trash.")
                 }
             }
+            // With the RAW or JPG filter on, a delete moves files to the Trash: always asked first.
+            .confirmationDialog(
+                viewModel.pendingFileTypeDelete?.title ?? "",
+                isPresented: Binding(get: { viewModel.pendingFileTypeDelete != nil },
+                                     set: { if !$0 { viewModel.pendingFileTypeDelete = nil } }),
+                titleVisibility: .visible,
+                presenting: viewModel.pendingFileTypeDelete
+            ) { request in
+                Button(request.confirmTitle, role: .destructive) { viewModel.confirmFileTypeDelete(request) }
+                Button("Cancel", role: .cancel) {}
+            } message: { request in
+                Text(request.message)
+            }
             .fileImporter(
                 isPresented: $viewModel.showFolderPicker,
                 allowedContentTypes: [.folder],
