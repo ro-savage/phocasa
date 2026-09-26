@@ -25,11 +25,14 @@ final class MetadataRealFileTests: XCTestCase {
         dir = base.resolvingSymlinksInPath()
         raw = dir.appendingPathComponent(sourceURL.lastPathComponent)
         try FileManager.default.copyItem(at: sourceURL, to: raw)
+        // The copies are the test's to write, whatever the source's permissions (a read-only file is left alone).
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: raw.path)
         for ext in ["JPG", "jpg", "jpeg", "JPEG"] {
             let candidate = sourceURL.deletingPathExtension().appendingPathExtension(ext)
             if FileManager.default.fileExists(atPath: candidate.path) {
                 let copy = dir.appendingPathComponent(candidate.lastPathComponent)
                 try FileManager.default.copyItem(at: candidate, to: copy)
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copy.path)
                 jpg = copy
                 break
             }
@@ -93,12 +96,17 @@ final class MetadataRealFileTests: XCTestCase {
         typealias T = MetadataJPEGPreservationTests
         let xmpID = "http://ns.adobe.com/xap/1.0/"
         let (oldSegments, oldSOS) = T.header(before), (newSegments, newSOS) = T.header(after)
-        XCTAssertEqual(newSegments.filter { $0.id != xmpID }, oldSegments.filter { $0.id != xmpID },
-                       "Exif (with the MakerNote), MPF and every other segment stay byte-identical")
+        XCTAssertEqual(newSegments.filter { $0.id != xmpID && $0.id != "MPF" }, oldSegments.filter { $0.id != xmpID && $0.id != "MPF" },
+                       "Exif (with the MakerNote) and every other segment stay byte-identical")
         XCTAssertEqual(after[newSOS...], before[oldSOS...], "image data and the appended preview are copied as is")
         if let oldPreview = T.mpfSecondImage(before) {
             let newPreview = try XCTUnwrap(T.mpfSecondImage(after))
             XCTAssertEqual(after[newPreview], before[oldPreview], "the MPF entry still points at the preview")
+            // The MPF segment changes only in the first image's size (SOI to EOI), by the header's growth (task D).
+            let oldMPF = try XCTUnwrap(MPFTestReader(before)), newMPF = try XCTUnwrap(MPFTestReader(after))
+            XCTAssertEqual(newMPF.segmentWithoutEntryFields(after), oldMPF.segmentWithoutEntryFields(before))
+            XCTAssertEqual(newMPF.entries[0].size, oldMPF.entries[0].size + newSOS - oldSOS)
+            XCTAssertEqual(newMPF.entries.dropFirst().map(\.offset), oldMPF.entries.dropFirst().map(\.offset))
         }
         let afterProps = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(
             try XCTUnwrap(CGImageSourceCreateWithData(after as CFData, nil)), 0, nil) as? [String: Any])

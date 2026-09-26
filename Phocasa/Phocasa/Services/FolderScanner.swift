@@ -76,10 +76,14 @@ final class FolderScanner: Sendable {
     ) async -> [DiscoveredPhoto] {
         let targets = photos.indices.filter { !knownKeys.contains(photos[$0].key) }
         guard !targets.isEmpty else { return photos }
-        let paths = targets.map { photos[$0].jpgPath ?? photos[$0].rawPath ?? "" }
+        // A pair's JPG reads the RAW's sidecar by the pair's rule (`MetadataService.readMetadata`).
+        let files = targets.map { i in
+            MetadataFile(path: photos[i].jpgPath ?? photos[i].rawPath ?? "",
+                         pairedWithRAW: photos[i].jpgPath != nil && photos[i].rawPath != nil)
+        }
         let metadata = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: Self.readMetadataConcurrently(paths: paths, progress: progress))
+                continuation.resume(returning: Self.readMetadataConcurrently(files: files, progress: progress))
             }
         }
         var result = photos
@@ -89,30 +93,36 @@ final class FolderScanner: Sendable {
         return result
     }
 
+    private struct MetadataFile: Sendable {
+        let path: String
+        let pairedWithRAW: Bool
+    }
+
     private struct MetadataChunks: Sendable {
         var parts: [[MetadataService.PhotoMetadata?]]
         var done = 0
     }
 
     private static func readMetadataConcurrently(
-        paths: [String],
+        files: [MetadataFile],
         progress: (@Sendable (Int, Int) -> Void)?
     ) -> [MetadataService.PhotoMetadata?] {
         let chunkSize = metadataChunkSize
-        let chunkCount = (paths.count + chunkSize - 1) / chunkSize
+        let chunkCount = (files.count + chunkSize - 1) / chunkSize
         // Each work item reads its own range and hands it in once, so the lock is taken once per 64 files.
         let chunks = OSAllocatedUnfairLock(initialState: MetadataChunks(parts: Array(repeating: [], count: chunkCount)))
         DispatchQueue.concurrentPerform(iterations: chunkCount) { chunk in
-            let range = (chunk * chunkSize)..<min(paths.count, (chunk + 1) * chunkSize)
+            let range = (chunk * chunkSize)..<min(files.count, (chunk + 1) * chunkSize)
             let part: [MetadataService.PhotoMetadata?] = range.map { i in
-                paths[i].isEmpty ? nil : MetadataService.shared.readMetadata(from: paths[i])
+                files[i].path.isEmpty ? nil
+                    : MetadataService.shared.readMetadata(from: files[i].path, pairedWithRAW: files[i].pairedWithRAW)
             }
             let finished = chunks.withLock { state in
                 state.parts[chunk] = part
                 state.done += range.count
                 return state.done
             }
-            progress?(finished, paths.count)
+            progress?(finished, files.count)
         }
         return chunks.withLock { $0.parts }.flatMap { $0 }
     }

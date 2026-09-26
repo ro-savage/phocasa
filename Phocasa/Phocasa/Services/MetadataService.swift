@@ -59,23 +59,33 @@ final class MetadataService: Sendable {
     /// Reads the rating and keywords embedded in the file, then lets its `.xmp` sidecar override them.
     ///
     /// The sidecar is `<stem>.xmp`, so for a JPG+RAW pair `x.jpg` also reads `x.xmp`, the RAW's sidecar.
-    /// A sidecar rating wins only when it is non-zero, and sidecar keywords only when there are some, unless the
-    /// sidecar says it overrides the file (`phocasa:OverridesEmbedded`, written when the values couldn't go into the
-    /// file itself): then its rating and keywords win as they are, 0 and none included.
-    /// The capture date comes from the image file only (see `CaptureDate`).
+    /// - A sidecar that says it overrides the file (`phocasa:OverridesEmbedded`, written when the values couldn't go
+    ///   into the file itself) wins as it is: its rating and keywords, 0 and none included.
+    /// - A non-RAW file on its own (no RAW beside it) that holds an `xmp:Rating` is read from the file: its values are
+    ///   the newest. Phocasa keeps such a file's sidecar in step with it, so a difference means another app changed the
+    ///   file since, or the sidecar is left over (task D).
+    /// - Otherwise (a RAW, a pair's JPG, a file without a rating of its own) a sidecar rating wins when it is non-zero,
+    ///   and sidecar keywords when there are some.
+    ///
+    /// `pairedWithRAW` says whether `path` is a pair's JPG (the scanner knows); nil looks for a RAW beside it, only when
+    /// that matters. The capture date comes from the image file only (see `CaptureDate`).
     /// Stateless and thread-safe.
-    func readMetadata(from path: String) -> PhotoMetadata {
+    func readMetadata(from path: String, pairedWithRAW: Bool? = nil) -> PhotoMetadata {
         let url = URL(fileURLWithPath: path)
         var rating = 0
         var keywords: [String] = []
         var editParameters: EditParameters?
         var captureDate: Date?
+        var fileHasRating = false
 
         // Try reading from image file directly
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
             if let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
                 // The rating lives in XMP (xmp:Rating), which is where writeToImageFile puts it.
-                if let r = Self.xmpRating(in: meta) { rating = r }
+                if let r = Self.xmpRating(in: meta) {
+                    rating = r
+                    fileHasRating = true
+                }
                 // ImageIO merges XMP and IPTC-IIM here, so dc:subject holds exactly the keywords the
                 // IPTC properties dictionary reports (XMP wins when they disagree, in both views).
                 // Reading only this is cheaper than also copying the properties dictionary.
@@ -97,6 +107,9 @@ final class MetadataService: Sendable {
             if overrides {
                 rating = parsed.rating
                 keywords = parsed.keywords
+            } else if fileHasRating, !FolderScanner.rawExtensions.contains(url.pathExtension.lowercased()),
+                      !(pairedWithRAW ?? Self.hasRAWBeside(url)) {
+                // A file on its own that holds its own values: they stand.
             } else {
                 if parsed.rating > 0 { rating = parsed.rating }
                 if !parsed.keywords.isEmpty { keywords = parsed.keywords }
@@ -106,6 +119,17 @@ final class MetadataService: Sendable {
 
         return PhotoMetadata(rating: rating, keywords: keywords, editParameters: editParameters,
                              captureDate: captureDate)
+    }
+
+    /// Whether a RAW file with `url`'s stem is in its folder (so `url` is a pair's JPG, and its sidecar the RAW's).
+    /// Up to two lookups per RAW extension; only asked when a file on its own and a sidecar disagree.
+    static func hasRAWBeside(_ url: URL) -> Bool {
+        let stem = url.deletingPathExtension()
+        let fm = FileManager.default
+        return FolderScanner.rawExtensions.contains { ext in
+            fm.fileExists(atPath: stem.appendingPathExtension(ext).path)
+                || fm.fileExists(atPath: stem.appendingPathExtension(ext.uppercased()).path)
+        }
     }
 
     /// `xmp:Rating` as a star count. Values outside 0...5 (Adobe's -1 means "rejected") read as unrated.
@@ -150,15 +174,19 @@ final class MetadataService: Sendable {
         }
     }
 
-    /// Writes new XMP rating and keywords into a JPEG without re-encoding it or losing any of its metadata, or, when
-    /// that can't be done, into its sidecar (the user's rule: never lose a photo's original metadata).
+    /// Writes the rating and keywords into the file itself, adding them without re-encoding it or losing any of its
+    /// metadata, or, when that can't be done, into its sidecar (the user's rules: never lose a photo's original
+    /// metadata; ratings inside every non-RAW file, so other apps can read them).
     ///
-    /// - A JPEG gets `jpegWritingRatingAndKeywords`' bytes, which keep everything but the XMP and the IPTC keywords.
-    ///   The new file is built in memory and only replaces the original once it is complete. Symlinks are written
-    ///   through (the link stays a link). Permissions, extended attributes and file dates are kept.
-    /// - Anything else (PNG, TIFF, HEIC, whose only writer is ImageIO's rewrite, which drops what it doesn't model), a
-    ///   JPEG the splice refuses, and a file whose sidecar already overrides it keep their bytes. The rating and
-    ///   keywords go to the sidecar, marked `phocasa:OverridesEmbedded` so they win on reading.
+    /// - The new file is `fileWritingRatingAndKeywords`' bytes, built in memory; it only replaces the original once it
+    ///   is complete. Symlinks are written through (the link stays a link). Permissions, extended attributes and file
+    ///   dates are kept.
+    /// - A file that already has a sidecar keeps it, in step: the same rating and keywords, and no
+    ///   `phocasa:OverridesEmbedded` (task D: files leave sidecar mode on their next write). A file leaving sidecar
+    ///   mode gets its sidecar's values updated before the file is written and the flag cleared after, so a reader
+    ///   never sees an older value win; if its sidecar can't be updated, neither is written.
+    /// - The last resort, a file that can't take the values without losing something, keeps its bytes, and they go to
+    ///   its sidecar, marked `phocasa:OverridesEmbedded` so they win on reading.
     /// - Read-only files, and files ImageIO doesn't read as an image, are left alone.
     private func writeToImageFile(rating: Int, keywords: [String], at url: URL) {
         let fm = FileManager.default
@@ -168,129 +196,326 @@ final class MetadataService: Sendable {
         guard let original = try? Data(contentsOf: target, options: .mappedIfSafe),
               let source = CGImageSourceCreateWithData(original as CFData, nil),
               CGImageSourceGetType(source) != nil, CGImageSourceGetCount(source) > 0 else { return }
-        guard !sidecarOverridesEmbedded(url),
-              let bytes = Self.jpegWritingRatingAndKeywords(original, rating: rating, keywords: keywords) else {
+        let values = SidecarUpdate(rating: rating, keywords: keywords)
+        guard let bytes = Self.fileWritingRatingAndKeywords(original, rating: rating, keywords: keywords) else {
             updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: true))
             return
         }
 
-        let originalDates = Phocasa.captureFileDates(target)
-        guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
-        else { return }
-        Phocasa.restoreFileDates(target, dates: originalDates)
+        let sidecar = sidecarState(url)
+        if sidecar == .overridesFile {
+            // Leaving sidecar mode: the sidecar takes the new values first, still overriding the file, so they win
+            // whether or not the file write below succeeds.
+            guard [.written, .unchanged].contains(updateSidecar(of: url, values)) else { return }
+        }
+        if bytes != original {
+            let originalDates = Phocasa.captureFileDates(target)
+            guard Self.replace(target, exists: true, writingTempWith: { try bytes.write(to: $0, options: .withoutOverwriting) })
+            else { return }
+            Phocasa.restoreFileDates(target, dates: originalDates)
+        }
+        if sidecar != .none {
+            // In step with the file: the same values, no longer overriding it.
+            updateSidecar(of: url, SidecarUpdate(rating: rating, keywords: keywords, overridesEmbedded: false))
+        }
+    }
+
+    /// `original` with this rating and these keywords inside it, keeping every other byte of metadata, by its format
+    /// (detected from its bytes, not its name); nil when it can't take them that way (the last resort, a sidecar).
+    static func fileWritingRatingAndKeywords(_ original: Data, rating: Int, keywords: [String]) -> Data? {
+        if JPEGStructure.isJPEG(original) {
+            return jpegWritingRatingAndKeywords(original, rating: rating, keywords: keywords)
+        }
+        let packet = { (existing: Data?) in xmpPacket(rating: rating, keywords: keywords, updating: existing) }
+        let written: Data?
+        if PNGMetadata.isPNG(original) {
+            // ImageIO calls a cut-short PNG complete, so the output's chunks are walked again, CRCs included.
+            written = PNGMetadata.replacingXMP(in: original, update: packet)
+                .flatMap { (try? PNGMetadata.walk($0).get()) != nil ? $0 : nil }
+        } else if TIFFMetadata.isTIFF(original) {
+            // Checks its own output: every original byte outside the parts it may change, and IFD0's other entries.
+            written = TIFFMetadata.replacingXMP(in: original, update: packet, keywords: keywords)
+        } else if HEIFMetadata.isHEIF(original) {
+            // Proves its own output: every original item's bytes reachable and identical, every other box kept.
+            written = HEIFMetadata.replacingXMP(in: original, update: packet)
+        } else {
+            return nil
+        }
+        guard let written, image(written, keepsEverythingIn: original, reading: rating, keywords) else { return nil }
+        return written
+    }
+
+    /// Whether ImageIO reads `written` as a complete image with this rating and these keywords, and with every property
+    /// `original` has, at the same value, apart from the ones that are Phocasa's (IPTC keywords and star rating): a check
+    /// on a container edit before it replaces anyone's photo. (ImageIO's view may gain keys, e.g. IPTC fields it
+    /// derives from the Exif once a file has XMP.)
+    static func image(_ written: Data, keepsEverythingIn original: Data, reading rating: Int,
+                              _ keywords: [String]) -> Bool {
+        guard let source = CGImageSourceCreateWithData(written as CFData, nil),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil),
+              xmpRating(in: meta) == rating, xmpSubject(in: meta) == keywords,
+              let after = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let before = CGImageSourceCreateWithData(original as CFData, nil)
+                .flatMap({ CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [String: Any] }) else { return false }
+        let phocasas: Set<String> = [kCGImagePropertyIPTCKeywords as String, kCGImagePropertyIPTCStarRating as String]
+        for (key, value) in before {
+            guard let now = after[key] else { return false }
+            if key == kCGImagePropertyIPTCDictionary as String,
+               let old = value as? [String: Any], let new = now as? [String: Any] {
+                for (field, oldValue) in old where !phocasas.contains(field) {
+                    guard let newValue = new[field], (oldValue as AnyObject).isEqual(newValue) else { return false }
+                }
+            } else if !(value as AnyObject).isEqual(now) {
+                return false
+            }
+        }
+        return CGImageSourceGetCount(source) == CGImageSourceCreateWithData(original as CFData, nil).map(CGImageSourceGetCount)
+    }
+
+    private enum SidecarState { case none, inStep, overridesFile }
+
+    private func sidecarState(_ imageURL: URL) -> SidecarState {
+        guard let data = try? Data(contentsOf: imageURL.xmpSidecarURL) else { return .none }
+        return Self.sidecarFields(data).overridesEmbedded ? .overridesFile : .inStep
     }
 
     /// Whether `imageURL`'s sidecar holds its rating and keywords in place of the file (`phocasa:OverridesEmbedded`).
     func sidecarOverridesEmbedded(_ imageURL: URL) -> Bool {
-        guard let data = try? Data(contentsOf: imageURL.xmpSidecarURL) else { return false }
-        return Self.sidecarFields(data).overridesEmbedded
+        sidecarState(imageURL) == .overridesFile
     }
 
     /// `original`, a JPEG, with this rating and these keywords, keeping every other byte of metadata; nil when that
     /// can't be done safely (then the values go to the sidecar).
     ///
-    /// Its XMP packet gets the new `xmp:Rating` and `dc:subject`, every other value unchanged (`xmpPacket`); the IPTC
-    /// keywords are patched into its APP13 (`PhotoshopIRB`); both are spliced into the original bytes
-    /// (`spliceJPEGMetadata`). Nil when the splice refuses the layout, when the XMP can't be updated safely, or when
-    /// the result doesn't read back with the new rating and keywords.
+    /// - The XMP: the last standard XMP segment (the one ImageIO and Adobe's XMP Toolkit read; any earlier ones stay
+    ///   byte-identical) gets the new `xmp:Rating` and `dc:subject`, every other value unchanged (`xmpPacket`); a
+    ///   file without one gets a new segment after its JFIF and Exif segments. Extended XMP stays byte-identical: its
+    ///   GUID, the MD5 of the extension, doesn't change.
+    /// - The IPTC keywords are patched into a single APP13 (`PhotoshopIRB`). When its IPTC text can't hold them
+    ///   (non-ASCII keywords over text of unknown encoding), or the file has several APP13 segments (one resource
+    ///   stream to ImageIO and Adobe, which a resource may span), every APP13 stays byte-identical and the keywords go
+    ///   to the XMP only, where they win over the IIM while its digest matches or is missing (MWG 2.0 §4.2.3.2, which
+    ///   ImageIO follows); no keywords are then an empty `dc:subject`, which also wins.
+    /// - Both are spliced into the original bytes (`spliceJPEGMetadata`), MPF entries patched for the move.
+    ///
+    /// Nil (the last resort) when the header can't be parsed (bytes other than fill bytes between segments), when the
+    /// XMP can't be updated safely or doesn't fit one segment, when the APP13 is malformed, when an MPF segment can't
+    /// be patched, or when ImageIO doesn't read the result back with the new rating and keywords and every value it
+    /// read before (an XMP segment after fill bytes or a standalone marker, which ImageIO's XMP reader stops at;
+    /// extended XMP holding a rating or keywords, which wins over the standard packet; an IPTC digest that says the IIM
+    /// is newer than the XMP).
     static func jpegWritingRatingAndKeywords(_ original: Data, rating: Int, keywords: [String]) -> Data? {
-        guard JPEGStructure.isJPEG(original), let (segments, _) = JPEGStructure.header(original) else { return nil }
-        let existing = segments.filter { $0.kind == .xmp }
-        guard existing.count <= 1 else { return nil }
-        let existingPacket = existing.first.map {
-            Data(original[($0.payload.lowerBound + JPEGStructure.xmpID.count)..<$0.payload.upperBound])
+        guard JPEGStructure.isJPEG(original), let (segments, sos) = JPEGStructure.header(original),
+              let iptc = iptcEdit(original, segments, keywords: keywords) else { return nil }
+        let xmpIndex = segments.lastIndex { $0.kind == .xmp }
+        let existing = xmpIndex.map { packetBytes(original, segments[$0]) }
+        guard let update = updatedXMPPacket(rating: rating, keywords: keywords, updating: existing,
+                                            emptyKeywords: iptc.xmpOnly ? .emptyBag : .leaveOut),
+              let xmpBytes = JPEGStructure.xmpSegment(update.packet) else { return nil }
+        var replacements = iptc.replacements
+        var insertion: (index: Int, bytes: Data)?
+        if let xmpIndex { replacements[xmpIndex] = xmpBytes } else { insertion = (xmpInsertionIndex(segments), xmpBytes) }
+        guard let spliced = splice(original, segments, sos: sos, replacing: replacements, inserting: insertion),
+              let meta = metadata(readBackFrom: spliced),
+              xmpRating(in: meta) == rating, xmpSubject(in: meta) == keywords else { return nil }
+        // A packet ImageIO couldn't parse on its own (`x:xapmeta`, a bare `rdf:RDF`) is checked through the file:
+        // everything ImageIO read from the original, it reads from the new file.
+        if !update.checkedByImageIO {
+            guard let before = CGImageSourceCreateWithData(original as CFData, nil)
+                    .flatMap({ CGImageSourceCopyMetadataAtIndex($0, 0, nil) }),
+                  XMPProperties.keepsEverything(of: before, in: meta, changing: [XMPProperties.rating, XMPProperties.subject])
+            else { return nil }
         }
-        guard let packet = xmpPacket(rating: rating, keywords: keywords, updating: existingPacket),
-              let spliced = spliceJPEGMetadata(original: original, xmp: packet, keywords: keywords),
-              jpeg(spliced, readsBack: rating, keywords) else { return nil }
         return spliced
     }
 
     /// An XMP packet with this rating and these keywords: `existing` with just `xmp:Rating` and `dc:subject` set and
-    /// every other value kept, or a new packet. Nil when `existing` can't be parsed, or its serialisation would lose
-    /// or change any other value. (ImageIO's JPEG rewrite would also mirror the Exif into the XMP, overwriting values
-    /// that disagree with it, such as another app's `xmp:CreatorTool`.)
+    /// every other value kept, or a new packet. Nil when that can't be shown: see `updatedXMPPacket`. Format-neutral:
+    /// the JPEG, PNG, TIFF and HEIC writers share it.
     static func xmpPacket(rating: Int, keywords: [String], updating existing: Data?) -> Data? {
-        let original = existing.flatMap { CGImageMetadataCreateFromXMPData($0 as CFData) }
-        if existing != nil && original == nil { return nil }
-        let meta = original.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
-        guard CGImageMetadataSetValueWithPath(meta, nil, "xmp:Rating" as CFString, "\(rating)" as CFString) else { return nil }
-        if keywords.isEmpty {
-            if CGImageMetadataCopyTagWithPath(meta, nil, "dc:subject" as CFString) != nil {
-                guard CGImageMetadataRemoveTagWithPath(meta, nil, "dc:subject" as CFString) else { return nil }
+        guard let update = updatedXMPPacket(rating: rating, keywords: keywords, updating: existing),
+              update.checkedByImageIO else { return nil }
+        return update.packet
+    }
+
+    struct UpdatedXMPPacket {
+        let packet: Data
+        /// Whether the new packet is shown to keep every value without reading the written file back: ImageIO parsed
+        /// it and read the new values and every other value from it, or the text edit only changed the two values in
+        /// place. False when a description was added to a packet ImageIO's XMP parser rejects on its own (an
+        /// `x:xapmeta` wrapper, a bare `rdf:RDF`, which its file readers accept): the caller must read the file back.
+        let checkedByImageIO: Bool
+    }
+
+    /// `existing` with this rating and these keywords, by the technique that changes the fewest bytes:
+    /// 1. no packet: a new one, from ImageIO;
+    /// 2. a text edit (`XMPTextEdit`): the values changed where they are, or added in an `rdf:Description` of their
+    ///    own, every other byte kept (padding apart), checked by an independent reading of the XML and, when it can
+    ///    parse the packet, by ImageIO;
+    /// 3. else ImageIO's rewrite of the packet (`xmp:Rating` and `dc:subject` set on its model), accepted only when
+    ///    both ImageIO and the independent reading of the XML (`XMPPacketScan`) find every other value in it:
+    ///    ImageIO's model alone leaves out what it drops (empty values, `rdf:nodeID` and `parseType="Literal"`
+    ///    properties, datatypes, renamed aliases, content after an XML error). (ImageIO's JPEG rewrite would also
+    ///    mirror the Exif into the XMP, overwriting values that disagree with it, such as another app's
+    ///    `xmp:CreatorTool`.)
+    ///
+    /// Nil when none of those can be shown to keep everything: XML that isn't well-formed, a DTD, a text edit it
+    /// can't place (a rating or keywords in a form it doesn't edit in place, descriptions about different resources)
+    /// together with a rewrite that would lose or change a value.
+    static func updatedXMPPacket(rating: Int, keywords: [String], updating existing: Data?,
+                                 emptyKeywords: XMPTextEdit.EmptyKeywords = .leaveOut) -> UpdatedXMPPacket? {
+        guard let existing else {
+            let meta = CGImageMetadataCreateMutable()
+            guard setRating(rating, keywords: keywords, emptyKeywords: emptyKeywords, in: meta),
+                  let packet = CGImageMetadataCreateXMPData(meta, nil) as Data? else { return nil }
+            return UpdatedXMPPacket(packet: packet, checkedByImageIO: true)
+        }
+        // Some writers (ImageIO's JPEG writer among them) end the packet with NUL bytes; they're kept as they are.
+        let body = existing.prefix(existing.count - existing.reversed().prefix { $0 == 0 }.count)
+        // A packet that already says exactly this is kept as it is, so writing the same values again changes no byte
+        // (a text edit would re-lay-out `dc:subject`). No keywords needs an empty Bag when the caller asks for one.
+        if let scan = XMPPacketScan(Data(body)), scan.ratings == ["\(rating)"],
+           keywords.isEmpty
+               ? (scan.subjects == [[]] || (scan.subjects.isEmpty && emptyKeywords == .leaveOut))
+               : scan.subjects == [keywords] {
+            return UpdatedXMPPacket(packet: existing, checkedByImageIO: true)
+        }
+        let edit = XMPTextEdit.setting(rating: rating, keywords: keywords, emptyKeywords: emptyKeywords, in: Data(body))
+        // Values changed in place leave the XML's structure as it was, so ImageIO reads every other value as before
+        // (and the caller's read-back checks the new ones): no need to parse the packet with ImageIO here.
+        if let edit, !edit.addedDescription {
+            return UpdatedXMPPacket(packet: edit.packet + existing[body.endIndex...], checkedByImageIO: true)
+        }
+        let original = CGImageMetadataCreateFromXMPData(existing as CFData)
+        if let edit {
+            let edited = edit.packet + existing[body.endIndex...]
+            guard let original else { return UpdatedXMPPacket(packet: edited, checkedByImageIO: false) }
+            if let reparsed = CGImageMetadataCreateFromXMPData(edited as CFData),
+               xmpRating(in: reparsed) == rating, xmpSubject(in: reparsed) == keywords,
+               XMPProperties.keepsEverything(of: original, in: reparsed, changing: [XMPProperties.rating, XMPProperties.subject]) {
+                return UpdatedXMPPacket(packet: edited, checkedByImageIO: true)
             }
-        } else {
-            guard let tag = CGImageMetadataTagCreate("http://purl.org/dc/elements/1.1/" as CFString, "dc" as CFString,
-                                                     "subject" as CFString, .arrayUnordered, keywords as CFArray),
-                  CGImageMetadataSetTagWithPath(meta, nil, "dc:subject" as CFString, tag) else { return nil }
         }
-        guard let packet = CGImageMetadataCreateXMPData(meta, nil) as Data? else { return nil }
-        if let original {
-            guard let reparsed = CGImageMetadataCreateFromXMPData(packet as CFData),
-                  XMPProperties.keepsEverything(of: original, in: reparsed,
-                                                changing: [XMPProperties.rating, XMPProperties.subject]) else { return nil }
+        guard let original, let before = XMPPacketScan(Data(body)),
+              let meta = CGImageMetadataCreateMutableCopy(original),
+              setRating(rating, keywords: keywords, emptyKeywords: emptyKeywords, in: meta),
+              let packet = CGImageMetadataCreateXMPData(meta, nil) as Data?,
+              let reparsed = CGImageMetadataCreateFromXMPData(packet as CFData),
+              XMPProperties.keepsEverything(of: original, in: reparsed, changing: [XMPProperties.rating, XMPProperties.subject]),
+              let after = XMPPacketScan(packet), before.isKept(in: after) else { return nil }
+        return UpdatedXMPPacket(packet: packet, checkedByImageIO: true)
+    }
+
+    /// Sets `xmp:Rating` and `dc:subject` on ImageIO's model of a packet.
+    private static func setRating(_ rating: Int, keywords: [String], emptyKeywords: XMPTextEdit.EmptyKeywords,
+                                  in meta: CGMutableImageMetadata) -> Bool {
+        guard CGImageMetadataSetValueWithPath(meta, nil, "xmp:Rating" as CFString, "\(rating)" as CFString) else { return false }
+        if keywords.isEmpty && emptyKeywords == .leaveOut {
+            if CGImageMetadataCopyTagWithPath(meta, nil, "dc:subject" as CFString) != nil {
+                return CGImageMetadataRemoveTagWithPath(meta, nil, "dc:subject" as CFString)
+            }
+            return true
         }
-        return packet
+        guard let tag = CGImageMetadataTagCreate(XMPNamespace.dc as CFString, "dc" as CFString,
+                                                 "subject" as CFString, .arrayUnordered, keywords as CFArray) else { return false }
+        return CGImageMetadataSetTagWithPath(meta, nil, "dc:subject" as CFString, tag)
     }
 
     // MARK: - JPEG metadata splice
 
-    /// `original` with its XMP (APP1) segment replaced by one holding `xmp`, and the IPTC keywords in its Photoshop
-    /// APP13 segment replaced by `keywords`. Every other byte of `original` is kept: Exif with the camera's MakerNote,
-    /// MPF previews, ICC profiles, other APPn and COM segments, every other Photoshop resource and IPTC dataset, and
-    /// the image data. (ImageIO's own rewrite drops the MakerNote, and the resources and datasets it doesn't model.)
+    /// `original` with its XMP replaced by `xmp` (the last standard XMP segment, or a new one after the JFIF and Exif
+    /// segments) and the IPTC keywords in its Photoshop APP13 replaced by `keywords`. Every other byte of `original` is
+    /// kept: Exif with the camera's MakerNote, MPF previews, ICC profiles, extended XMP, other APPn and COM segments,
+    /// fill bytes, every other Photoshop resource and IPTC dataset, and the image data; the MPF entries' sizes and
+    /// offsets follow the header's new size (`MPFIndex`). (ImageIO's own rewrite drops the MakerNote, and the
+    /// resources and datasets it doesn't model.)
     ///
-    /// The new XMP goes where the old one was, or after the JFIF and Exif segments. A file without APP13 gets none:
-    /// its keywords are in the XMP. Returns nil, so the caller keeps the original, when that can't be done safely:
-    /// the file isn't plain marker segments up to SOS; it has several XMP or APP13 segments, or extended XMP; `xmp`
-    /// doesn't fit one segment; the APP13 can't be patched (`PhotoshopIRB.replacingKeywords`); or a change would land
-    /// after an MPF segment, whose image offsets count from it.
+    /// A file without APP13 gets none: its keywords are in the XMP. When the APP13's IPTC text can't hold the keywords,
+    /// or there are several APP13 segments, every APP13 is kept as it is. Returns nil, so the caller keeps the
+    /// original, when that can't be done safely: the header isn't marker segments, fill bytes and standalone markers
+    /// up to SOS; `xmp` doesn't fit one segment; the APP13 is malformed; or an MPF segment can't be patched.
     static func spliceJPEGMetadata(original: Data, xmp: Data, keywords: [String]) -> Data? {
-        guard let (old, sos) = JPEGStructure.header(original),
-              old.filter({ $0.kind == .xmp }).count <= 1, old.filter({ $0.kind == .iptc }).count <= 1,
-              !old.contains(where: { $0.kind == .extendedXMP }),
-              let xmpBytes = JPEGStructure.segment(0xE1, payload: JPEGStructure.xmpID + xmp) else { return nil }
-
-        let oldXMPIndex = old.firstIndex { $0.kind == .xmp }
-        let oldIPTCIndex = old.firstIndex { $0.kind == .iptc }
-        // Without an old XMP segment, the new one goes before this index: after the leading JFIF/Exif segments.
-        let insertXMPAt = old.firstIndex { !($0.marker == 0xE0 || $0.kind == .exif) } ?? old.count
-
-        if let mpf = old.firstIndex(where: { $0.kind == .mpf }) {
-            let xmpSafe = oldXMPIndex.map { $0 < mpf } ?? (insertXMPAt <= mpf)
-            let iptcSafe = oldIPTCIndex.map { $0 < mpf } ?? true
-            guard xmpSafe, iptcSafe else { return nil }
+        guard let (segments, sos) = JPEGStructure.header(original),
+              let iptc = iptcEdit(original, segments, keywords: keywords),
+              let xmpBytes = JPEGStructure.xmpSegment(xmp) else { return nil }
+        var replacements = iptc.replacements
+        var insertion: (index: Int, bytes: Data)?
+        if let xmpIndex = segments.lastIndex(where: { $0.kind == .xmp }) {
+            replacements[xmpIndex] = xmpBytes
+        } else {
+            insertion = (xmpInsertionIndex(segments), xmpBytes)
         }
+        return splice(original, segments, sos: sos, replacing: replacements, inserting: insertion)
+    }
 
-        var iptcBytes: Data?
-        if let oldIPTCIndex {
-            guard let payload = PhotoshopIRB.replacingKeywords(in: original[old[oldIPTCIndex].payload], with: keywords),
-                  let segment = JPEGStructure.segment(0xED, payload: payload) else { return nil }
-            iptcBytes = segment
+    /// What a keyword write does to the APP13 segments: the patched segment, or none when the keywords go to the XMP
+    /// only (`xmpOnly`). Nil for an APP13 that can't be parsed.
+    private static func iptcEdit(_ original: Data, _ segments: [JPEGStructure.Segment],
+                                 keywords: [String]) -> (replacements: [Int: Data], xmpOnly: Bool)? {
+        let indices = segments.indices.filter { segments[$0].kind == .iptc }
+        guard indices.count == 1, let index = indices.first else { return ([:], indices.count > 1) }
+        switch PhotoshopIRB.keywordPatch(in: original[segments[index].payload], with: keywords) {
+        case .patched(let payload):
+            guard let segment = JPEGStructure.segment(0xED, payload: payload) else { return nil }
+            return ([index: segment], false)
+        case .noIPTC: return ([:], false)
+        case .cantHold: return ([:], true)
+        case .malformed: return nil
         }
-        var out = Data(capacity: original.count + xmpBytes.count)
+    }
+
+    private static func packetBytes(_ original: Data, _ segment: JPEGStructure.Segment) -> Data {
+        Data(original[(segment.payload.lowerBound + JPEGStructure.xmpID.count)..<segment.payload.upperBound])
+    }
+
+    /// Where a new XMP segment goes: after the leading JFIF (APP0) and Exif segments (and not after fill bytes that
+    /// follow them, which ImageIO's XMP reader stops at), or first.
+    static func xmpInsertionIndex(_ segments: [JPEGStructure.Segment]) -> Int {
+        let leading = segments.prefix { $0.marker == 0xE0 || $0.kind == .exif || !$0.hasPayload }
+        return leading.lastIndex { $0.marker == 0xE0 || $0.kind == .exif }.map { $0 + 1 } ?? segments.startIndex
+    }
+
+    /// The header rebuilt with these segments replaced and one inserted (before the segment at `index`, or at the end),
+    /// every other segment's bytes kept, each MPF segment's entries patched for the header's new size, then the
+    /// original from SOS on. Nil when an MPF segment can't be patched.
+    private static func splice(_ original: Data, _ segments: [JPEGStructure.Segment], sos: Int,
+                               replacing replacements: [Int: Data], inserting insertion: (index: Int, bytes: Data)?) -> Data? {
+        func change(_ index: Int) -> Int { replacements[index].map { $0.count - segments[index].range.count } ?? 0 }
+        let growth = segments.indices.reduce(insertion?.bytes.count ?? 0) { $0 + change($1) }
+        var out = Data(capacity: original.count + max(0, growth))
         out.append(contentsOf: [0xFF, 0xD8])
-        for (index, segment) in old.enumerated() {
-            if oldXMPIndex == nil && index == insertXMPAt { out.append(xmpBytes) }
-            switch segment.kind {
-            case .xmp: out.append(xmpBytes)
-            case .iptc: if let iptcBytes { out.append(iptcBytes) }
-            default: out.append(original[segment.range])
+        for (index, segment) in segments.enumerated() {
+            if let insertion, insertion.index == index { out.append(insertion.bytes) }
+            if let replacement = replacements[index] {
+                out.append(replacement)
+            } else if segment.kind == .mpf {
+                // The images after the primary move by what changes after this segment.
+                let shift = segments.indices.filter { $0 > index }.reduce(0) { $0 + change($1) }
+                    + ((insertion.map { $0.index > index } ?? false) ? insertion?.bytes.count ?? 0 : 0)
+                if growth == 0 && shift == 0 {
+                    out.append(original[segment.range])
+                } else {
+                    guard let patched = MPFIndex.patched(original, segment: segment.range, sos: sos, growth: growth,
+                                                         shift: shift) else { return nil }
+                    out.append(patched)
+                }
+            } else {
+                out.append(original[segment.range])
             }
         }
-        if oldXMPIndex == nil && insertXMPAt == old.count { out.append(xmpBytes) }
+        if let insertion, insertion.index >= segments.count { out.append(insertion.bytes) }
         out.append(original[sos...])
         return out
     }
 
-    /// Whether ImageIO reads `spliced` as a complete image with this rating and these keywords: a check on the
-    /// splice before it replaces anyone's photo. (Its frame and image data are the original's bytes, so the size
-    /// needs no check; reading it would parse the whole Exif, MakerNote included, for about 1 ms.)
-    private static func jpeg(_ spliced: Data, readsBack rating: Int, _ keywords: [String]) -> Bool {
+    /// What ImageIO reads from `spliced`, when it reads it as a complete image: a check on the splice before it
+    /// replaces anyone's photo. (Its frame and image data are the original's bytes, so the size needs no check;
+    /// reading it would parse the whole Exif, MakerNote included, for about 1 ms.)
+    private static func metadata(readBackFrom spliced: Data) -> CGImageMetadata? {
         guard let source = CGImageSourceCreateWithData(spliced as CFData, nil),
-              CGImageSourceGetStatus(source) == .statusComplete,
-              let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) else { return false }
-        return xmpRating(in: meta) == rating && xmpSubject(in: meta) == keywords
+              CGImageSourceGetStatus(source) == .statusComplete else { return nil }
+        return CGImageSourceCopyMetadataAtIndex(source, 0, nil)
     }
 
     /// Writes a new version of `target` through a temp file in the same folder, then swaps it in.

@@ -142,6 +142,18 @@ final class ExportMetadataTests: XCTestCase {
         throw Timeout()
     }
 
+    /// The rich JPEG with an Exif structure that can't be walked (IFD0's offset points past its end): ImageIO decodes
+    /// the image, but the Exif can't be patched for new pixels, so the metadata can't be carried over.
+    private static func unwalkableExifJPEG() throws -> Data {
+        let rich = try RichJPEG.make()
+        var (segments, sos) = MetadataJPEGPreservationTests.header(rich.data)
+        let exif = try XCTUnwrap(segments.firstIndex { $0.id == "Exif" })
+        var payload = [UInt8](segments[exif].bytes.dropFirst(4))
+        payload[10 + 4] = 0xF0; payload[10 + 5] = 0xFF
+        segments[exif] = MetadataJPEGPreservationTests.segment(0xE1, Data(payload))
+        return MetadataJPEGPreservationTests.assemble(segments, tail: rich.data[sos...])
+    }
+
     private func readBack(_ url: URL) -> MetadataService.PhotoMetadata {
         MetadataService.shared.readMetadata(from: url.path)
     }
@@ -252,15 +264,12 @@ final class ExportMetadataTests: XCTestCase {
 
     // MARK: - An export that can't keep the metadata doesn't happen
 
-    /// A JPEG with fill bytes between its header segments: legal, and ImageIO decodes it, but Phocasa can't carry its
-    /// segments over safely. Applying the edits would lose its metadata, so the file stays as it is and the edit stays
-    /// a saved edit.
+    /// A JPEG whose Exif structure can't be walked: ImageIO decodes it, but Phocasa can't carry its metadata over
+    /// safely. Applying the edits would lose its metadata, so the file stays as it is and the edit stays a saved edit.
+    /// (Before task D the fixture used fill bytes between segments, which are legal and now carried over; see
+    /// `ExportMetadataCompositionTests.testASourceWithFillBytesIsCarriedOver`.)
     func testApplyingEditsIsRefusedWhenTheMetadataCantBeCarriedOver() async throws {
-        let rich = try RichJPEG.make()
-        let (segments, sos) = MetadataJPEGPreservationTests.header(rich.data)
-        var padded = Data([0xFF, 0xD8])
-        for segment in segments { padded += Data([0xFF, 0xFF]) + segment.bytes }
-        padded += rich.data[sos...]
+        let padded = try Self.unwalkableExifJPEG()
         XCTAssertNotNil(CGImageSourceCreateWithData(padded as CFData, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) },
                         "fixture: ImageIO decodes it")
         let url = dir.appendingPathComponent("padded.jpg")
@@ -279,11 +288,7 @@ final class ExportMetadataTests: XCTestCase {
 
     /// A camera JPG whose metadata can't be carried over doesn't stop a new `-raw-edit` file: that takes the RAW's.
     func testARAWEditAsANewFileFallsBackToTheRAWsMetadata() async throws {
-        let rich = try RichJPEG.make()
-        let (segments, sos) = MetadataJPEGPreservationTests.header(rich.data)
-        var padded = Data([0xFF, 0xD8])
-        for segment in segments { padded += Data([0xFF, 0xFF]) + segment.bytes }
-        padded += rich.data[sos...]
+        let padded = try Self.unwalkableExifJPEG()
         let jpg = dir.appendingPathComponent("DSC0004.jpg")
         try padded.write(to: jpg)
         let raw = try writeFakeRAW("DSC0004.tif")
@@ -320,6 +325,10 @@ final class ExportMetadataTests: XCTestCase {
             let jpg = dir.appendingPathComponent(sourceJPG.lastPathComponent)
             try FileManager.default.copyItem(at: source, to: raw)
             try FileManager.default.copyItem(at: sourceJPG, to: jpg)
+            // The copies are the test's to write, whatever the source's permissions (a read-only file is left alone).
+            for copy in [raw, jpg] {
+                try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copy.path)
+            }
             return (raw, jpg)
         }
     }
