@@ -1041,7 +1041,8 @@ final class ScanTests: XCTestCase {
         let generation = vm.library.loading.generation
 
         vm.selection.selectedPhotos = Set(vm.library.photos.filter { $0.fileName != "pair0" }.map(\.id))
-        await vm.deleteSelected()?.value
+        vm.deleteSelected()
+        await vm.confirmFileTypeDelete(try XCTUnwrap(vm.pendingFileTypeDelete, "asked first"))?.value
 
         XCTAssertEqual(vm.library.photos.map(\.fileName), ["pair0"])
         XCTAssertEqual(vm.library.binPhotos.map(\.fileName), ["solo"])

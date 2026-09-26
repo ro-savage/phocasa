@@ -143,16 +143,23 @@ extension LibraryStore {
     /// Deletes one file type of each photo (with the RAW or JPG filter active): a pair loses that file, moved to the
     /// Trash; a photo with only one file, or both filters active, goes to the bin instead. A pair whose file can't be
     /// moved keeps it.
+    ///
+    /// A RAW goes with its `.xmp` sidecar (its rating, keywords and edits, and what other apps wrote about it), except
+    /// when the pair's JPG keeps its own rating and keywords there (`phocasa:OverridesEmbedded`, for a JPG that can't
+    /// take them): then the sidecar stays with the JPG.
     func deleteFileType(of photosToRemove: [PhotoAsset], raw deleteRAW: Bool, jpg deleteJPG: Bool) async {
         enum Change { case toBin, dropRAW, dropJPG }
         var changes: [(photo: PhotoAsset, change: Change)] = []
         var files: [URL] = []
+        var sidecars: [(sidecar: URL, jpg: URL)] = []
         for photo in photosToRemove where photosBeingDeleted.insert(photo.id).inserted {
             if deleteRAW && deleteJPG {
                 // Both file type filters active — normal soft delete
                 changes.append((photo, .toBin))
-            } else if deleteRAW && photo.hasRawPair {
-                files += Self.files(of: photo, jpg: false, raw: true)
+            } else if deleteRAW && photo.hasRawPair, let rawPath = photo.rawPath, let jpgPath = photo.jpgPath {
+                let raw = URL(fileURLWithPath: rawPath)
+                files.append(raw)
+                sidecars.append((raw.xmpSidecarURL, URL(fileURLWithPath: jpgPath)))
                 changes.append((photo, .dropRAW))
             } else if deleteJPG && photo.hasRawPair {
                 files += Self.files(of: photo, jpg: true, raw: false)
@@ -164,6 +171,12 @@ extension LibraryStore {
         }
         guard !changes.isEmpty else { return }
 
+        if !sidecars.isEmpty {
+            // Off the main actor: it reads each sidecar there is.
+            files += await Task.detached(priority: .userInitiated) {
+                sidecars.filter { !MetadataService.shared.sidecarOverridesEmbedded($0.jpg) }.map(\.sidecar)
+            }.value
+        }
         let outcomes = Self.outcomesByPath(files, await moveToTrash(files))
 
         var applied: [(photo: PhotoAsset, change: Change)] = []
@@ -290,6 +303,28 @@ extension LibraryStore {
     private func publishTrashProgress() {
         let shown = trashPending.total > Self.trashProgressMinimum ? trashPending : nil
         if trashProgress != shown { trashProgress = shown }
+    }
+
+    // MARK: - Exports
+
+    /// A new JPG exported from `source` (`EditSession.exportToNewFile()`) joins the library as a photo of its own, as a
+    /// scan would insert it (its folder, file name and path, so the next scan knows it rather than adding it again),
+    /// with `source`'s rating, tags and capture date: the export carries the original's metadata, so it sorts beside
+    /// it. `source` doesn't change. Patched in memory, no reload.
+    @discardableResult
+    func addExportedPhoto(at url: URL, copying source: PhotoAsset) -> PhotoAsset? {
+        guard let context = modelContext else { return nil }
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey])
+        let photo = PhotoAsset(fileName: url.deletingPathExtension().lastPathComponent, jpgPath: url.path,
+                               folderPath: url.deletingLastPathComponent().path, creationDate: values?.creationDate,
+                               fileSize: Int64(values?.fileSize ?? 0))
+        photo.rating = source.rating
+        photo.captureDate = source.captureDate
+        context.insert(photo)
+        photo.tags = source.tags
+        try? context.save()
+        updateLibrary(adding: [photo], facts: makeFacts(for: [photo]), removing: [])
+        return photo
     }
 
     // MARK: - Background Metadata Write-back

@@ -46,6 +46,24 @@ struct EditParameters: Codable, Equatable, Sendable {
         flipHorizontal = false
         flipVertical = false
     }
+
+    /// These parameters without the transform (crop, rotation, flips): what a preset keeps, so applying one to many
+    /// photos never crops or turns them.
+    var look: EditParameters {
+        var look = self
+        look.resetTransform()
+        return look
+    }
+
+    /// `preset`'s look (its transform ignored, as old presets still have one) with this photo's own transform.
+    func applyingLook(of preset: EditParameters) -> EditParameters {
+        var result = preset.look
+        result.cropRect = cropRect
+        result.rotation = rotation
+        result.flipHorizontal = flipHorizontal
+        result.flipVertical = flipVertical
+        return result
+    }
 }
 
 struct NormalizedRect: Codable, Equatable, Sendable {

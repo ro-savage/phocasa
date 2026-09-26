@@ -47,10 +47,10 @@ final class KeyboardShortcutTests: XCTestCase {
     }
 
     /// A key-down and key-up as the keyboard sends them: `characters` is what macOS puts in the event.
-    private func press(keyCode: UInt16, characters: String) {
+    private func press(keyCode: UInt16, characters: String, modifiers: NSEvent.ModifierFlags = []) {
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             let event = NSEvent.keyEvent(
-                with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                with: type, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, characters: characters,
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode
             )!
@@ -88,5 +88,52 @@ final class KeyboardShortcutTests: XCTestCase {
         let photo = try selectFirstPhoto()
         press(keyCode: 117, characters: "\u{F728}")
         XCTAssertTrue(photo.isInBin, "⌦ moves the selected photo to the bin")
+    }
+
+    /// The detail view open on the second photo, with the whole grid selected underneath.
+    private func openSecondPhotoWithEverythingSelected() throws -> [PhotoAsset] {
+        let photos = viewModel.library.photos
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: try XCTUnwrap(photos.first))
+        viewModel.navigateDetail(direction: 1)
+        spin(0.2)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[1].id)
+        return photos
+    }
+
+    /// Bug test (REL-1 #1): ⌫ in the detail view binned the grid's selection. It bins the photo on screen.
+    func testDeleteKeyInTheDetailViewBinsThePhotoOnScreen() throws {
+        let photos = try openSecondPhotoWithEverythingSelected()
+        press(keyCode: 51, characters: "\u{7F}")
+        XCTAssertEqual(viewModel.library.binPhotos.map(\.id), [photos[1].id])
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "the next photo is on screen")
+    }
+
+    /// Bug test (REL-1 #1): Return in the detail view re-opened the grid's primary photo in place of the one on screen
+    /// (in edit mode it then showed that photo while the sliders edited the other).
+    func testReturnInTheDetailViewKeepsThePhotoOnScreen() throws {
+        let photos = try openSecondPhotoWithEverythingSelected()
+        press(keyCode: 36, characters: "\r")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[1].id)
+        XCTAssertTrue(viewModel.showingDetail)
+    }
+
+    /// ⌘A in the detail view doesn't select the (hidden) grid.
+    func testCommandAInTheDetailViewSelectsNothing() throws {
+        let photo = try selectFirstPhoto()
+        viewModel.openDetail(for: photo)
+        spin(0.2)
+        press(keyCode: 0, characters: "a", modifiers: .command)
+        XCTAssertEqual(viewModel.selection.selectedPhotos, [photo.id])
+    }
+
+    /// Space closes the detail view whatever the grid's selection is.
+    func testSpaceClosesTheDetailView() throws {
+        let photo = try XCTUnwrap(viewModel.library.photos.first)
+        viewModel.selection.clearSelection()
+        viewModel.openDetail(for: photo)
+        spin(0.2)
+        press(keyCode: 49, characters: " ")
+        XCTAssertFalse(viewModel.showingDetail)
     }
 }

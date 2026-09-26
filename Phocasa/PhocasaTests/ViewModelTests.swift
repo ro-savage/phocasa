@@ -233,7 +233,111 @@ final class ViewModelTests: XCTestCase {
         XCTAssertFalse(photo.hasRawEdits)
     }
 
+    /// Bug test (REL-1 #6): "Revert All Edits" cleared the saved edits at once, and only the clicked photo's even on a
+    /// multi-selection. It asks first, with the count, and reverts every selected photo that has edits.
+    func testRevertAllEditsAsksFirstAndRevertsTheSelection() {
+        let photos = (0..<3).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        var params = EditParameters()
+        params.exposure = 1
+        photos[0].jpgEditParameters = params
+        photos[1].jpgEditParameters = params
+        try? context.save()
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+
+        viewModel.requestRevertEdits(from: photos[0])
+
+        XCTAssertEqual(Set(ids(viewModel.photosToRevert)), [photos[0].id, photos[1].id], "the selected photos with edits")
+        XCTAssertNotNil(photos[0].jpgEditParametersData, "nothing reverted before the confirmation")
+        viewModel.confirmRevertEdits()
+        XCTAssertTrue(viewModel.photosToRevert.isEmpty)
+        XCTAssertNil(photos[0].jpgEditParametersData)
+        XCTAssertNil(photos[1].jpgEditParametersData)
+
+        // Outside the selection: only the clicked photo.
+        photos[2].jpgEditParameters = params
+        photos[0].jpgEditParameters = params
+        viewModel.selection.select(only: photos[1].id)
+        viewModel.requestRevertEdits(from: photos[2])
+        XCTAssertEqual(ids(viewModel.photosToRevert), [photos[2].id])
+    }
+
     // MARK: - Smart Delete (File Type)
+
+    /// ⌫ with the RAW or JPG filter on asks first (files go to the Trash); this confirms what it asked.
+    private func deleteConfirmingFileTypeDelete(file: StaticString = #filePath, line: UInt = #line) async {
+        viewModel.deleteSelected()
+        guard let request = viewModel.pendingFileTypeDelete else {
+            return XCTFail("the file-type delete asks first", file: file, line: line)
+        }
+        await viewModel.confirmFileTypeDelete(request)?.value
+    }
+
+    /// Bug test (REL-1 #5): with the RAW filter on, ⌫ (and "Move to Bin") put every selected pair's RAW in the Trash
+    /// at once, with no confirmation (⌘A ⌫ trashed every RAW in the library). It asks first, naming the count and the
+    /// file type, and nothing happens until it's confirmed.
+    func testFileTypeDeleteAsksFirstNamingTheCountAndTheFileType() async {
+        let pairs = (0..<3).map { i -> PhotoAsset in
+            let photo = PhotoAsset(fileName: "p\(i)", jpgPath: "/fake/p\(i).jpg", rawPath: "/fake/p\(i).cr3",
+                                   folderPath: "/fake", creationDate: date(Double(10 - i)), fileSize: 2000)
+            context.insert(photo)
+            return photo
+        }
+        let rawOnly = PhotoAsset(fileName: "solo", rawPath: "/fake/solo.cr3", folderPath: "/fake", creationDate: date(1))
+        context.insert(rawOnly)
+        try? context.save()
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.rawOnly)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 4), "Delete RAW Files…")
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 1), "Delete RAW File…")
+        viewModel.selection.selectAll()
+
+        XCTAssertNil(viewModel.deleteSelected(), "nothing starts before the confirmation")
+
+        let request = try? XCTUnwrap(viewModel.pendingFileTypeDelete)
+        XCTAssertEqual(request?.title, "Move 3 RAW files to the Trash?")
+        XCTAssertEqual(request?.message, "The JPGs stay in the library. 1 photo has only a RAW file and goes to the Bin instead.")
+        XCTAssertEqual(request?.confirmTitle, "Move to Trash")
+        XCTAssertTrue(pairs.allSatisfy { $0.rawPath != nil }, "nothing deleted yet")
+        guard let request else { return }
+
+        await viewModel.confirmFileTypeDelete(request)?.value
+        XCTAssertNil(viewModel.pendingFileTypeDelete)
+        XCTAssertTrue(pairs.allSatisfy { $0.rawPath == nil && $0.jpgPath != nil })
+        XCTAssertTrue(rawOnly.isInBin)
+
+        viewModel.library.applyFilter(.jpgOnly)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 2), "Delete JPG Files…")
+        viewModel.library.applyFilter(.all)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 2), "Move to Bin")
+        viewModel.library.applyFilter(.bin)
+        XCTAssertEqual(viewModel.deleteActionTitle(count: 2), "Delete Forever…")
+    }
+
+    /// In the detail view, the RAW filter's ⌫ asks about the photo on screen, then moves on.
+    func testFileTypeDeleteInTheDetailViewAsksAboutThePhotoOnScreen() async throws {
+        let photos = (0..<2).map { i -> PhotoAsset in
+            let photo = PhotoAsset(fileName: "p\(i)", jpgPath: "/fake/p\(i).jpg", rawPath: "/fake/p\(i).cr3",
+                                   folderPath: "/fake", creationDate: date(Double(10 - i)), fileSize: 2000)
+            context.insert(photo)
+            return photo
+        }
+        try context.save()
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.rawOnly)
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: photos[0])
+
+        viewModel.deleteSelectionOrCurrent()
+        let request = try XCTUnwrap(viewModel.pendingFileTypeDelete)
+        XCTAssertEqual(ids(request.photos), [photos[0].id])
+        XCTAssertEqual(request.title, "Move 1 RAW file to the Trash?")
+        await viewModel.confirmFileTypeDelete(request)?.value
+
+        XCTAssertNil(photos[0].rawPath)
+        XCTAssertNotNil(photos[1].rawPath)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[1].id)
+    }
 
     func testDeleteInRAWOnlyModeRemovesOnlyRAW() async {
         let paired = PhotoAsset(fileName: "paired", jpgPath: "/fake/paired.jpg", rawPath: "/fake/paired.cr3",
@@ -245,7 +349,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         // RAW path should be cleared, JPG should remain
         XCTAssertNil(paired.rawPath)
@@ -264,7 +368,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.jpgOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         // JPG path should be cleared, RAW should remain
         XCTAssertNil(paired.jpgPath)
@@ -282,7 +386,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [rawOnly.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         // Non-paired RAW should go to bin — check via binCount since the photo
         // gets refetched by loadExistingData after delete
@@ -300,7 +404,7 @@ final class ViewModelTests: XCTestCase {
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [paired.id]
 
-        await viewModel.deleteSelected()?.value
+        await deleteConfirmingFileTypeDelete()
 
         XCTAssertTrue(viewModel.selection.selectedPhotos.isEmpty)
     }
@@ -485,6 +589,153 @@ final class ViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedDetailPhoto?.id, a.id)
     }
 
+    /// Bug test (REL-1 #2): culling in a filter, the photo on screen is rated out of it. ←/→ did nothing (its index was
+    /// gone) and the counter disappeared. They now go to the photos either side of where it was.
+    func testNavigateDetailAfterThePhotoLeftTheFilter() {
+        let photos = (0..<4).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.unrated)
+        viewModel.openDetail(for: photos[1])
+
+        viewModel.setRatingForSelectionOrCurrent(3)
+        XCTAssertNil(viewModel.library.index(of: photos[1].id), "rated out of Unrated")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[1].id, "still on screen")
+        viewModel.navigateDetail(direction: 1)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "the photo after it")
+
+        viewModel.setRatingForSelectionOrCurrent(4)
+        viewModel.navigateDetail(direction: -1)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[0].id, "the photo before it")
+
+        // After the sort is reversed too.
+        viewModel.setRatingForSelectionOrCurrent(5)
+        viewModel.library.toggleSortOrder()
+        XCTAssertEqual(ids(viewModel.library.photos), [photos[3].id])
+        viewModel.navigateDetail(direction: -1)
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[3].id)
+    }
+
+    // MARK: - The detail view acts on the photo on screen
+
+    /// Bug test (REL-1 #1): ⌫ in the detail view binned the grid's selection, whatever was on screen (open A, → to B,
+    /// ⌫: A went to the bin while B stayed on screen; opened from a selection of 200, ⌫ binned all 200). It bins the
+    /// photo on screen, then shows the next one (the previous one at the end), and closes when none is left.
+    func testDeleteInTheDetailViewBinsThePhotoOnScreenThenShowsTheNext() {
+        let photos = (0..<4).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: photos[0])
+        viewModel.navigateDetail(direction: 1)
+
+        viewModel.deleteSelectionOrCurrent()
+
+        XCTAssertEqual(ids(viewModel.library.binPhotos), [photos[1].id], "only the photo on screen")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "then the next photo")
+        XCTAssertTrue(viewModel.showingDetail)
+        viewModel.navigateDetail(direction: 1)
+        viewModel.deleteSelectionOrCurrent()
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[2].id, "at the end, the previous photo")
+        viewModel.deleteSelectionOrCurrent()
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, photos[0].id)
+        viewModel.deleteSelectionOrCurrent()
+        XCTAssertFalse(viewModel.showingDetail, "none left: the detail view closes")
+        XCTAssertNil(viewModel.selectedDetailPhoto)
+        XCTAssertEqual(viewModel.library.binCount, 4)
+    }
+
+    /// Deleting while editing saves the edit and carries on editing the next photo, as navigating does.
+    func testDeleteWhileEditingSavesAndEditsTheNextPhoto() throws {
+        let photos = (0..<2).map { insertPhoto(name: "p\($0)", creationDate: date(Double(10 - $0))) }
+        viewModel.loadExistingData()
+        viewModel.openDetail(for: photos[0])
+        viewModel.startEditing(photo: photos[0], isRAW: false)
+        viewModel.editSession?.parameters.exposure = 1
+
+        viewModel.deleteSelectionOrCurrent()
+
+        XCTAssertEqual(photos[0].jpgEditParameters?.exposure, 1, "saved")
+        XCTAssertEqual(viewModel.editSession?.photo.id, photos[1].id)
+        viewModel.stopEditing(save: false)
+    }
+
+    /// In the bin, the Delete Forever prompt is about the photo on screen, not the grid's selection.
+    func testDeleteForeverInTheDetailViewAsksAboutThePhotoOnScreen() async {
+        let a = insertPhoto(name: "a", isInBin: true, creationDate: date(2000))
+        let b = insertPhoto(name: "b", isInBin: true, creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.bin)
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: a)
+        viewModel.navigateDetail(direction: 1)
+
+        viewModel.deleteSelectionOrCurrent()
+
+        XCTAssertTrue(viewModel.showPermanentDeleteConfirmation)
+        XCTAssertEqual(ids(viewModel.photosToDelete), [b.id])
+        await viewModel.confirmPermanentDelete()?.value
+        XCTAssertEqual(ids(viewModel.library.binPhotos), [a.id])
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, a.id, "the photo left")
+    }
+
+    /// Emptying the bin from the toolbar while one of its photos is on screen closes the detail view before the
+    /// photos are deleted (it mustn't go on showing a deleted photo).
+    func testEmptyingTheBinWhileItsPhotoIsOnScreenClosesTheDetailView() async {
+        let a = insertPhoto(name: "a", isInBin: true)
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.bin)
+        viewModel.openDetail(for: a)
+
+        viewModel.emptyBin()
+        let deleting = viewModel.confirmPermanentDelete()
+
+        XCTAssertFalse(viewModel.showingDetail)
+        XCTAssertNil(viewModel.selectedDetailPhoto)
+        await deleting?.value
+        XCTAssertEqual(viewModel.library.binCount, 0)
+    }
+
+    /// Restore in the bin's detail view restores the photo on screen, then shows the next one.
+    func testRestoreInTheDetailViewRestoresThePhotoOnScreen() {
+        let a = insertPhoto(name: "a", isInBin: true, creationDate: date(2000))
+        let b = insertPhoto(name: "b", isInBin: true, creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.library.applyFilter(.bin)
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: a)
+
+        viewModel.restoreSelectionOrCurrent()
+
+        XCTAssertFalse(a.isInBin)
+        XCTAssertTrue(b.isInBin, "the rest of the selection stays in the bin")
+        XCTAssertEqual(viewModel.selectedDetailPhoto?.id, b.id)
+    }
+
+    /// Bug test (REL-1 #1): the detail view's tag editor tagged the grid's (hidden) multi-selection. It tags the photo
+    /// on screen; from the grid's context menu it still tags the selection.
+    func testTheDetailViewsTagEditorTagsOnlyThePhotoOnScreen() throws {
+        let a = insertPhoto(name: "a", creationDate: date(2000))
+        let b = insertPhoto(name: "b", creationDate: date(1000))
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+        viewModel.openDetail(for: a)
+        viewModel.navigateDetail(direction: 1)
+
+        XCTAssertFalse(viewModel.tagEditorEditsSelection)
+        viewModel.addTagFromEditor(name: "x", category: "c", photo: b)
+        XCTAssertEqual(b.tags.map(\.name), ["x"])
+        XCTAssertTrue(a.tags.isEmpty, "not the rest of the selection")
+        let x = try XCTUnwrap(b.tags.first)
+        viewModel.toggleTagFromEditor(x, photo: b)
+        XCTAssertTrue(b.tags.isEmpty)
+
+        viewModel.closeDetail()
+        viewModel.selection.selectAll()
+        XCTAssertTrue(viewModel.tagEditorEditsSelection)
+        viewModel.toggleTagFromEditor(x, photo: a)
+        XCTAssertEqual(a.tags.map(\.id), [x.id])
+        XCTAssertEqual(b.tags.map(\.id), [x.id], "from the grid: the whole selection")
+    }
+
     // MARK: - In-memory state vs a fresh load
 
     /// A second view model on the same store, created before seeding so its one availability check
@@ -595,7 +846,7 @@ final class ViewModelTests: XCTestCase {
 
         viewModel.library.applyFilter(.rawOnly)
         viewModel.selection.selectedPhotos = [viewModel.library.photos[0].id]
-        await viewModel.deleteSelected()?.value; check("deleteFileTypeOnly", #line)
+        await deleteConfirmingFileTypeDelete(); check("deleteFileTypeOnly", #line)
     }
 
     /// Random sequences of every interaction, checked against a fresh load after each step.

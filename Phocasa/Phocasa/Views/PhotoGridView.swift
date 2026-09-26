@@ -71,6 +71,15 @@ struct PhotoGridView: View {
             TagEditorView(viewModel: viewModel, photo: viewModel.tagEditorTarget)
                 .frame(width: 300, height: 400)
         }
+        .confirmationDialog(revertTitle, isPresented: Binding(
+            get: { !viewModel.photosToRevert.isEmpty },
+            set: { if !$0 { viewModel.photosToRevert = [] } }
+        ), titleVisibility: .visible) {
+            Button("Revert", role: .destructive) { viewModel.confirmRevertEdits() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their saved JPG and RAW edits are cleared. The files themselves don't change.")
+        }
         .overlay {
             if viewModel.library.photos.isEmpty && !viewModel.library.isScanning {
                 if let failure = viewModel.library.libraryReadFailure {
@@ -117,6 +126,12 @@ struct PhotoGridView: View {
                 }
             }
         }
+    }
+
+    private var revertTitle: String {
+        let photos = viewModel.photosToRevert
+        if photos.count == 1, let photo = photos.first { return "Revert all edits of \(photo.fileName)?" }
+        return "Revert all edits of \(photos.count.formatted()) photos?"
     }
 
     private func handleSelectionClick(_ photo: PhotoAsset) {
@@ -184,15 +199,17 @@ struct PhotoGridView: View {
 
             Divider()
 
-            if photo.hasAnyEdits {
-                Button("Revert All Edits") {
-                    viewModel.revertEditsForPhoto(photo)
+            if photo.hasAnyEdits || isMulti {
+                Button(isMulti ? "Revert All Edits of Selection…" : "Revert All Edits…") {
+                    viewModel.requestRevertEdits(from: photo)
                 }
 
                 Divider()
             }
 
-            Button("Move to Bin", role: .destructive) {
+            // "Move to Bin", or with the RAW or JPG filter on "Delete RAW Files…" (asked first: files go to the Trash).
+            Button(viewModel.deleteActionTitle(count: isMulti ? viewModel.selection.selectedPhotos.count : 1),
+                   role: .destructive) {
                 if isMulti { viewModel.deleteSelected() }
                 else { viewModel.deletePhoto(photo) }
             }

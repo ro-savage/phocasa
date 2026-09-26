@@ -284,6 +284,22 @@ final class FileTrasherTests: LibraryTestCase {
         XCTAssertEqual(library.allPhotos.map(\.id), [photo.id])
     }
 
+    /// The pair's `.xmp` is the RAW's sidecar, and goes with it, unless the JPG keeps its own rating and keywords there
+    /// (a JPG that can't take them): then it stays with the JPG (REL-1 #5).
+    func testFileTypeDeleteOfTheRAWKeepsASidecarTheJPGsValuesAreIn() async throws {
+        let photo = try insertPhoto("pair", raw: true)
+        let jpg = URL(fileURLWithPath: try XCTUnwrap(photo.jpgPath))
+        XCTAssertEqual(MetadataService.shared.updateSidecar(
+            of: jpg, MetadataService.SidecarUpdate(rating: 3, keywords: ["k"], overridesEmbedded: true)), .written)
+        library.loadExistingData()
+        useTestTrash()
+
+        await library.deleteFileType(of: [photo], raw: true, jpg: false)
+
+        XCTAssertEqual(log.names, ["pair.arw"])
+        XCTAssertEqual(try filesLeft(), ["pair.jpg", "pair.xmp"])
+    }
+
     func testFileTypeDeleteOfTheJPGKeepsTheRAW() async throws {
         let photo = try insertPhoto("pair", raw: true)
         library.loadExistingData()

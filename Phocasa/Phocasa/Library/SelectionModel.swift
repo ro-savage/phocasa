@@ -91,40 +91,47 @@ final class SelectionModel {
 
     /// Moves the selection one photo (left/right) or one row of `columns` (up/down); with `extendSelection`, selects
     /// everything in between too.
+    ///
+    /// An anchor the grid no longer shows (rated or tagged out of the filter, moved to the bin) is where it was:
+    /// between the photos either side of its place (`LibraryStore.gridPlace(of:)`), so the arrows move on from there
+    /// rather than jumping to the first photo. Without an anchor, or with one that is gone, they select the first photo.
     func navigateGrid(direction: GridDirection, extendSelection: Bool, columns: Int) {
         let ids = library.shownIDs
         guard !ids.isEmpty else { return }
 
-        let currentIndex: Int
-        if let lastId = lastSelectedId,
-           let idx = library.index(of: lastId) {
-            currentIndex = idx
-        } else {
+        guard let lastId = lastSelectedId, let place = library.gridPlace(of: lastId) else {
             let id = ids[0]
             selectedPhotos = [id]
             lastSelectedId = id
             return
         }
-
+        // An anchor that left the grid sits between `place.index - 1` and `place.index`: stepping forward lands on the
+        // photo after it, back on the one before it, and a row down on the photo that was below it.
+        let currentIndex = place.index
+        let gone = place.isShown ? 0 : 1
         let targetIndex: Int
         switch direction {
         case .left:
             targetIndex = max(0, currentIndex - 1)
         case .right:
-            targetIndex = min(ids.count - 1, currentIndex + 1)
+            targetIndex = min(ids.count - 1, currentIndex + 1 - gone)
         case .up:
             targetIndex = max(0, currentIndex - columns)
         case .down:
-            targetIndex = min(ids.count - 1, currentIndex + columns)
+            targetIndex = min(ids.count - 1, currentIndex + columns - gone)
         }
 
-        guard targetIndex != currentIndex else { return }
+        guard targetIndex != currentIndex || !place.isShown else { return }
 
         let targetID = ids[targetIndex]
 
         if extendSelection {
-            let rangeStart = min(currentIndex, targetIndex)
-            let rangeEnd = max(currentIndex, targetIndex)
+            // From the anchor, or from the first photo on the way when the anchor is gone.
+            let forward = direction == .right || direction == .down
+            let from = place.isShown ? currentIndex
+                : forward ? min(ids.count - 1, currentIndex) : max(0, currentIndex - 1)
+            let rangeStart = min(from, targetIndex)
+            let rangeEnd = max(from, targetIndex)
             selectedPhotos.formUnion(ids[rangeStart...rangeEnd])
         } else {
             selectedPhotos = [targetID]

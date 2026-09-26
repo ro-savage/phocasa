@@ -93,6 +93,12 @@ final class EditSessionTests: XCTestCase {
         let viewModel = PhotoLibraryViewModel()
         viewModel.setModelContext(context)
         viewModels.append(viewModel)
+        // Exports that replace a file put a copy of the original in the Trash: here, a temp folder.
+        let trash = dir.appendingPathComponent("trash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        viewModel.library.fileTrasher = FileTrasher { url in
+            try FileManager.default.moveItem(at: url, to: trash.appendingPathComponent(UUID().uuidString))
+        }
         return viewModel
     }
 
@@ -278,6 +284,55 @@ final class EditSessionTests: XCTestCase {
         viewModel.applyPreset(viewModel.editPresets.first!)
 
         XCTAssertEqual(session.parameters.exposure, 1.0)
+    }
+
+    /// Bug test (REL-1 #6): presets stored the crop, rotation and flips, so "Apply Preset" on 200 photos cropped them
+    /// all. A preset is the look only: saving drops the transform, and applying (an old preset too) keeps each photo's
+    /// own.
+    func testPresetsKeepOnlyTheLook() throws {
+        let (viewModel, session) = try makeEditingViewModel()
+        let crop = NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)
+        session.parameters.exposure = 1
+        session.parameters.cropRect = crop
+        session.parameters.rotation = 10
+        session.parameters.flipHorizontal = true
+        viewModel.presetNameInput = "Look"
+        viewModel.savePreset()
+        let saved = try XCTUnwrap(viewModel.editPresets.first).parameters
+        XCTAssertEqual(saved.exposure, 1)
+        XCTAssertNil(saved.cropRect)
+        XCTAssertEqual(saved.rotation, 0)
+        XCTAssertFalse(saved.flipHorizontal)
+
+        // An old preset that still has a transform.
+        var old = exposure(-0.5)
+        old.cropRect = NormalizedRect(x: 0, y: 0, width: 0.2, height: 0.2)
+        old.rotation = -30
+        old.flipVertical = true
+        let oldPreset = EditPreset(name: "Old", parameters: old)
+        context.insert(oldPreset)
+
+        viewModel.applyPreset(oldPreset)
+        XCTAssertEqual(session.parameters.exposure, -0.5)
+        XCTAssertEqual(session.parameters.cropRect, crop, "the session keeps its own crop")
+        XCTAssertEqual(session.parameters.rotation, 10)
+        XCTAssertTrue(session.parameters.flipHorizontal)
+        XCTAssertFalse(session.parameters.flipVertical)
+        viewModel.stopEditing(save: false)
+
+        let cropped = try insertPhoto(jpg: dir.appendingPathComponent("cropped.jpg"))
+        var own = exposure(2)
+        own.cropRect = crop
+        cropped.jpgEditParameters = own
+        let plain = try insertPhoto(jpg: dir.appendingPathComponent("plain.jpg"))
+        viewModel.loadExistingData()
+        viewModel.selection.selectAll()
+        viewModel.applyPresetToSelection(oldPreset)
+        XCTAssertEqual(cropped.jpgEditParameters?.exposure, -0.5)
+        XCTAssertEqual(cropped.jpgEditParameters?.cropRect, crop, "each photo keeps its own crop")
+        XCTAssertNil(plain.jpgEditParameters?.cropRect, "and gets none from the preset")
+        XCTAssertEqual(plain.jpgEditParameters?.rotation, 0)
+        XCTAssertEqual(plain.jpgEditParameters?.flipVertical, false)
     }
 
     func testApplyPresetToSelectionWritesRAWEditsThroughTheWriter() async throws {
@@ -1004,10 +1059,11 @@ final class EditSessionTests: XCTestCase {
         XCTAssertLessThanOrEqual(preview.size.width, 1600)
         _ = try await eventually(10) { session.fullImage }
 
-        viewModel.exportRAWToJPG(replaceExisting: false)
-        _ = try await eventually(20, "the export becomes the photo's JPG") { photo.jpgPath }
-        XCTAssertEqual(photo.jpgPath, export.path)
-        XCTAssertEqual(viewModel.library.jpgCount, 1, "photosDidChange: the library counts the new JPG")
+        viewModel.exportToNewFile()
+        _ = try await eventually(20, "the export is a photo of its own") { viewModel.exportNotice }
+        XCTAssertNil(photo.jpgPath, "the RAW photo doesn't change")
+        XCTAssertEqual(viewModel.library.allPhotos.compactMap(\.jpgPath), [export.path])
+        XCTAssertEqual(viewModel.library.jpgCount, 1, "the library counts the new photo")
 
         viewModel.stopEditing(save: true)
         XCTAssertTrue(photo.hasRawEdits)

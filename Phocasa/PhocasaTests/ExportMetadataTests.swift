@@ -52,11 +52,37 @@ final class ExportMetadataTests: XCTestCase {
 
     private static let keywords = ["people:ann", "beach"]
 
+    /// Where replaced originals go: a temp folder, never the user's Trash.
+    private var trashDir: URL { dir.appendingPathComponent(".test-trash", isDirectory: true) }
+
     private func makeViewModel() -> PhotoLibraryViewModel {
         let viewModel = PhotoLibraryViewModel()
         viewModel.setModelContext(context)
         viewModels.append(viewModel)
+        let trash = trashDir
+        try? FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        viewModel.library.fileTrasher = FileTrasher { url in
+            try FileManager.default.moveItem(
+                at: url, to: trash.appendingPathComponent("\(UUID().uuidString)-\(url.lastPathComponent)"))
+        }
         return viewModel
+    }
+
+    /// The files the temp trash received, by the name they had.
+    private func trashed() throws -> [(name: String, data: Data)] {
+        try FileManager.default.contentsOfDirectory(at: trashDir, includingPropertiesForKeys: nil).map {
+            (String($0.lastPathComponent.dropFirst(37)), try Data(contentsOf: $0))
+        }
+    }
+
+    /// Saves the session's edit as a new file and waits for it (and its metadata writes); returns its URL.
+    private func exportToNewFile(_ viewModel: PhotoLibraryViewModel) async throws -> URL {
+        viewModel.exportNotice = nil
+        viewModel.exportToNewFile()
+        let notice = try await eventually(20, "the export finishes") { viewModel.exportNotice ?? viewModel.exportFailure }
+        await MetadataWriter.shared.flush()
+        XCTAssertNil(viewModel.exportFailure)
+        return dir.appendingPathComponent(String(notice.dropFirst("Saved ".count)))
     }
 
     /// A photo rated 4 and tagged with `keywords`, saved.
@@ -178,6 +204,9 @@ final class ExportMetadataTests: XCTestCase {
                                  rating: 4, keywords: Self.keywords, readBack: readBack(url))
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.xmpSidecarURL.path),
                        "rating and keywords are in the file itself")
+        let original = try trashed()
+        XCTAssertEqual(original.map(\.name), ["cam.jpg"], "a copy of the original went to the Trash first (REL-1 #3)")
+        XCTAssertEqual(original.first?.data, rich.data)
     }
 
     func testReplacingTheExistingJPGKeepsTheCameraJPGsMetadata() async throws {
@@ -187,42 +216,83 @@ final class ExportMetadataTests: XCTestCase {
         let raw = try writeFakeRAW("DSC0001.tif")
         let viewModel = makeViewModel()
         let photo = try insertPhoto(jpg: jpg, raw: raw)
+        var jpgEdit = EditParameters()
+        jpgEdit.exposure = -1
+        photo.jpgEditParameters = jpgEdit
+        try context.save()
         try await startEditing(viewModel, photo, isRAW: true)
+        let session = try XCTUnwrap(viewModel.editSession)
+        session.presentExportOptions()
+        XCTAssertEqual(session.exportOptions.replaceableCameraJPG, "DSC0001.jpg", "its bytes are a JPEG")
+        // Cancelled at the second step: nothing changes.
+        session.pendingExportConfirmation = .replaceCameraJPG
+        session.pendingExportConfirmation = nil
+        XCTAssertEqual(photo.jpgEditParameters, jpgEdit)
         let version = viewModel.editedFilesVersion
 
-        viewModel.exportRAWToJPG(replaceExisting: true)
+        viewModel.exportReplacingCameraJPG()
 
         try await waitForExport(viewModel, from: version)
         XCTAssertEqual(photo.jpgPath, jpg.path)
+        XCTAssertNil(photo.jpgEditParametersData, "the JPG edit was for the pixels the RAW render replaced")
+        let stored = try ModelContext(container).fetch(FetchDescriptor<PhotoAsset>()).first { $0.id == photo.id }
+        XCTAssertNil(stored?.jpgEditParametersData, "and that's saved")
         let output = try Data(contentsOf: jpg)
         KeptMetadata.assertKeeps(original: rich.data, output: output, pixelSize: CGSize(width: 160, height: 240),
                                  rating: 4, keywords: Self.keywords, readBack: readBack(jpg))
         let tiff = KeptMetadata.properties(output)["{TIFF}"] as? [String: Any]
         XCTAssertEqual(tiff?["Make"] as? String, "TestCam", "the metadata is the JPG's, not the RAW's")
+        XCTAssertEqual(try trashed().map(\.data), [rich.data], "the camera JPG went to the Trash first")
     }
 
+    /// Bug test (REL-1 #4): "Create new file" made `<stem>-raw-edit.jpg` the photo's JPG (its thumbnail, JPG edit and
+    /// comparison all switched to it, and the next rescan flipped it back and added the export as a photo anyway), and
+    /// a second export overwrote the first. The photo keeps its files; each export is a photo of its own, under a free
+    /// name, with the photo's rating and tags, and a rescan knows it.
     func testARAWEditAsANewFileCarriesThePairedJPGsMetadata() async throws {
         let rich = try RichJPEG.make()
         let jpg = dir.appendingPathComponent("DSC0002.jpg")
         try rich.data.write(to: jpg)
-        let raw = try writeFakeRAW("DSC0002.tif")
-        let export = dir.appendingPathComponent("DSC0002-raw-edit.jpg")
+        _ = try writeFakeRAW("DSC0002.tif")
+        // The photo's paths as a scan gives them (`/private/var/…`: `dir` is `/var/…`), as in the app.
+        let scanned = await FolderScanner().scan(folderURL: dir)
+        let folder = URL(fileURLWithPath: try XCTUnwrap(scanned.first).folderPath)
         let viewModel = makeViewModel()
-        let photo = try insertPhoto(jpg: jpg, raw: raw)
+        let photo = try insertPhoto(jpg: folder.appendingPathComponent("DSC0002.jpg"),
+                                    raw: folder.appendingPathComponent("DSC0002.tif"))
+        var jpgEdit = EditParameters()
+        jpgEdit.exposure = -1
+        photo.jpgEditParameters = jpgEdit
+        try context.save()
         try await startEditing(viewModel, photo, isRAW: true)
+        defer { XCTAssertEqual(photo.jpgEditParameters, jpgEdit, "a new file leaves the camera JPG's edit alone") }
 
-        // Twice: the second export overwrites the first, and the photo's JPG is then the export itself.
+        var exports: [URL] = []
         for round in 1...2 {
-            let version = viewModel.editedFilesVersion
-            viewModel.exportRAWToJPG(replaceExisting: false)
-            try await waitForExport(viewModel, from: version)
-
-            XCTAssertEqual(photo.jpgPath, export.path, "round \(round)")
+            let export = try await exportToNewFile(viewModel)
+            exports.append(export)
+            XCTAssertEqual(photo.jpgPath, folder.appendingPathComponent("DSC0002.jpg").path,
+                           "the photo keeps its camera JPG (round \(round))")
             KeptMetadata.assertKeeps(original: rich.data, output: try Data(contentsOf: export),
                                      pixelSize: CGSize(width: 160, height: 240), rating: 4, keywords: Self.keywords,
                                      readBack: readBack(export))
             XCTAssertEqual(try Data(contentsOf: jpg), rich.data, "the camera JPG is untouched (round \(round))")
         }
+        XCTAssertEqual(exports.map(\.lastPathComponent), ["DSC0002-raw-edit.jpg", "DSC0002-raw-edit-2.jpg"],
+                       "the second export doesn't overwrite the first")
+
+        let added = viewModel.library.allPhotos.filter { $0.id != photo.id }
+        XCTAssertEqual(Set(added.compactMap(\.jpgPath)), Set(exports.map { folder.appendingPathComponent($0.lastPathComponent).path }))
+        for export in added {
+            XCTAssertNil(export.rawPath)
+            XCTAssertEqual(export.rating, 4)
+            XCTAssertEqual(Set(export.tags.map(\.fullName)), Set(Self.keywords))
+        }
+        XCTAssertEqual(viewModel.library.tagCounts.values.sorted(), [3, 3], "the counts include the new photos")
+        // A rescan finds them known: nothing new, no duplicate.
+        let discovered = await FolderScanner().scan(folderURL: dir)
+        let plan = ScanPlan(stored: StoredPhoto.fetchAllNow(in: container), discovered: discovered)
+        XCTAssertEqual(plan.newPhotos.map(\.fileName).filter { $0.contains("raw-edit") }, [], "a rescan adds no export")
     }
 
     func testARAWOnlyExportCarriesTheRAWsMetadata() async throws {
@@ -231,12 +301,10 @@ final class ExportMetadataTests: XCTestCase {
         let viewModel = makeViewModel()
         let photo = try insertPhoto(raw: raw)
         try await startEditing(viewModel, photo, isRAW: true)
-        let version = viewModel.editedFilesVersion
 
-        viewModel.exportRAWToJPG(replaceExisting: false)
+        let exported = try await exportToNewFile(viewModel); XCTAssertEqual(exported, export)
 
-        try await waitForExport(viewModel, from: version)
-        XCTAssertEqual(photo.jpgPath, export.path)
+        XCTAssertNil(photo.jpgPath, "the RAW-only photo stays RAW-only")
         let before = KeptMetadata.properties(try Data(contentsOf: raw))
         let after = KeptMetadata.properties(try Data(contentsOf: export))
         // What describes the RAW's own pixels and encoding can't carry over (see the metadata audit).
@@ -284,6 +352,123 @@ final class ExportMetadataTests: XCTestCase {
         await MetadataWriter.shared.flush()
         XCTAssertEqual(try Data(contentsOf: url), padded, "the photo is untouched")
         XCTAssertEqual(viewModel.editSession?.parameters.exposure, 0.5, "the edit is still there")
+        XCTAssertTrue(try trashed().isEmpty, "nothing was replaced, so no copy went to the Trash")
+    }
+
+    // MARK: - Only JPEGs are replaced, and a copy of the original goes to the Trash first (REL-1 #3)
+
+    /// A still image in `format` (PNG, TIFF, HEIC) at `url`, whatever its name; nil when this Mac can't write it.
+    private func writeImage(_ format: UTType, to url: URL) throws -> Data? {
+        let jpeg = try RichJPEG.encodedPixels(width: 120, height: 80)
+        let image = try XCTUnwrap(CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, format.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    /// Bug test: "Apply edits permanently" on a HEIC, PNG or TIFF wrote JPEG bytes over it (losing 16-bit pixels,
+    /// alpha, layers, depth). The dialog doesn't offer it for them (a file named `.jpg` isn't trusted either), and the
+    /// service refuses to replace them if asked anyway.
+    func testANonJPEGIsNeverOverwritten() async throws {
+        let files: [(UTType, String)] = [(.png, "shot.png"), (.tiff, "scan.tiff"), (.heic, "phone.heic"), (.png, "fake.jpg")]
+        for (format, name) in files {
+            let url = dir.appendingPathComponent(name)
+            guard let original = try writeImage(format, to: url) else { continue }
+            let viewModel = makeViewModel()
+            let photo = try insertPhoto(jpg: url)
+            try await startEditing(viewModel, photo, isRAW: false)
+            let session = try XCTUnwrap(viewModel.editSession)
+            session.presentExportOptions()
+            XCTAssertFalse(session.exportOptions.canApplyPermanently, "\(name): not offered")
+
+            viewModel.exportJPGPermanent()
+
+            let failure = try await eventually(20, "\(name): refused") { viewModel.exportFailure }
+            XCTAssertTrue(failure.contains("isn't a JPEG"), failure)
+            XCTAssertEqual(try Data(contentsOf: url), original, "\(name) is untouched")
+            XCTAssertTrue(try trashed().isEmpty)
+            viewModel.stopEditing(save: false)
+        }
+    }
+
+    /// Bug test: for a Canon/Sony HEIF+RAW pair, "Replace existing JPG" wrote the RAW's JPEG over the HEIF. A RAW
+    /// session offers no replace unless the other file is a JPEG by its bytes, and the service refuses anyway.
+    func testReplacingAPairsNonJPEGFileIsRefused() async throws {
+        let heif = dir.appendingPathComponent("IMG_0001.jpg") // HEIC bytes under a JPG name
+        guard let original = try writeImage(.heic, to: heif) ?? writeImage(.png, to: heif) else {
+            throw XCTSkip("can't write a HEIC or PNG here")
+        }
+        let raw = try writeFakeRAW("IMG_0001.tif")
+        let viewModel = makeViewModel()
+        let photo = try insertPhoto(jpg: heif, raw: raw)
+        photo.jpgEditParameters = EditParameters(exposure: -1)
+        try context.save()
+        try await startEditing(viewModel, photo, isRAW: true)
+        let session = try XCTUnwrap(viewModel.editSession)
+        session.presentExportOptions()
+        XCTAssertNil(session.exportOptions.replaceableCameraJPG)
+
+        let result = await session.exportReplacingCameraJPG(originalTo: viewModel.library.fileTrasher)
+
+        XCTAssertEqual(result, .notAJPEG)
+        XCTAssertEqual(try Data(contentsOf: heif), original)
+        XCTAssertEqual(photo.jpgEditParameters?.exposure, -1, "a refused replace keeps the saved edit")
+        XCTAssertTrue(try trashed().isEmpty)
+    }
+
+    /// If the copy of the original can't be put in the Trash, the JPEG isn't replaced.
+    func testAJPEGIsNotReplacedWhenItsOriginalCantGoToTheTrash() async throws {
+        let rich = try RichJPEG.make()
+        let url = dir.appendingPathComponent("keep.jpg")
+        try rich.data.write(to: url)
+        let refusing = FileTrasher { _ in throw CocoaError(.featureUnsupported) }
+
+        let result = await ImageEditingService.shared.exportStandardToJPEG(
+            sourceURL: url, parameters: EditParameters(), to: .replacing(url, originalTo: refusing))
+
+        XCTAssertEqual(result, .originalNotTrashed)
+        XCTAssertEqual(try Data(contentsOf: url), rich.data)
+        let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        XCTAssertFalse(left.contains { $0.hasPrefix(".phocasa-original") }, "the copy is cleaned up: \(left)")
+    }
+
+    /// A new file never overwrites one that is there.
+    func testANewFileExportNeverOverwrites() async throws {
+        let rich = try RichJPEG.make()
+        let source = dir.appendingPathComponent("src.jpg")
+        try rich.data.write(to: source)
+        let taken = dir.appendingPathComponent("taken.jpg")
+        try Data("someone's file".utf8).write(to: taken)
+
+        let result = await ImageEditingService.shared.exportStandardToJPEG(
+            sourceURL: source, parameters: EditParameters(), to: .newFile(taken))
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(try Data(contentsOf: taken), Data("someone's file".utf8))
+    }
+
+    /// New files take the first free name: not one a file in the folder has with any extension or case, nor one a
+    /// photo of the library has (its file may be missing).
+    func testNewFilesTakeAFreeName() async throws {
+        XCTAssertEqual(EditSession.freeExportStem("A", suffix: "edit") { _ in false }, "A-edit")
+        XCTAssertEqual(EditSession.freeExportStem("A", suffix: "edit") { ["A-edit", "A-edit-2"].contains($0) }, "A-edit-3")
+
+        let rich = try RichJPEG.make()
+        let jpg = dir.appendingPathComponent("P1.jpg")
+        try rich.data.write(to: jpg)
+        try Data().write(to: dir.appendingPathComponent("P1-edit.JPEG"))
+        let missing = PhotoAsset(fileName: "P1-edit-2", jpgPath: dir.appendingPathComponent("P1-edit-2.jpg").path,
+                                 folderPath: dir.path)
+        context.insert(missing)
+        try context.save()
+        let viewModel = makeViewModel()
+        let photo = try insertPhoto(jpg: jpg)
+        try await startEditing(viewModel, photo, isRAW: false)
+
+        let exported = try await exportToNewFile(viewModel); XCTAssertEqual(exported.lastPathComponent, "P1-edit-3.jpg")
     }
 
     /// A camera JPG whose metadata can't be carried over doesn't stop a new `-raw-edit` file: that takes the RAW's.
@@ -296,11 +481,9 @@ final class ExportMetadataTests: XCTestCase {
         let viewModel = makeViewModel()
         let photo = try insertPhoto(jpg: jpg, raw: raw)
         try await startEditing(viewModel, photo, isRAW: true)
-        let version = viewModel.editedFilesVersion
 
-        viewModel.exportRAWToJPG(replaceExisting: false)
+        let exported = try await exportToNewFile(viewModel); XCTAssertEqual(exported, export)
 
-        try await waitForExport(viewModel, from: version)
         let tiff = KeptMetadata.properties(try Data(contentsOf: export))["{TIFF}"] as? [String: Any]
         XCTAssertEqual(tiff?["Make"] as? String, "RawCam")
         XCTAssertEqual(readBack(export).captureDate, readBack(raw).captureDate)
@@ -354,18 +537,14 @@ final class ExportMetadataTests: XCTestCase {
             let viewModel = makeViewModel()
             let photo = try insertPhoto(jpg: jpg, raw: raw)
             try await startEditing(viewModel, photo, isRAW: true)
-            var version = viewModel.editedFilesVersion
-            viewModel.exportRAWToJPG(replaceExisting: false)
-            try await waitForExport(viewModel, from: version)
+            let exported = try await exportToNewFile(viewModel); XCTAssertEqual(exported, export)
             KeptMetadata.assertKeeps(original: cameraJPG, output: try Data(contentsOf: export), pixelSize: rawSize,
                                      rating: 4, keywords: Self.keywords, readBack: readBack(export))
             XCTAssertEqual(try Data(contentsOf: jpg), cameraJPG, "\(stem): the camera JPG is untouched")
 
             // Replace the camera JPG: its own metadata, read before it's replaced.
-            photo.jpgPath = jpg.path
-            try context.save()
-            version = viewModel.editedFilesVersion
-            viewModel.exportRAWToJPG(replaceExisting: true)
+            var version = viewModel.editedFilesVersion
+            viewModel.exportReplacingCameraJPG()
             try await waitForExport(viewModel, from: version)
             KeptMetadata.assertKeeps(original: cameraJPG, output: try Data(contentsOf: jpg), pixelSize: rawSize,
                                      rating: 4, keywords: Self.keywords, readBack: readBack(jpg))
@@ -396,9 +575,7 @@ final class ExportMetadataTests: XCTestCase {
             let viewModel = makeViewModel()
             let photo = try insertPhoto(raw: raw)
             try await startEditing(viewModel, photo, isRAW: true)
-            let version = viewModel.editedFilesVersion
-            viewModel.exportRAWToJPG(replaceExisting: false)
-            try await waitForExport(viewModel, from: version)
+            let exported = try await exportToNewFile(viewModel); XCTAssertEqual(exported, export)
             viewModel.stopEditing(save: false)
 
             // By URL: ImageIO needs the file name to tell a camera RAW from its bytes.

@@ -31,11 +31,13 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
                             .foregroundStyle(.white.opacity(0.7))
                     }
 
-                    if let index = viewModel.library.index(of: photo.id) {
-                        Text("\(index + 1) / \(viewModel.library.photos.count)")
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
+                    // A photo rated, tagged or binned out of the grid's filter shows no position of its own; the
+                    // arrows move on from where it was.
+                    let place = viewModel.library.gridPlace(of: photo)
+                    Text(place.isShown ? "\(place.index + 1) / \(viewModel.library.photos.count)"
+                                       : "– / \(viewModel.library.photos.count)")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
 
                     if photo.hasAnyEdits {
                         Text("Edited")
@@ -134,7 +136,8 @@ struct DetailOverlayControls: View, @preconcurrency Equatable {
             HStack(spacing: 4) {
                 Image(systemName: isRAW ? "camera.filters" : "photo.on.rectangle")
                     .font(.caption)
-                Text(isRAW ? "RAW" : "JPG")
+                // The file's kind: a HEIC, PNG or TIFF isn't called a JPG.
+                Text(isRAW ? "RAW" : EditSession.kind(ofStandardFileAt: photo.jpgPath))
                     .font(.caption.weight(.bold))
             }
             .padding(.horizontal, 10)

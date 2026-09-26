@@ -112,8 +112,16 @@ final class LibraryStore {
     /// Test hook: called at the end of a scan, after it has applied its changes to existing rows and inserted
     /// its new ones, just before it sets `lastScanDate` and saves.
     @ObservationIgnored var scanWillSave: ((ModelContext) -> Void)?
-    /// Where deletes move files to the Trash, off the main actor. Tests put in one that never touches the real Trash.
-    @ObservationIgnored var fileTrasher = FileTrasher.shared
+    /// Where deletes (and exports that replace a file, for a copy of the original) move files to the Trash, off the
+    /// main actor. Tests put in one that never touches the real Trash.
+    @ObservationIgnored var fileTrasher = LibraryStore.defaultFileTrasher
+
+    /// `FileTrasher.shared`, except in the test host (its in-memory store), where it trashes nothing: a test that
+    /// forgets to put in its own trasher can't reach the user's Trash. (Such a test's files stay where they are, and
+    /// an export that must trash a copy of the original first is refused.)
+    static let defaultFileTrasher: FileTrasher = LibraryLocation.current.store == .inMemory
+        ? FileTrasher { _ in throw CocoaError(.featureUnsupported) }
+        : .shared
     /// Tells a library folder on a drive that isn't connected from one that's gone. Tests pass a temp "Volumes" folder.
     @ObservationIgnored var volumes = VolumeCheck()
     /// Every file of the deletes still running, and how many are in the Trash already.
@@ -154,6 +162,23 @@ final class LibraryStore {
     func index(of id: UUID) -> Int? {
         access(keyPath: \.photos) // the result changes whenever `photos` does
         return photoIndex()[id]
+    }
+
+    /// Where `photo` is in the grid: its position when the grid shows it, else where it would be, between the photo
+    /// before it (`index - 1`) and the one after it (`index`). A photo rated, tagged or binned out of the grid keeps its
+    /// place in the order (`LibrarySort`), so the detail view and the arrow keys can move on from it. O(log n) model
+    /// reads when the grid doesn't show it.
+    func gridPlace(of photo: PhotoAsset) -> (index: Int, isShown: Bool) {
+        if let index = index(of: photo.id) { return (index, true) }
+        return (sort.insertionIndex(for: photo, in: photos), false)
+    }
+
+    /// `gridPlace(of:)` for the photo with `id`; nil when it isn't in the library or the bin (deleted, or its files
+    /// went missing).
+    func gridPlace(of id: UUID) -> (index: Int, isShown: Bool)? {
+        if let index = index(of: id) { return (index, true) }
+        guard let position = position(of: id, useIndex: false) else { return nil }
+        return gridPlace(of: position.inBin ? binPhotos[position.index] : allPhotos[position.index])
     }
 
     /// The ids of `photos`, in grid order, without reading the models.

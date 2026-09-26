@@ -63,7 +63,8 @@ Phocasa/
 ├── Phocasa.xcodeproj/              — objectVersion 77, synchronized folders (see Build Settings)
 ├── Phocasa/
 │   ├── PhocasaApp.swift            — @main entry, SwiftData container (in-memory in the test host), menu commands
-│   ├── AppDelegate.swift           — quit waits for pending metadata writes (at most 5 s, then journals the rest);
+│   ├── AppDelegate.swift           — quit saves open edit sessions (`PhotoLibraryViewModel.saveEditsBeforeQuit`),
+│   │                                 then waits for pending metadata writes (at most 5 s, then journals the rest);
 │   │                                 launch replays the journal
 │   ├── Models/                     — SwiftData models (PhotoAsset, Tag, PhotoLibrary, EditPreset)
 │   │                                 + EditParameters struct, NormalizedRect struct; StoreLocation (where the
@@ -198,6 +199,12 @@ Tools/
 - **Deletes change only what reached the Trash:** `FileTrasher` reports each file (trashed, already gone, volume not
   mounted, failed with a reason). A photo whose file couldn't be moved, or whose drive isn't connected, stays (in the
   bin, less the files that went); `deleteProblem` says how many and why (an alert).
+- **The detail view acts on the photo on screen**, never on the hidden grid's selection: ⌫ and the toolbar
+  (`deleteSelectionOrCurrent`, `restoreSelectionOrCurrent`), ratings, the tag popover (`tagEditorEditsSelection`); then
+  it moves to the next photo (`moveDetailOff`). ⌘A and Return do nothing there. A photo that left the grid (rated out
+  of the filter) keeps its place (`LibraryStore.gridPlace(of:)`), which ←/→ and the grid's arrows move on from.
+- **Deletes that trash files ask first:** with the RAW or JPG filter on, a delete takes that file off each pair
+  (`FileTypeDelete`, confirmed; a RAW's `.xmp` goes with it unless the JPG's values live there, `OverridesEmbedded`).
 - **Scans:** run one at a time (`scanFolder` queues requests; the latest folder wins). The walk, the read of the stored
   rows, the diff and the metadata reads run off the main actor; the main actor only writes changed fields and inserts
   photos, so an unchanged rescan writes nothing and changes nothing in memory. One that adds k photos costs
@@ -359,10 +366,21 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
 - Sidecars are updated in place, never rewritten wholesale: only Phocasa's fields change, and everything other apps
   wrote is kept (an update that would lose or change another value is refused). A sidecar that can't be parsed safely
   is skipped, left byte-identical.
-- **Exports and baked edits** ("Apply edits permanently", "Replace existing JPG", "Create new file (-raw-edit)") carry
+- **Exports and baked edits** ("Apply Edits to x.jpg…", "Replace x.jpg…", "Save as New JPG") carry
   the original metadata into the new JPEG (`ExportMetadata`), then get Phocasa's rating and keywords like any rating
   write. The source: the JPG being overwritten, read before it's replaced; for a new `-raw-edit` file, the pair's
-  camera JPG, else the RAW. From a JPEG every APPn and COM segment is carried over byte for byte, in order, around the
+  camera JPG, else the RAW; for a new `-edit` file, the photo's own file.
+- **What an export may overwrite:** only a JPEG by its bytes (`ImageEditingService.isJPEGFile`; a HEIC, PNG or TIFF,
+  whatever its name, is never replaced: `ExportDestination.replacing` refuses with `.notAJPEG`), and only once a copy
+  of it is in the Trash (put there with the library's `fileTrasher`; if that fails, `.originalNotTrashed` and nothing
+  is written). The dialog offers "Replace…" / "Apply Edits…" only for such files, and asks again. Replacing the camera
+  JPG with the RAW render clears the photo's saved JPG edit (made for the old pixels). "Save as New JPG"
+  (`.newFile`) never overwrites: it takes the first free `<stem>-raw-edit[-n].jpg` (`-edit` from a non-RAW file) that
+  no file in the folder and no library row has, leaves the photo's own paths alone, and adds the export to the library
+  as a photo of its own (`LibraryStore.addExportedPhoto`, the key a scan would give it) with the photo's rating, tags
+  and capture date.
+- **Presets are a look only** (`EditParameters.look`): no crop, rotation or flips when saved, and applying one keeps
+  each photo's own transform (`applyingLook(of:)`), old presets included. From a JPEG every APPn and COM segment is carried over byte for byte, in order, around the
   new image data; from a RAW, ImageIO's metadata tree (it has no MakerNote to write). **The exceptions**, which
   describe the old pixels and change to match the new ones: orientation (1), pixel dimensions, `ColorSpace` and an
   Adobe RGB `InteropIndex`, the same properties in the XMP (plus `photoshop:ICCProfile`, `xmp:Thumbnails` and the
@@ -411,8 +429,9 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   `~/Library/Caches/com.phocasa.app`. `StoreLocationTests` pass a temp folder in place of Application Support.
 - The test host stays in memory even with `PHOCASA_DEVELOPMENT_LIBRARY=1` (the scheme's Test action shares the Run
   action's environment). Development-library tests pass temp folders to `LibraryLocation.resolve`.
-- Tests use temp directories and in-memory or temp-file stores. Tests that delete files give `LibraryStore` a
-  `FileTrasher` that moves them into a temp folder, never the user's Trash.
+- Tests use temp directories and in-memory or temp-file stores. Tests that delete files, or export over one (a copy
+  of the original goes to the Trash), give `LibraryStore` a `FileTrasher` that moves them into a temp folder, never
+  the user's Trash. In the test host the default (`LibraryStore.defaultFileTrasher`) trashes nothing.
 - A drive that isn't connected is a temp folder passed as `VolumeCheck(volumesDirectory:)` (to `LibraryStore.volumes`,
   `FileTrasher`, `MetadataWriter`) with the "drive" folder removed. A store that can't be read is a temp store whose
   files are moved aside under an open container (`ScanTests.breakStore`); SQLite won't reopen them for a new container

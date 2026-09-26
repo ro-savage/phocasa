@@ -67,13 +67,19 @@ final class MetadataWriteBenchmarks: XCTestCase {
 
         // Exports, native, on the full lane.
         let editing = ImageEditingService()
+        // A bake puts a copy of the original in the Trash first: here, a temp folder, never the user's Trash.
+        let trashDir = dir.appendingPathComponent("trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        let trash = FileTrasher { url in
+            try FileManager.default.moveItem(at: url, to: trashDir.appendingPathComponent(UUID().uuidString))
+        }
         var params = EditParameters()
         params.exposure = 0.5
         var rawExports: [Double] = [], bakes: [Double] = []
         for i in 0..<4 {
             let out = dir.appendingPathComponent("raw-edit-\(i).jpg")
             var start = ContinuousClock.now
-            let rawOK = await editing.exportRAWToJPEG(rawURL: raw, parameters: params, outputURL: out, metadataSources: [jpg, raw]) == .written // NEW-API
+            let rawOK = await editing.exportRAWToJPEG(rawURL: raw, parameters: params, to: .newFile(out), metadataSources: [jpg, raw]) == .written // NEW-API
             // BASE-API let rawOK = await editing.exportRAWToJPEG(rawURL: raw, parameters: params, outputURL: out)
             var d = ContinuousClock.now - start
             XCTAssertTrue(rawOK)
@@ -83,7 +89,7 @@ final class MetadataWriteBenchmarks: XCTestCase {
             try FileManager.default.copyItem(at: sourceJPG, to: bake)
             try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: bake.path)
             start = ContinuousClock.now
-            let bakeOK = await editing.exportStandardToJPEG(sourceURL: bake, parameters: params, outputURL: bake) == .written // NEW-API
+            let bakeOK = await editing.exportStandardToJPEG(sourceURL: bake, parameters: params, to: .replacing(bake, originalTo: trash)) == .written // NEW-API (the original goes to a temp trash)
             // BASE-API let bakeOK = await editing.exportStandardToJPEG(sourceURL: bake, parameters: params, outputURL: bake)
             d = ContinuousClock.now - start
             XCTAssertTrue(bakeOK)

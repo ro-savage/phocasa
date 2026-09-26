@@ -108,7 +108,25 @@ struct PhotoDetailView: View {
         let isCropping = session?.isCropping == true
         let showExportOptions = session?.showExportOptions == true
         ZStack {
+            // The second step of a replacing export (on its own view: this body already has an alert).
             Color.black.ignoresSafeArea()
+                .alert(exportConfirmationTitle(session), isPresented: Binding(
+                    get: { session?.pendingExportConfirmation != nil },
+                    set: { if !$0 { viewModel.editSession?.pendingExportConfirmation = nil } }
+                )) {
+                    if let confirmation = session?.pendingExportConfirmation {
+                        Button(confirmation == .replaceCameraJPG ? "Replace JPG" : "Apply Edits", role: .destructive) {
+                            if confirmation == .replaceCameraJPG {
+                                viewModel.exportReplacingCameraJPG()
+                            } else {
+                                viewModel.exportJPGPermanent()
+                            }
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(exportConfirmationMessage(session))
+                }
 
             if let session, session.showJPGComparison && session.isRAW {
                 ComparisonView(left: ("JPG", session.jpgComparisonImage), right: ("RAW EDIT", comparisonEdited))
@@ -151,32 +169,39 @@ struct PhotoDetailView: View {
             TagEditorView(viewModel: viewModel, photo: photo)
                 .frame(width: 300, height: 400)
         }
-        .confirmationDialog("Export RAW Edit", isPresented: Binding(
+        // The choices depend on the session and the files' bytes (`EditSession.presentExportOptions()`); replacing a
+        // file asks again, with what it does (`EditSession.pendingExportConfirmation`, the alert above).
+        .confirmationDialog("Export \(session?.fileKind ?? "") Edit", isPresented: Binding(
             get: { showExportOptions },
             set: { viewModel.editSession?.showExportOptions = $0 }
-        )) {
-            if photo.jpgPath != nil {
-                Button("Replace existing JPG") {
-                    viewModel.exportRAWToJPG(replaceExisting: true)
+        ), titleVisibility: .visible) {
+            if let session {
+                Button("Save as New JPG") {
+                    viewModel.exportToNewFile()
                 }
-            }
-            Button("Create new file (-raw-edit)") {
-                viewModel.exportRAWToJPG(replaceExisting: false)
-            }
-            if session?.isRAW == false && photo.jpgPath != nil {
-                Button("Apply edits permanently to JPG", role: .destructive) {
-                    viewModel.exportJPGPermanent()
+                if let camera = session.exportOptions.replaceableCameraJPG {
+                    Button("Replace \(camera)…", role: .destructive) {
+                        session.pendingExportConfirmation = .replaceCameraJPG
+                    }
+                }
+                if session.exportOptions.canApplyPermanently {
+                    Button("Apply Edits to \(photo.jpgPath.map { ($0 as NSString).lastPathComponent } ?? "the JPG")…",
+                           role: .destructive) {
+                        session.pendingExportConfirmation = .applyPermanently
+                    }
                 }
             }
             Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(exportMessage(session))
         }
-        .alert("Export", isPresented: Binding(
-            get: { viewModel.exportFailure != nil },
-            set: { if !$0 { viewModel.exportFailure = nil } }
+        .alert(viewModel.exportFailure != nil ? "Export Failed" : (viewModel.exportNotice ?? ""), isPresented: Binding(
+            get: { viewModel.exportFailure != nil || viewModel.exportNotice != nil },
+            set: { if !$0 { viewModel.exportFailure = nil; viewModel.exportNotice = nil } }
         )) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(viewModel.exportFailure ?? "")
+            Text(viewModel.exportFailure ?? "It's in the library next to \(photo.fileName), in the same folder.")
         }
         .onDisappear {
             if viewModel.isEditing {
@@ -204,6 +229,40 @@ struct PhotoDetailView: View {
         }
         .onChange(of: viewModel.savedEditHandoff?.id) {
             adoptSavedEditHandoff()
+        }
+    }
+
+    // MARK: - Export dialogs
+
+    /// What the export dialog's choices do, for its message.
+    private func exportMessage(_ session: EditSession?) -> String {
+        guard let session else { return "" }
+        let newFile = "Save as New JPG adds a JPG with the edit beside the \(session.fileKind) file, as a photo of its "
+            + "own; nothing is overwritten."
+        if session.isRAW {
+            return session.exportOptions.replaceableCameraJPG == nil ? newFile
+                : newFile + " Replace overwrites the camera JPG's pixels with this RAW edit."
+        }
+        if session.exportOptions.canApplyPermanently {
+            return newFile + " Apply Edits overwrites the JPG's pixels with the edited ones."
+        }
+        return newFile + " \(session.fileKind) files aren't changed in place."
+    }
+
+    private func exportConfirmationMessage(_ session: EditSession?) -> String {
+        let kept = "Its pixels are replaced with the edited ones; its metadata is kept"
+        // Replacing the camera JPG clears its saved JPG edit (`EditSession.exportReplacingCameraJPG`).
+        let clearsEdit = session?.pendingExportConfirmation == .replaceCameraJPG && photo.jpgEditParametersData != nil
+        return kept + (clearsEdit ? ", and its saved JPG edit is removed" : "")
+            + ". A copy of the original goes to the Trash first."
+    }
+
+    private func exportConfirmationTitle(_ session: EditSession?) -> String {
+        let name = photo.jpgPath.map { ($0 as NSString).lastPathComponent } ?? "the JPG"
+        switch session?.pendingExportConfirmation {
+        case .replaceCameraJPG: return "Replace \(name) with this RAW edit?"
+        case .applyPermanently: return "Apply the edits to \(name) permanently?"
+        case nil: return ""
         }
     }
 
