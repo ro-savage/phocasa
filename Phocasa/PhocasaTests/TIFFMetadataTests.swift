@@ -352,6 +352,19 @@ final class TIFFMetadataTests: XCTestCase {
         IRBTestData.resources(photoshopHeader + irb)
     }
 
+    /// Where the last well-formed "8BIM" block in 34377's bytes ends.
+    private static func resourcesLength(_ irb: Data) -> Int {
+        let p = [UInt8](irb)
+        var i = 0
+        while i + 12 <= p.count, p[i..<(i + 4)].elementsEqual("8BIM".utf8) {
+            let nameLength = Int(p[i + 6])
+            let j = i + 7 + nameLength + (1 + nameLength) % 2
+            let size = Int(p[j]) << 24 | Int(p[j + 1]) << 16 | Int(p[j + 2]) << 8 | Int(p[j + 3])
+            i = j + 4 + size + size % 2
+        }
+        return i
+    }
+
     /// `data` with IFD0's `tag` renamed to `newTag` (which must sort in the same place), so ImageIO no longer sees it.
     private static func renaming(_ tag: Int, to newTag: Int, in data: Data) -> Data {
         let walker = TIFFTestWalker(data)!
@@ -393,6 +406,18 @@ final class TIFFMetadataTests: XCTestCase {
         for (path, values) in valuesBefore {
             for (tag, value) in values where !(path == "p0" && [700, 33723, 34377].contains(tag)) {
                 XCTAssertEqual(valuesAfter[path]?[tag], value, "\(path) tag \(tag) resolves to the same bytes", file: file, line: line)
+            }
+        }
+        // Nothing moved: every out-of-line value is where it was (only IFD0 itself, with its inline values, may be a
+        // copy).
+        let ifdsBefore = before.ifds(), ifdsAfter = after.ifds()
+        for (path, ifd) in ifdsBefore {
+            if path != "p0" { XCTAssertEqual(ifdsAfter[path], ifd, "IFD \(path) hasn't moved", file: file, line: line) }
+            guard let now = ifdsAfter[path] else { continue }
+            for entry in before.entries(ifd) where !(path == "p0" && [700, 33723, 34377].contains(entry.tag))
+                && before.range(entry).count > 4 {
+                XCTAssertEqual(after.entry(entry.tag, in: now).map(after.range), before.range(entry),
+                               "\(path) tag \(entry.tag)'s value hasn't moved", file: file, line: line)
             }
         }
         let makerNote = after.entry(0x927C, in: after.ifds()["p0/exif"] ?? 0).map { after.range($0) }
@@ -441,6 +466,10 @@ final class TIFFMetadataTests: XCTestCase {
             guard let irbAfter = after.ifd0Value(34377)?.data else { return XCTFail("34377 kept", file: file, line: line) }
             let a = Self.resources(irbBefore), b = Self.resources(irbAfter)
             XCTAssertEqual(b.map(\.id), a.map(\.id), "every Photoshop resource, in order", file: file, line: line)
+            if Self.resourcesLength(irbBefore) == irbBefore.count {
+                XCTAssertEqual(Self.resourcesLength(irbAfter), irbAfter.count,
+                               "nothing after the last resource (exiftool warns about trailing zeros)", file: file, line: line)
+            }
             for resource in a where ![0x0404, 0x0425].contains(resource.id) {
                 XCTAssertEqual(b.first { $0.id == resource.id }?.data, resource.data, "resource \(resource.id)", file: file, line: line)
             }
@@ -556,6 +585,19 @@ final class TIFFMetadataTests: XCTestCase {
                         changeable: [Self.headerOffset] + ranges(original, [33723, 34377]), rating: 5, keywords: keywords)
             XCTAssertEqual(MetadataService.shared.readMetadata(from: url.path).keywords, keywords)
         }
+    }
+
+    func testAppendedDataIsAlignedAfterAnOddLengthFile() throws {
+        // A byte of trailing data another app left after the structure: kept, and what's appended starts aligned.
+        let original = RichTIFF.make(.init(iptcSlack: 1024, photoshopIPTCSlack: 1024)).data + Data([0x7E])
+        XCTAssertEqual(original.count % 2, 1, "fixture: odd length")
+        let output = try XCTUnwrap(Self.written(original, rating: 2, keywords: (1...12).map { "a keyword \($0)" }))
+        let after = TIFFTestWalker(output)!
+        XCTAssertEqual(after.ifd0 % 4, 0, "IFD0 on a 4-byte boundary")
+        XCTAssertEqual(after.ifd0Value(700)!.range.lowerBound % 4, 0, "the packet on a 4-byte boundary")
+        XCTAssertEqual(output[original.count - 1], 0x7E, "the trailing byte is kept")
+        assertKeeps(original: original, output: output, changeable: [Self.headerOffset] + ranges(original, [33723, 34377]),
+                    rating: 2, keywords: (1...12).map { "a keyword \($0)" })
     }
 
     func testAFileWithoutXMPGetsATag700InsertedInSortedOrder() throws {
