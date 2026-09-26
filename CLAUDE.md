@@ -105,9 +105,12 @@ Phocasa/
 │   │                                 MinimapView, DetailOverlayControls, ComparisonView
 │   └── Services/
 │       ├── FolderScanner           — walks a folder, pairs JPG+RAW, reads new photos' metadata concurrently
-│       ├── MetadataService         — stateless, thread-safe metadata reads and writes (JPEG splice, sidecars)
-│       ├── JPEGStructure, ExifPatch, PhotoshopIRB, XMPProperties — JPEG segments, the in-place Exif patch, APP13
-│       │                             resources and IPTC datasets, XMP value comparison (for the two below)
+│       ├── MetadataService         — stateless, thread-safe metadata reads and writes (in-file writes by format,
+│       │                             the shared packet update, sidecars, leaving sidecar mode)
+│       ├── JPEGStructure, MPFIndex, ExifPatch, PhotoshopIRB, XMPProperties, XMPTextEdit — JPEG segments, the MPF
+│       │                             entries' patch, the in-place Exif patch, APP13 resources and IPTC datasets, XMP
+│       │                             value comparison, the XMP text edit and its independent XML reading
+│       ├── PNGMetadata, TIFFMetadata, HEIFMetadata — the XMP (and TIFF IPTC) inside PNG chunks, TIFF IFD0, HEIF items
 │       ├── ExportMetadata          — carries a photo's original metadata into an export's JPEG
 │       ├── CaptureDate             — parses and reads EXIF DateTimeOriginal (subseconds, offset) by hand
 │       ├── MetadataWriter          — serial, coalescing writer every metadata write goes through (re-keys cached
@@ -139,8 +142,9 @@ Tools/
   `LibraryLocation.resolve` decides the store and the cache for `PhocasaApp` and `ImageLoader.shared` together.
 - **JPG+RAW pairing:** Files with the same stem name are combined into one PhotoAsset entry
 - **Dual metadata:** the SwiftData DB is the primary store. Ratings and tags are also written back to the files:
-  XMP (`xmp:Rating`, `dc:subject`) and IPTC keywords inside JPGs, the `.xmp` sidecar for RAW files (and for files
-  that can't take them without losing metadata; see "Metadata"), and both files of a JPG+RAW pair.
+  inside every non-RAW file (JPEG, PNG, TIFF, HEIC/HEIF: XMP `xmp:Rating`, `dc:subject`, and IPTC keywords where the
+  file has IPTC), the `.xmp` sidecar for RAW files (and, as the last resort, for a file that can't take them without
+  losing metadata; see "Metadata"), and both files of a JPG+RAW pair.
 - **Tags stored as `category:name`** in keywords to preserve hierarchy in flat keyword lists (`Tag.fullName` /
   `Tag.parse(keyword:)`)
 - **Folder access:** Uses SwiftUI `.fileImporter` for folder selection, security-scoped bookmarks for persistent access
@@ -266,17 +270,52 @@ If a SwiftUI equivalent doesn't exist, then AppKit is fine — but verify first.
   metadata a file came with: the camera's Exif (including MakerNote and GPS), IPTC and XMP. It only adds to it (new
   XMP/IPTC spliced in) or writes a sidecar. A write that can't keep the original metadata must not happen: the change
   goes to a sidecar instead. Losing original metadata is a major bug.
-- **Rating and keyword writes** (`MetadataService.writeMetadata`, via `MetadataWriter`):
-  - a JPEG gets its own XMP packet with just `xmp:Rating` and `dc:subject` changed (`xmpPacket`; never ImageIO's
-    merged rewrite, which overwrites XMP values that disagree with the Exif) and its IPTC keywords patched into its
-    APP13 (`PhotoshopIRB`: only the 2:25 datasets change, every other resource and dataset stays byte for byte, the
-    digest is updated), both spliced into the original bytes. Everything else, MakerNote and MPF included, is
-    byte-identical. Writes go through a temp file and `replaceItemAt`;
-  - a JPEG the splice can't handle (odd layout, several XMP/APP13 segments, extended XMP, an XMP packet ImageIO can't
-    parse or re-serialise without changing a value, IPTC text of unknown encoding), and every PNG, TIFF and HEIC
-    (whose only writer is ImageIO's lossy rewrite), keeps its bytes: the values go to its `.xmp` sidecar with
-    `phocasa:OverridesEmbedded`, and `readMetadata` then takes that sidecar's rating and keywords as they are (0 and
-    none included), for the file and for a pair's RAW. A file whose sidecar has the flag stays in the sidecar.
+- **Ratings and keywords go inside every non-RAW file, only ever added (user rule, 2026-09-26, task D)**, so other
+  apps can read them; RAW files (DNG included) are never written, their values go to the `.xmp` sidecar beside them.
+  `MetadataService.writeMetadata` (always via `MetadataWriter`) → `writeToImageFile` → `fileWritingRatingAndKeywords`,
+  which picks the format from the file's bytes, not its name. Only Phocasa's fields change: `xmp:Rating`, `dc:subject`
+  and the IPTC keywords (2:25, with the IPTC digest); every other byte of metadata stays. Writes go through a temp file
+  and `replaceItemAt`, restore the file dates, and are skipped when the new bytes equal the old.
+  - **The packet** (`updatedXMPPacket`, shared by every format): none → a new one from ImageIO; else a **text edit**
+    (`XMPTextEdit`: the two values changed where they are, or added in an `rdf:Description` of their own, checked by
+    an independent XML reading, `XMPPacketScan`); else ImageIO's rewrite, accepted only when both ImageIO and that
+    independent reading find every other value (ImageIO's parse and serialise alone silently drop empty values,
+    qualifiers, `rdf:nodeID`, datatypes, literal XML, and rename aliases). A packet that already holds exactly the
+    values is kept byte for byte. Never ImageIO's merged file rewrite, which overwrites XMP that disagrees with the Exif.
+  - **JPEG:** the last standard XMP segment (a new one after the leading JFIF/Exif segments), the APP13's 2:25 datasets
+    and digest (`PhotoshopIRB`, only with exactly one APP13 whose IIM can hold them; else XMP only, as MWG allows when
+    the digest matches or is absent, clearing with an empty `dc:subject` so the IIM can't show through), and the MPF
+    entries' first-image size and secondary-image offsets (`MPFIndex`). Fill bytes, extended XMP, other XMP segments,
+    Exif with its MakerNote, ICC, the image data and the previews stay byte-identical.
+  - **PNG** (`PNGMetadata`): the `iTXt` `XML:com.adobe.xmp` chunk, updated where it is (header and compression kept),
+    or a new one before the first `IDAT` (moved there if it was after, where ImageIO doesn't read it); ImageMagick's
+    raw XMP profile is updated in its own form. Every other chunk and byte stays; every CRC is checked, in and out.
+  - **TIFF** (`TIFFMetadata`): IFD0's tag 700 and its IPTC (33723, 34377), overwritten in place when they fit
+    (padded), else appended with a copy of IFD0 and the header repointed. No existing byte moves; the old IFD0 and
+    values stay in the file unreferenced. Growth over repeated writes is bounded (slack).
+  - **HEIC/HEIF** (`HEIFMetadata`): the primary's XMP item, in place when it fits (padded), else at the end of the file
+    (only its `iloc` entry changes); a file without one gets a new `infe`/`cdsc`/`iloc` entry, with every offset past
+    `meta` shifted. It proves every original item's bytes reachable and identical before returning.
+  - **Checked before any file is replaced:** the format's own self-check, then ImageIO must read the new bytes as a
+    complete image with the new values and every property the original had (`image(_:keepsEverythingIn:reading:_:)`;
+    JPEG: `jpeg(_:readsBack:)`).
+  - **The last resort** (the file keeps its bytes; the values go to its `.xmp` sidecar with
+    `phocasa:OverridesEmbedded`), each named in code and tested: damaged or non-standard structure (standalone markers
+    or fill bytes before the XMP in a JPEG header, bytes between segments, a bad PNG CRC, a TIFF IFD out of bounds or
+    looping, a HEIF box it doesn't know, e.g. image sequences, bursts and motion photos); XMP that isn't well-formed
+    or has a DTD, or that no technique can show kept whole; a JPEG packet over 65,502 bytes; extended XMP holding the
+    rating or keywords; BigTIFF; TIFF IPTC that can't be patched (non-ASCII keywords over text of unknown encoding;
+    JPEG writes the XMP only there). `MetadataJPEGLayoutTests`, `PNGMetadataTests`, `TIFFMetadataTests`,
+    `HEIFMetadataTests` list them all.
+- **Leaving sidecar mode:** builds from `2f2fe1b` put every PNG, TIFF, HEIC and odd JPEG's values in a flagged sidecar.
+  The next write puts them in the file: the sidecar takes the new values first (still flagged), then the file is
+  written, then the flag is cleared, so a reader never sees an older value win; if the sidecar can't be updated,
+  neither is written. A user's sidecar is never deleted: any existing sidecar of a non-RAW file follows each in-file
+  write (same values, no flag).
+- **Reading** (`readMetadata(from:pairedWithRAW:)`): a flagged sidecar wins as it is; a non-RAW file on its own (no RAW
+  beside it) that holds an `xmp:Rating` is read from the file, so a stale sidecar never hides newer values in it; a
+  RAW, a pair's JPG and a file without a rating of its own take a non-zero sidecar rating and non-empty sidecar
+  keywords (a pair's JPG reads the RAW's sidecar first). The scanner says which photos are pairs.
 - Sidecars are updated in place, never rewritten wholesale: only Phocasa's fields change, and everything other apps
   wrote is kept (an update that would lose or change another value is refused). A sidecar that can't be parsed safely
   is skipped, left byte-identical.
