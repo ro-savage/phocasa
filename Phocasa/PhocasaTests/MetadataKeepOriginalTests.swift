@@ -276,29 +276,36 @@ final class MetadataKeepOriginalTests: XCTestCase {
         // (ImageIO calls a cut-short PNG complete; the PNG path walks its output's chunks and CRCs as well.)
     }
 
-    func testOtherFormatsKeepTheirBytesAndGetASidecar() throws {
+    /// Task D: HEIC takes its values in the file too (`HEIFMetadataTests` has the proof), so no format is left in
+    /// sidecar mode (this test used to check that PNG, TIFF and HEIC kept their bytes and got a sidecar).
+    func testAHEICGetsItsValuesInTheFile() throws {
         let image = try XCTUnwrap(CGImageSourceCreateWithData(T.imageIOJPEG() as CFData, nil)
             .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) })
-        // Task D: PNG and TIFF went in-file (testAPNGGetsItsValuesInTheFile, testATIFFGetsItsValuesInTheFile).
-        for (name, type) in [("h.heic", UTType.heic)] {
-            let out = NSMutableData()
-            let destination = try XCTUnwrap(CGImageDestinationCreateWithData(out as CFMutableData, type.identifier as CFString, 1, nil))
-            CGImageDestinationAddImage(destination, image, [
-                kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2024:05:01 10:00:00",
-                                                 kCGImagePropertyExifUserComment: "keep me"],
-                kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Acme"],
-            ] as CFDictionary)
-            XCTAssertTrue(CGImageDestinationFinalize(destination), name)
-            let original = out as Data
-            let url = try write(original, name)
+        let out = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(out as CFMutableData, UTType.heic.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, [
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2024:05:01 10:00:00",
+                                             kCGImagePropertyExifUserComment: "keep me"],
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Acme"],
+        ] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let original = out as Data
+        let url = try write(original, "h.heic")
 
-            service.writeMetadata(rating: 3, keywords: ["k"], toImageAt: url.path)
+        service.writeMetadata(rating: 3, keywords: ["k"], toImageAt: url.path)
 
-            XCTAssertEqual(try Data(contentsOf: url), original, "\(name): ImageIO's rewrite would lose data, so no rewrite")
-            XCTAssertEqual(sidecarValue(url, "xmp:Rating"), "3", name)
-            XCTAssertEqual(service.readMetadata(from: url.path).rating, 3, name)
-            XCTAssertEqual(service.readMetadata(from: url.path).keywords, ["k"], name)
+        let after = try Data(contentsOf: url)
+        XCTAssertNotEqual(after, original, "the values are in the file")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.xmpSidecarURL.path), "no sidecar")
+        let meta = try XCTUnwrap(CGImageSourceCreateWithData(after as CFData, nil).flatMap { CGImageSourceCopyMetadataAtIndex($0, 0, nil) })
+        XCTAssertEqual(CGImageMetadataCopyStringValueWithPath(meta, nil, "xmp:Rating" as CFString) as String?, "3")
+        let before = KeptMetadata.properties(original), now = KeptMetadata.properties(after)
+        for dictionary in ["{Exif}", "{TIFF}"] {
+            let old = before[dictionary] as? [String: Any] ?? [:], new = now[dictionary] as? [String: Any] ?? [:]
+            for (key, value) in old { XCTAssertEqual(new[key].map { "\($0)" }, "\(value)", "\(dictionary).\(key)") }
         }
+        XCTAssertEqual(service.readMetadata(from: url.path).rating, 3)
+        XCTAssertEqual(service.readMetadata(from: url.path).keywords, ["k"])
     }
 
     /// A pair's JPG and RAW share `<stem>.xmp`. Once it holds the JPG's values, it wins for the RAW too, so the two

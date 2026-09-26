@@ -235,6 +235,9 @@ final class MetadataService: Sendable {
         } else if TIFFMetadata.isTIFF(original) {
             // Checks its own output: every original byte outside the parts it may change, and IFD0's other entries.
             written = TIFFMetadata.replacingXMP(in: original, update: packet, keywords: keywords)
+        } else if HEIFMetadata.isHEIF(original) {
+            // Proves its own output: every original item's bytes reachable and identical, every other box kept.
+            written = HEIFMetadata.replacingXMP(in: original, update: packet)
         } else {
             return nil
         }
