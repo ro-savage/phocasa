@@ -68,7 +68,8 @@ enum ExportMetadata {
             encodedICC.forEach { out += $0 }
         }
         for (index, segment) in segments.enumerated() {
-            guard segment.isAPPn || segment.isComment else { continue }   // the old pixels' codec segments
+            // The old pixels' codec segments, and fill bytes and standalone markers, which hold no metadata.
+            guard segment.isAPPn || segment.isComment else { continue }
             // Without an ICC segment of its own, the encoder's goes after the leading APP0/APP1 segments.
             if !placedICC, segment.marker != 0xE0, segment.marker != 0xE1,
                !segments[index...].contains(where: { $0.kind == .icc }) {
@@ -102,7 +103,7 @@ enum ExportMetadata {
                 out += jfifWithoutThumbnail(original[segment.range])
             case .icc:
                 placeICC()
-            case .mpf, .adobe, .jfxx, .arot:
+            case .mpf, .adobe, .jfxx, .arot, .fill, .standalone:
                 break
             case .extendedXMP, .other:
                 out += original[segment.range]

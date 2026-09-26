@@ -180,10 +180,12 @@ final class MetadataJPEGPreservationTests: XCTestCase {
         return (m.rating, m.keywords)
     }
 
-    /// Everything but the XMP and IPTC-IIM segments, which are the ones a metadata write may change.
+    /// Everything but the XMP and IPTC-IIM segments, which are the ones a metadata write may change, and the MPF
+    /// segment, whose MP entries' size and offset fields follow the header's size (checked on their own).
     private func untouchable(_ d: Data) -> (segments: [Segment], tail: Data) {
         let (segments, sos) = Self.header(d)
-        return (segments.filter { !($0.marker == 0xE1 && $0.id.hasPrefix("http://ns.adobe.com/x")) && $0.marker != 0xED },
+        return (segments.filter { !($0.marker == 0xE1 && $0.id.hasPrefix("http://ns.adobe.com/x")) && $0.marker != 0xED
+                                  && !($0.marker == 0xE2 && $0.id == "MPF") },
                 Data(d[sos...]))
     }
 
@@ -260,6 +262,13 @@ final class MetadataJPEGPreservationTests: XCTestCase {
         let moved = try XCTUnwrap(Self.mpfSecondImage(after), "the MPF segment must survive")
         XCTAssertEqual(after[moved], second, "the MP entry must still point at the preview")
         XCTAssertEqual(untouchable(after).segments, untouchable(original).segments)
+        // The new XMP went in before the MPF segment: the preview's offset holds, and only the first image's size
+        // (SOI to EOI, CIPA DC-007 5.2.3.3.2) changes, by the header's growth. Before task D it was left stale.
+        let oldMPF = try XCTUnwrap(MPFTestReader(original)), newMPF = try XCTUnwrap(MPFTestReader(after))
+        XCTAssertEqual(newMPF.segmentWithoutEntryFields(after), oldMPF.segmentWithoutEntryFields(original))
+        XCTAssertEqual(newMPF.entries[0].size, oldMPF.entries[0].size + Self.header(after).sos - Self.header(original).sos)
+        XCTAssertEqual(newMPF.entries[1].offset, oldMPF.entries[1].offset)
+        XCTAssertEqual(newMPF.entries[1].size, oldMPF.entries[1].size)
         XCTAssertEqual(readBack(jpg).rating, 5)
     }
 
@@ -291,28 +300,50 @@ final class MetadataJPEGPreservationTests: XCTestCase {
         XCTAssertEqual(untouchable(spliced).tail, untouchable(original).tail)
     }
 
+    /// What the splice still refuses (post-wave-3 task D): not a JPEG, a truncated header, bytes other than fill
+    /// bytes between segments, a packet over one segment's 65,502 bytes, an APP13 it can't parse, an MPF segment it
+    /// can't patch. An XMP segment after the MPF segment and extended XMP, refused before task D, now splice (their
+    /// own tests are in `MetadataJPEGLayoutTests`).
     func testSpliceRefusesLayoutsItCantHandleSafely() throws {
         let original = Self.cameraStyleJPEG()
         let good = try packet()
 
-        // An XMP segment after the MPF one: replacing it would move the preview the MP offsets point at.
-        let xmpPayload = Data("http://ns.adobe.com/xap/1.0/".utf8) + Data([0]) + Data("""
-            <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
-            <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"/></rdf:RDF></x:xmpmeta>
-            """.utf8)
-        let xmpAfterMPF = Self.withMPF(original, second: Self.imageIOJPEG(width: 16, height: 16), xmpAfterMPF: xmpPayload)
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: xmpAfterMPF, xmp: good, keywords: ["k"]))
-
-        // Not a JPEG, a truncated segment, and an XMP packet too big for one segment.
         XCTAssertNil(MetadataService.spliceJPEGMetadata(original: Data("not a jpeg".utf8), xmp: good, keywords: ["k"]))
         XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original.prefix(30), xmp: good, keywords: ["k"]))
         XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original, xmp: Data(repeating: 0x20, count: 70_000),
                                                         keywords: ["k"]))
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: original, xmp: Data(repeating: 0x20, count: 65_503),
+                                                        keywords: ["k"]), "one byte over XMP Part 3's limit")
+        XCTAssertNotNil(MetadataService.spliceJPEGMetadata(original: original, xmp: Data(repeating: 0x20, count: 65_502),
+                                                           keywords: ["k"]), "the limit itself fits")
 
-        // Extended XMP in the original.
         let (segments, sos) = Self.header(original)
+        let stray = Self.assemble([segments[0], Segment(marker: 0, bytes: Data([0x00, 0x42]))] + segments.dropFirst(),
+                                  tail: original[sos...])
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: stray, xmp: good, keywords: ["k"]), "stray bytes")
+
+        var app13 = [UInt8](RichJPEG.app13(thumbnail: [1, 2]).bytes.dropFirst(4))
+        app13[24] = 0x7F   // the first resource's size runs past the segment
+        let badIRB = Self.assemble(segments + [Self.segment(0xED, Data(app13))], tail: original[sos...])
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: badIRB, xmp: good, keywords: ["k"]), "malformed APP13")
+
+        var badMPF = Self.withMPF(original, second: Self.imageIOJPEG(width: 16, height: 16))
+        let mpf = try XCTUnwrap(MPFTestReader(badMPF))
+        mpf.setField(&badMPF, at: mpf.entries[1].sizeAt, to: 1 << 30)   // the preview runs past the end
+        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: badMPF, xmp: good, keywords: ["k"]), "MPF")
+
+        // No longer refused: an XMP segment after the MPF one (the preview's offset is patched), and extended XMP.
+        let xmpPayload = Data("http://ns.adobe.com/xap/1.0/".utf8) + Data([0]) + Data("""
+            <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
+            <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"/></rdf:RDF></x:xmpmeta>
+            """.utf8)
+        let preview = Self.imageIOJPEG(width: 16, height: 16)
+        let xmpAfterMPF = Self.withMPF(original, second: preview, xmpAfterMPF: xmpPayload)
+        let spliced = try XCTUnwrap(MetadataService.spliceJPEGMetadata(original: xmpAfterMPF, xmp: good, keywords: ["k"]))
+        XCTAssertEqual(spliced[try XCTUnwrap(Self.mpfSecondImage(spliced))], preview)
         let extended = Self.segment(0xE1, Data("http://ns.adobe.com/xmp/extension/".utf8) + Data([0]) + Data(repeating: 0x41, count: 80))
         let withExtended = Self.assemble(segments + [extended], tail: original[sos...])
-        XCTAssertNil(MetadataService.spliceJPEGMetadata(original: withExtended, xmp: good, keywords: ["k"]))
+        let splicedExtended = try XCTUnwrap(MetadataService.spliceJPEGMetadata(original: withExtended, xmp: good, keywords: ["k"]))
+        XCTAssertTrue(Self.header(splicedExtended).segments.contains(extended), "the extension is kept byte for byte")
     }
 }

@@ -88,6 +88,27 @@ final class ExportMetadataCompositionTests: XCTestCase {
                        "the density is kept, the thumbnail goes")
     }
 
+    /// Fill bytes between a source's header segments (legal, ITU T.81 B.1.1.2) don't stop an export (they did before
+    /// post-wave-3 task D): every APPn and COM segment is carried over as from the same file without them; the fill
+    /// bytes, which hold no metadata, aren't.
+    func testASourceWithFillBytesIsCarriedOver() throws {
+        let rich = try RichJPEG.make()
+        let (segments, sos) = T.header(rich.data)
+        var padded = Data([0xFF, 0xD8])
+        for segment in segments { padded += Data([0xFF, 0xFF]) + segment.bytes }
+        padded += Data([0xFF]) + rich.data[sos...]
+        let new = try encoded()
+
+        let output = try XCTUnwrap(ExportMetadata.jpeg(encoded: new, metadataFrom: try write(padded, "fill.jpg")))
+
+        let plain = try XCTUnwrap(ExportMetadata.jpeg(encoded: new, metadataFrom: try write(rich.data, "plain.jpg")))
+        XCTAssertEqual(output, plain, "the same export as from the file without fill bytes")
+        KeptMetadata.assertKeeps(original: rich.data, output: output, pixelSize: CGSize(width: 160, height: 240),
+                                 rating: 2, keywords: ["old", "older"], readBack: nil)
+        XCTAssertNotNil(JPEGStructure.header(output).map { $0.segments.filter { $0.kind == .fill } }?.isEmpty == true ? 1 : nil,
+                        "no fill bytes in the export")
+    }
+
     // MARK: - Exif patch
 
     func testAThumbnailInsideTheMakerNoteIsUnlinkedButNotZeroed() throws {
