@@ -187,6 +187,20 @@ final class MetadataJPEGLayoutTests: XCTestCase {
         try assertRatingWrite(original, "twoapp13.jpg", xmp: .updated(partIndex: 1, textual: true), iptcChanges: false)
     }
 
+    /// With the keywords in the XMP only, clearing them writes an empty `dc:subject`: with none at all, readers (MWG
+    /// 2.0, ImageIO) would fall back to the IPTC-IIM keywords the APP13 still holds.
+    func testClearingKeywordsWithTheKeywordsInTheXMPOnlyWinsOverTheIPTCKeywords() throws {
+        let p = try RichPieces.make()
+        let (first, second) = RichPieces.splitAPP13()
+        let original = JPEGLayout.build([
+            .bytes(p.exif), .bytes(RichPieces.xmpSegment(RichPieces.secondPacket)), .bytes(first), .bytes(second), .bytes(p.com),
+        ] + p.codec.map { .bytes($0) }, tail: p.tail)
+        XCTAssertEqual(fileXMP(original)["dc:subject[1]"], "old", "fixture: the IIM keywords show through")
+
+        try assertRatingWrite(original, "clear.jpg", xmp: .updated(partIndex: 1, textual: true), iptcChanges: false,
+                              keywords: [])
+    }
+
     // MARK: - Case 5: XMP packets ImageIO can't parse or can't rewrite
 
     /// A packet ImageIO would change on a rewrite (it drops qualifiers, empty values, `rdf:nodeID`, datatypes and
