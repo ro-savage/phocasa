@@ -171,7 +171,7 @@ struct PhotoDetailView: View {
                 .frame(width: 300, height: 400)
         }
         // The choices depend on the session and the files' bytes (`EditSession.presentExportOptions()`); replacing a
-        // file asks again, with what it does, in `exportConfirmation`.
+        // file asks again, with what it does (`EditSession.pendingExportConfirmation`, the alert above).
         .confirmationDialog("Export \(session?.fileKind ?? "") Edit", isPresented: Binding(
             get: { showExportOptions },
             set: { viewModel.editSession?.showExportOptions = $0 }
