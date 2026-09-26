@@ -127,6 +127,12 @@ struct RichTIFF {
         var mirroredIPTC = false
         /// Extra Photoshop resources, before the custom one.
         var extraResources: [UInt8] = []
+        /// 34377 holds an IPTC resource (without one, its digest is 33723's).
+        var photoshopIPTC = true
+        /// The digest resource's data, in place of the MD5 of the IPTC.
+        var digest: [UInt8]? = nil
+        /// An empty GPS IFD (no entries).
+        var emptyGPS = false
         var extraIFD0: (TIFFWriter) -> [TIFFEntry] = { _ in [] }
     }
 
@@ -177,8 +183,9 @@ struct RichTIFF {
         var iim33723 = o.iim + [UInt8](repeating: 0, count: o.iptcSlack)
         iim33723 += [UInt8](repeating: 0, count: (4 - iim33723.count % 4) % 4)
         let iim0404 = o.mirroredIPTC ? iim33723 : o.iim + [UInt8](repeating: 0, count: o.photoshopIPTCSlack)
+        let digest = o.digest ?? Array(Insecure.MD5.hash(data: Data(o.photoshopIPTC ? iim0404 : iim33723)))
         let irb = IRBTestData.block(0x03ED, RichJPEG.resolutionResource) + IRBTestData.block(0x040A, [1])
-            + IRBTestData.block(0x0404, iim0404) + IRBTestData.block(0x0425, Array(Insecure.MD5.hash(data: Data(iim0404))))
+            + (o.photoshopIPTC ? IRBTestData.block(0x0404, iim0404) : []) + IRBTestData.block(0x0425, digest)
             + o.extraResources + IRBTestData.block(0x2710, RichJPEG.customResource)
         let icc = [UInt8](CGColorSpace(name: CGColorSpace.adobeRGB1998)!.copyICCData()! as Data)
 
@@ -212,7 +219,7 @@ struct RichTIFF {
         w.patch32(at: ifd0.valueFields[0x8769]!, exif.offset)
         let interop = w.appendIFD([w.ascii(0x0001, "R03"), w.undefined(0x0002, Array("0100".utf8))])
         w.patch32(at: exif.valueFields[0xA005]!, interop.offset)
-        let gps = w.appendIFD([
+        let gps = w.appendIFD(o.emptyGPS ? [] : [
             w.byte(0x0000, 2, 3, 0, 0), w.ascii(0x0001, "N"), w.rational(0x0002, (48, 1), (51, 1), (2436, 100)),
             w.ascii(0x0003, "E"), w.rational(0x0004, (2, 1), (21, 1), (360, 100)), w.rational(0x0006, (35, 1)),
         ])
@@ -522,7 +529,7 @@ final class TIFFMetadataTests: XCTestCase {
 
     func testAPacketThatGrowsIsAppendedWithACopyOfIFD0() throws {
         for bigEndian in [false, true] {
-            let original = RichTIFF.make(.init(bigEndian: bigEndian, iptcSlack: 256, photoshopIPTCSlack: 256)).data
+            let original = RichTIFF.make(.init(bigEndian: bigEndian, iptcSlack: 1024, photoshopIPTCSlack: 1024)).data
             let keywords = (1...12).map { "place:somewhere far away \($0)" }
             let (url, output) = try writeThroughFile(original, rating: 5, keywords: keywords)
 
@@ -639,6 +646,29 @@ final class TIFFMetadataTests: XCTestCase {
         XCTAssertEqual(digest, Data(Insecure.MD5.hash(data: after.ifd0Value(33723)!.data)), "still 33723's digest")
     }
 
+    func testADigestOf33723WithoutAnIPTCResourceFollows33723() throws {
+        let original = RichTIFF.make(.init(xmp: RichTIFF.otherAppXMP(padding: 2048), iptcSlack: 64, photoshopIPTC: false)).data
+        let before = TIFFTestWalker(original)!
+        XCTAssertEqual(Self.resources(before.ifd0Value(34377)!.data).first { $0.id == 0x0425 }?.data,
+                       Data(Insecure.MD5.hash(data: before.ifd0Value(33723)!.data)), "fixture: the digest is 33723's")
+        let output = try XCTUnwrap(Self.written(original, rating: 2, keywords: ["x", "y"]))
+        let after = TIFFTestWalker(output)!
+        XCTAssertEqual(Self.resources(after.ifd0Value(34377)!.data).first { $0.id == 0x0425 }?.data,
+                       Data(Insecure.MD5.hash(data: after.ifd0Value(33723)!.data)), "still 33723's digest")
+        XCTAssertEqual(output.count, original.count, "in place")
+        assertKeeps(original: original, output: output, changeable: ranges(original, [700, 33723, 34377]),
+                    rating: 2, keywords: ["x", "y"])
+    }
+
+    func testAStaleDigestIsLeftAloneWhileTheKeywordsDontChange() throws {
+        let original = RichTIFF.make(.init(xmp: RichTIFF.otherAppXMP(padding: 2048), digest: [UInt8](repeating: 0xAB, count: 16))).data
+        let output = try XCTUnwrap(Self.written(original, rating: 5, keywords: ["old", "older"]))
+        XCTAssertEqual(output.count, original.count)
+        let xmp = TIFFTestWalker(original)!.ifd0Value(700)!.range
+        XCTAssertEqual(output[..<xmp.lowerBound], original[..<xmp.lowerBound], "only the XMP changed")
+        XCTAssertEqual(output[xmp.upperBound...], original[xmp.upperBound...], "only the XMP changed")
+    }
+
     func testIPTCOnlyInPhotoshopResourcesIsPatchedThere() throws {
         let original = RichTIFF.make(.init(xmp: RichTIFF.otherAppXMP(padding: 2048), iptc: false)).data
         let (_, output) = try writeThroughFile(original, rating: 3, keywords: ["only", "photoshop", "resources"])
@@ -683,7 +713,9 @@ final class TIFFMetadataTests: XCTestCase {
             }
             XCTAssertEqual(current.count, settled, "cycling doesn't grow the file")
 
-            // Adding keywords one at a time appends rarely: the appended values are padded for growth.
+            // Adding keywords one at a time appends rarely: each appended value has room to grow by half (at least
+            // 2 KB of XMP, 256 B of IPTC), so capacities grow geometrically, and everything appended adds up to at most
+            // 3× the final capacities, plus one IFD0 copy per append.
             var oneByOne = original
             var appends = 0
             for n in 1...60 {
@@ -691,8 +723,12 @@ final class TIFFMetadataTests: XCTestCase {
                 oneByOne = try XCTUnwrap(Self.written(oneByOne, rating: 3, keywords: (1...n).map { "tag \($0) of many" }))
                 if oneByOne.count != size { appends += 1 }
             }
-            XCTAssertLessThanOrEqual(appends, 6, "appends grow geometrically")
-            XCTAssertLessThan(oneByOne.count - original.count, 16 * 1024, "bounded growth for 60 keywords")
+            let walker = TIFFTestWalker(oneByOne)!
+            let capacities = [700, 33723, 34377].compactMap { walker.ifd0Value($0)?.range.count }.reduce(0, +)
+            let ifd0Size = 2 + 12 * walker.entries(walker.ifd0).count + 4
+            XCTAssertLessThanOrEqual(appends, 8, "appends are rare")
+            XCTAssertLessThanOrEqual(oneByOne.count - original.count, 3 * capacities + appends * (ifd0Size + 3 * 4),
+                                     "bounded growth for 60 keywords")
             print("TIFF growth (\(bigEndian ? "MM" : "II")): steps \(current.count - original.count) B, 60 keywords one by one \(oneByOne.count - original.count) B in \(appends) appends, IFD0 offsets \(ifd0Offsets.count)")
         }
     }
@@ -787,6 +823,25 @@ final class TIFFMetadataTests: XCTestCase {
                        "the second page links back to the first")
         let exifPointer = walker.entry(34665, in: walker.ifd0)!
         XCTAssertEqual(refusal(rewrite(patched32(exifPointer.position + 8, walker.ifd0))), .ifdLoop, "Exif points at IFD0")
+    }
+
+    func testAnEmptySubIFDIsFine() throws {
+        let original = RichTIFF.make(.init(xmp: RichTIFF.otherAppXMP(padding: 2048), iptcSlack: 64, photoshopIPTCSlack: 64,
+                                           emptyGPS: true)).data
+        let output = try XCTUnwrap(Self.written(original, rating: 1, keywords: ["k"]))
+        XCTAssertEqual(output.count, original.count)
+    }
+
+    func testLastResortMalformedIFDs() {
+        XCTAssertEqual(refusal(rewrite(Data([0x49, 0x49, 0x2A, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]))), .malformedIFD,
+                       "an IFD0 without entries")
+        let oldJPEG = RichTIFF.make(.init(extraIFD0: { w in [w.long(0x0201, 8)] })).data
+        XCTAssertEqual(refusal(rewrite(oldJPEG)), .malformedIFD, "a JPEG offset without its length")
+        var shortPointer = RichTIFF.make().data
+        let walker = TIFFTestWalker(shortPointer)!
+        let subIFDs = walker.entry(330, in: walker.ifd0)!
+        shortPointer.replaceSubrange((subIFDs.position + 2)..<(subIFDs.position + 4), with: walker.le ? [3, 0] : [0, 3])
+        XCTAssertEqual(refusal(rewrite(shortPointer)), .malformedIFD, "a SubIFD pointer as SHORT")
     }
 
     func testLastResortUnknownFieldType() {
