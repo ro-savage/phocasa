@@ -524,6 +524,26 @@ final class PNGMetadataTests: XCTestCase {
         assertKeepsEverything(original: rich.data, output: output)
     }
 
+    func testAnXMPChunksLanguageTagAndTranslatedKeywordAreKept() throws {
+        // Unusual (XMP spec part 3 leaves both empty), but ImageIO reads it, and the chunk's header isn't Phocasa's.
+        var chunks = try richChunks()
+        chunks.insert(TestPNG.iTXt(TestPNG.xmpKeyword, Data(RichPNG.otherAppXMP.utf8), language: "en", translated: "Metadata"),
+                      at: 2)
+        let original = TestPNG.assemble(chunks)
+        let url = try file(original)
+        XCTAssertEqual(MetadataService.shared.readMetadata(from: url.path).rating, 2, "fixture: ImageIO reads it")
+
+        let output = try XCTUnwrap(try writeRating(1, ["tagged"], to: url))
+
+        try assertOnlyXMPChanged(original: original, output: output)
+        let text = try XCTUnwrap(TestPNG(output)?.xmpChunks.first?.text)
+        XCTAssertEqual(text.language, "en")
+        XCTAssertEqual(text.translated, "Metadata")
+        XCTAssertEqual(text.header, TestPNG(original)?.xmpChunks.first?.text.header)
+        try assertFileReads(url, rating: 1, keywords: ["tagged"])
+        assertKeepsEverything(original: original, output: output)
+    }
+
     func testRepeatedWritesAreStableAndDontGrowTheFile() throws {
         for xmp in [RichPNG.XMP.none, .beforeImageData(compressed: false), .beforeImageData(compressed: true)] {
             let rich = try RichPNG.make(xmp: xmp)
